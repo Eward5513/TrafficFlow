@@ -1,0 +1,99 @@
+SUMO：从 map.osm.xml 生成遵守红绿灯规则的轨迹数据
+======================================================================
+
+前提：
+- 当前目录已有：map.osm.xml（Overpass 导出的 OSM XML）
+- 已安装 SUMO，命令行能找到：netconvert / sumo / sumo-gui
+- 已设置 SUMO_HOME（用于调用 tools 脚本）；若未设置，请把下面 $SUMO_HOME/... 换成你本机实际路径
+
+------------------------------------------------------------
+Step 1) OSM -> SUMO 路网（生成 net.net.xml）
+------------------------------------------------------------
+
+netconvert --osm-files map.osm.xml -o net.net.xml \
+  --geometry.remove --roundabouts.guess --ramps.guess --junctions.join \
+  --tls.guess-signals --tls.discard-simple --tls.join
+
+# 说明：
+# - netconvert：SUMO 的路网转换工具，把 OSM 转成 SUMO 可仿真的 .net.xml
+# - --osm-files map.osm.xml：输入 OSM XML
+# - -o net.net.xml：输出 SUMO 路网文件
+# - --geometry.remove：清理多余几何形状点，减少不必要的折线/异常几何
+# - --roundabouts.guess：尝试识别/推断环岛结构
+# - --ramps.guess：尝试识别/推断匝道结构（高速/快速路更相关）
+# - --junctions.join：合并非常接近的路口节点（OSM 常把一个路口拆成多个节点；合并更利于仿真）
+# - --tls.guess-signals：根据 OSM 中的信号灯信息推断路口红绿灯控制（TLS）
+# - --tls.discard-simple：丢弃过于简单/不可靠的信号灯配置，减少无效 TLS
+# - --tls.join：合并/整理相邻信号灯控制单元，生成更一致的 TLS 控制
+
+（可选验证：打开路网看是否正常、是否有红绿灯）
+sumo-gui -n net.net.xml
+
+# 说明：
+# - sumo-gui：SUMO 图形界面
+# - -n net.net.xml：加载路网（只看网，不跑车也可以）
+
+------------------------------------------------------------
+Step 2) 生成车辆需求与路由（生成 routes.rou.xml）
+------------------------------------------------------------
+
+python $SUMO_HOME/tools/randomTrips.py -n net.net.xml \
+  --begin 0 --end 3600 -p 1.0 --seed 42 \
+  --route-file routes.rou.xml
+
+# 说明：
+# - randomTrips.py：SUMO 自带工具，随机生成 trips，并自动路由生成可直接仿真的 routes 文件
+# - -n net.net.xml：基于该路网生成需求
+# - --begin 0：从仿真第 0 秒开始发车
+# - --end 3600：到第 3600 秒（1小时）停止生成新车
+# - -p 1.0：发车间隔/周期（平均每 1 秒一辆车；想更稀疏可改 2.0，想更密集可改 0.5）
+# - --seed 42：随机种子（保证可复现）
+# - --route-file routes.rou.xml：输出路由文件
+
+------------------------------------------------------------
+Step 3) 跑仿真并导出轨迹（FCD：fcd.xml）
+------------------------------------------------------------
+
+sumo -n net.net.xml -r routes.rou.xml \
+  --step-length 0.5 \
+  --fcd-output fcd_geo.xml \
+  --fcd-output.geo true \
+  --fcd-output.acceleration true
+
+# 说明：
+# - sumo：命令行仿真器（不带 GUI）
+# - -n net.net.xml：使用该路网
+# - -r routes.rou.xml：使用该需求/路由
+# - --step-length 0.5：仿真步长 0.5 秒（轨迹采样间隔；0.5=2Hz，0.1=10Hz）
+# - --fcd-output fcd.xml：输出 FCD（Floating Car Data）轨迹 XML，包含每个时间步的车辆位置/速度等
+# - --fcd-output.acceleration true：在 FCD 中额外输出加速度字段（便于后续分析）
+
+（可选：同时输出 full-output，包含红绿灯状态，便于对齐相位与过线时刻）
+sumo -n net.net.xml -r routes.rou.xml \
+  --step-length 0.5 \
+  --full-output full.xml
+
+# 说明：
+# - --full-output full.xml：输出全量仿真快照（车辆、道路、车道、以及交通灯状态等）
+#   如果你要严格验证“是否闯红灯/过停止线时相位是什么”，full.xml 很有用
+
+（可选：用 GUI 直观看是否遵守红绿灯）
+sumo-gui -n net.net.xml -r routes.rou.xml
+
+# 说明：
+# - GUI 下可以观察车辆是否在红灯前排队停车、绿灯放行
+
+------------------------------------------------------------
+Step 4) 把轨迹 XML 转 CSV（可选）
+------------------------------------------------------------
+
+python $SUMO_HOME/tools/xml/xml2csv.py fcd.xml > fcd.csv
+
+# 说明：
+# - xml2csv.py：SUMO 自带工具，把 SUMO 的 XML 输出扁平化为 CSV（便于 pandas/Excel/SQL 处理）
+# - fcd.xml：输入轨迹 XML
+# - > fcd.csv：把 CSV 输出重定向保存到文件
+
+# 将生成路网转化为geojson数据格式，与生成的轨迹保持一致
+python $SUMO_HOME/tools/net/net2geojson.py -n net.net.xml -o net_lanes_internal.geojson --lanes --internal
+
