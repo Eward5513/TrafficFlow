@@ -25,7 +25,7 @@ VIS_DIR = HERE.parent
 REPO_ROOT = VIS_DIR.parent
 
 DEFAULT_CSV = REPO_ROOT / "out" / "fcd_geo.csv"
-CESIUM_BUILD = VIS_DIR / "Cesium-1.127" / "Build" / "Cesium"
+CESIUM_BUILD = VIS_DIR / "frontend" / "Cesium-1.127" / "Build" / "Cesium"
 FRONTEND_DIR = VIS_DIR / "frontend"
 OUT_DIR = REPO_ROOT / "out"
 

@@ -6,7 +6,7 @@
     <title>TrafficFlow Vis (Cesium)</title>
 
     <!-- Cesium widgets styles -->
-    <link rel="stylesheet" href="/vis/Cesium-1.127/Build/Cesium/Widgets/widgets.css" />
+    <link rel="stylesheet" href="/cesium/Widgets/widgets.css" />
     <link rel="stylesheet" href="/frontend/styles.css" />
     <!-- Avoid noisy /favicon.ico 404 in the console -->
     <link rel="icon" href="data:," />
@@ -20,7 +20,11 @@
       <div id="cesiumContainer"></div>
     </div>
 
-    <script src="/vis/Cesium-1.127/Build/Cesium/Cesium.js"></script>
+    <!-- Ensure Cesium can locate /cesium/Workers, /cesium/Assets, /cesium/Widgets when hosted via FastAPI mounts -->
+    <script>
+      window.CESIUM_BASE_URL = "/cesium/";
+    </script>
+    <script src="/cesium/Cesium.js"></script>
     <script type="module" src="/frontend/src/main.js"></script>
   </body>
 </html>

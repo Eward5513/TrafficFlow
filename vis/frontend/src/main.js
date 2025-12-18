@@ -9,16 +9,30 @@ function setStatus(msg) {
 function createViewer() {
   Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI1YjFhYTRjZS0zYzZlLTRmN2ItOTE5NC1mMzEwYjFiZjE3NTUiLCJpZCI6MzEzNjA3LCJpYXQiOjE3NTAzMDY1MjF9.k7exedEe-OwSQ2qgC5NNIMec5tXhTiCEp6of6vdYv0o';
 
+  // BaseLayerPicker 模式下，Viewer 不会使用 imageryProvider 作为默认底图；
+  // 需要通过 ViewModel 指定可选项 + 默认选中项。
+  const osmViewModel = new Cesium.ProviderViewModel({
+    name: "OpenStreetMap",
+    tooltip: "OpenStreetMap",
+    iconUrl: Cesium.buildModuleUrl("Widgets/Images/ImageryProviders/openStreetMap.png"),
+    creationFunction: () =>
+      new Cesium.OpenStreetMapImageryProvider({
+        url: "https://tile.openstreetmap.org/",
+      }),
+  });
+
+  // 既保留 Cesium 默认的可选底图（ion 等），又把 OSM 放在最前并默认选中。
+  const imageryProviderViewModels = [osmViewModel, ...Cesium.createDefaultImageryProviderViewModels()];
+
   return new Cesium.Viewer("cesiumContainer", {
-    imageryProvider: new Cesium.OpenStreetMapImageryProvider({
-      url: "https://a.tile.openstreetmap.org/",
-    }),
+    imageryProviderViewModels,
+    selectedImageryProviderViewModel: osmViewModel,
     terrainProvider: new Cesium.EllipsoidTerrainProvider(),
     timeline: true,
     animation: true,
     shouldAnimate: false,
     sceneModePicker: false,
-    baseLayerPicker: false,
+    baseLayerPicker: true,
     geocoder: false,
     homeButton: false,
     navigationHelpButton: false,
@@ -76,6 +90,20 @@ async function main() {
   setStatus("初始化 Cesium...");
 
   const viewer = createViewer();
+
+  // Surface imagery load errors in the UI (very helpful when tiles/paths are wrong).
+  try {
+    const baseLayer = viewer.imageryLayers.get(0);
+    const provider = baseLayer && baseLayer.imageryProvider;
+    if (provider && provider.errorEvent && typeof provider.errorEvent.addEventListener === "function") {
+      provider.errorEvent.addEventListener((err) => {
+        console.error("ImageryProvider error:", err);
+        setStatus(`底图加载失败: ${err?.message || err}`);
+      });
+    }
+  } catch (e) {
+    console.warn("Failed to attach imagery error handler:", e);
+  }
 
   // Fixed view; timeline/animation UI stays visible at the bottom.
   viewer.camera.setView({
