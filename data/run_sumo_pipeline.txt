@@ -87,7 +87,7 @@ sumo-gui -n net.net.xml -r routes.rou.xml
 Step 4) 把轨迹 XML 转 CSV（可选）
 ------------------------------------------------------------
 
-python $SUMO_HOME/tools/xml/xml2csv.py fcd.xml > fcd.csv
+python $SUMO_HOME/tools/xml/xml2csv.py fcd_geo.xml > fcd_geo.csv
 
 # 说明：
 # - xml2csv.py：SUMO 自带工具，把 SUMO 的 XML 输出扁平化为 CSV（便于 pandas/Excel/SQL 处理）
@@ -95,5 +95,5 @@ python $SUMO_HOME/tools/xml/xml2csv.py fcd.xml > fcd.csv
 # - > fcd.csv：把 CSV 输出重定向保存到文件
 
 # 将生成路网转化为geojson数据格式，与生成的轨迹保持一致
-python $SUMO_HOME/tools/net/net2geojson.py -n net.net.xml -o net_lanes_internal.geojson --lanes --internal
+python $SUMO_HOME/tools/net/net2geojson.py -n net.net.xml -o roadnet.geojson --lanes --internal
 

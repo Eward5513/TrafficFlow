@@ -86,6 +86,184 @@ function addSampleDataSource(viewer) {
   return ds;
 }
 
+async function loadRoadNetwork(viewer) {
+  // Backend mounts repo `out/` as `/data` (see vis/backend/app.py).
+  // Road network GeoJSON:
+  //   /data/roadnet.geojson
+  const url = "/data/roadnet.geojson";
+  setStatus(`加载路网: ${url} ...`);
+
+  const ds = await Cesium.GeoJsonDataSource.load(url, {
+    clampToGround: true,
+  });
+
+  // Style: thin cyan lines, subtle fill if polygons exist.
+  for (const e of ds.entities.values) {
+    if (e.polyline) {
+      e.polyline.width = 2;
+      e.polyline.material = Cesium.Color.CYAN.withAlpha(0.85);
+      e.polyline.clampToGround = true;
+    }
+    if (e.polygon) {
+      e.polygon.material = Cesium.Color.CYAN.withAlpha(0.08);
+      e.polygon.outline = true;
+      e.polygon.outlineColor = Cesium.Color.CYAN.withAlpha(0.6);
+    }
+  }
+
+  ds.name = "roadnet";
+  viewer.dataSources.add(ds);
+
+  // Optional: zoom to the road network for a good first view.
+  try {
+    await viewer.zoomTo(ds);
+  } catch (_) {
+    // ignore
+  }
+
+  viewer.scene.requestRender();
+  setStatus("路网已加载。");
+  return ds;
+}
+
+async function loadFirstTrajectoriesFromCsv(viewer, opts = {}) {
+  const url = opts.url || "/data/fcd_geo.csv";
+  const maxVehicles = opts.maxVehicles || 10;
+  const maxTotalPoints = opts.maxTotalPoints || 20000;
+
+  setStatus(`加载 CSV 轨迹(前${maxVehicles}条): ${url} ...`);
+
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`CSV 请求失败: ${r.status} ${r.statusText}`);
+  if (!r.body) throw new Error("浏览器不支持流式读取 response.body");
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+
+  let buffer = "";
+  let headerParsed = false;
+  let idxId = -1, idxLon = -1, idxLat = -1;
+
+  const vehicleOrder = [];
+  const pointsByVehicle = new Map(); // id -> [lon,lat,lon,lat,...]
+  let totalPoints = 0;
+
+  const pushPoint = (vid, lon, lat) => {
+    if (!pointsByVehicle.has(vid)) pointsByVehicle.set(vid, []);
+    pointsByVehicle.get(vid).push(lon, lat);
+    totalPoints += 1;
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const s = line.trim();
+        if (!s) continue;
+
+        if (!headerParsed) {
+          // fcd_geo.csv is expected to be semicolon-separated.
+          const cols = s.split(";");
+          idxId = cols.indexOf("vehicle_id");
+          idxLon = cols.indexOf("vehicle_x");
+          idxLat = cols.indexOf("vehicle_y");
+          if (idxId < 0 || idxLon < 0 || idxLat < 0) {
+            throw new Error(`CSV 头缺少必要列: vehicle_id/vehicle_x/vehicle_y (got: ${cols.join(",")})`);
+          }
+          headerParsed = true;
+          continue;
+        }
+
+        const cols = s.split(";");
+        const vid = cols[idxId];
+        if (!vid) continue;
+
+        if (!pointsByVehicle.has(vid)) {
+          if (vehicleOrder.length >= maxVehicles) {
+            // Stop once we already got enough vehicles and we are seeing a new one.
+            await reader.cancel();
+            throw new Error("__STOP__");
+          }
+          vehicleOrder.push(vid);
+        }
+
+        const lon = Number(cols[idxLon]);
+        const lat = Number(cols[idxLat]);
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+        pushPoint(vid, lon, lat);
+
+        if (totalPoints >= maxTotalPoints) {
+          await reader.cancel();
+          throw new Error("__STOP__");
+        }
+      }
+    }
+  } catch (e) {
+    if (e && e.message === "__STOP__") {
+      // normal early stop
+    } else {
+      throw e;
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  const ds = new Cesium.CustomDataSource("csvTrajectories");
+  const palette = [
+    Cesium.Color.ORANGE,
+    Cesium.Color.LIME,
+    Cesium.Color.CYAN,
+    Cesium.Color.MAGENTA,
+    Cesium.Color.YELLOW,
+    Cesium.Color.DEEPSKYBLUE,
+    Cesium.Color.CHARTREUSE,
+    Cesium.Color.SALMON,
+    Cesium.Color.VIOLET,
+    Cesium.Color.AQUA,
+  ];
+
+  let added = 0;
+  for (let i = 0; i < vehicleOrder.length; i++) {
+    const vid = vehicleOrder[i];
+    const arr = pointsByVehicle.get(vid) || [];
+    if (arr.length < 4) continue; // need at least 2 points
+
+    const positions = Cesium.Cartesian3.fromDegreesArray(arr);
+    const color = palette[i % palette.length].withAlpha(0.9);
+    ds.entities.add({
+      name: `traj:${vid}`,
+      polyline: {
+        positions,
+        width: 3,
+        material: color,
+        clampToGround: true,
+      },
+    });
+    added += 1;
+  }
+
+  viewer.dataSources.add(ds);
+  try {
+    await viewer.zoomTo(ds);
+  } catch (_) {
+    // ignore
+  }
+  viewer.scene.requestRender();
+
+  setStatus(`CSV轨迹已加载: 车辆 ${added}/${maxVehicles}, 点数 ${totalPoints}（预览）`);
+  return ds;
+}
+
 async function main() {
   setStatus("初始化 Cesium...");
 
@@ -103,6 +281,22 @@ async function main() {
     }
   } catch (e) {
     console.warn("Failed to attach imagery error handler:", e);
+  }
+
+  // Auto-load road network once the page is ready.
+  try {
+    await loadRoadNetwork(viewer);
+  } catch (e) {
+    console.error(e);
+    setStatus(`路网加载失败: ${e.message || e}`);
+  }
+
+  // Load first 10 trajectories from CSV for a quick visual check.
+  try {
+    await loadFirstTrajectoriesFromCsv(viewer, { url: "/data/fcd_geo.csv", maxVehicles: 10 });
+  } catch (e) {
+    console.error(e);
+    setStatus(`CSV轨迹加载失败: ${e.message || e}`);
   }
 
   // Fixed view; timeline/animation UI stays visible at the bottom.

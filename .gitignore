@@ -4,4 +4,9 @@ vis/frontend/Cesium-1.127
 
 vis/backend/__pycache__
 
-out/
+data/*
+
+!data/download_osm.py
+!data/generate_no_overtake_fcd.py
+!data/run_sumo_pipeline.txt
+!data/map.osm.xml

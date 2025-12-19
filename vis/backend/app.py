@@ -24,10 +24,11 @@ HERE = Path(__file__).resolve().parent
 VIS_DIR = HERE.parent
 REPO_ROOT = VIS_DIR.parent
 
-DEFAULT_CSV = REPO_ROOT / "out" / "fcd_geo.csv"
+# Prefer repo `data/` as the default location (this repo stores generated artifacts there).
+DATA_DIR = REPO_ROOT / "data"
+DEFAULT_CSV = DATA_DIR / "fcd_geo.csv"
 CESIUM_BUILD = VIS_DIR / "frontend" / "Cesium-1.127" / "Build" / "Cesium"
 FRONTEND_DIR = VIS_DIR / "frontend"
-OUT_DIR = REPO_ROOT / "out"
 
 
 def _parse_bbox(bbox: Optional[str]) -> Optional[list[float]]:
@@ -142,10 +143,10 @@ def create_app() -> FastAPI:
     if FRONTEND_DIR.exists():
         app.mount("/frontend", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend")
 
-    # Serve repo `out/` as static files so the frontend can load data directly (no API call).
-    # Example: /data/net_lanes_internal.geojson
-    if OUT_DIR.exists():
-        app.mount("/data", StaticFiles(directory=str(OUT_DIR)), name="data")
+    # Serve repo `data/` as static files so the frontend can load data directly (no API call).
+    # Example: /data/roadnet.geojson
+    if DATA_DIR.exists():
+        app.mount("/data", StaticFiles(directory=str(DATA_DIR)), name="data")
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> FileResponse:
