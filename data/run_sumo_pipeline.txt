@@ -14,6 +14,26 @@ netconvert --osm-files map.osm.xml -o net.net.xml \
   --geometry.remove --roundabouts.guess --ramps.guess --junctions.join \
   --tls.guess-signals --tls.discard-simple --tls.join
 
+netconvert --osm-files map.osm.xml -o net.net.xml \
+  --geometry.remove --roundabouts.guess --ramps.guess \
+  --tls.guess-signals
+
+netconvert --osm-files basemap.osm.xml -o basenet.net.xml \
+--roundabouts.guess --ramps.guess \
+--junctions.join --junctions.join-dist 5 \
+--tls.guess-signals
+
+netconvert --osm map.osm.xml \
+  -o net_tls1.net.xml \
+  --tls.guess-signals true \
+  --tls.join true \
+  --tls.join-dist 30 \
+  --tls.layout opposites \
+  --tls.cycle.time 90 \
+  --tls.yellow.time 4 \
+  --junctions.join --junctions.join-dist 6 \
+  --roundabouts.guess false
+
 # 说明：
 # - netconvert：SUMO 的路网转换工具，把 OSM 转成 SUMO 可仿真的 .net.xml
 # - --osm-files map.osm.xml：输入 OSM XML
@@ -34,12 +54,35 @@ sumo-gui -n net.net.xml
 # - -n net.net.xml：加载路网（只看网，不跑车也可以）
 
 ------------------------------------------------------------
-Step 2) 生成车辆需求与路由（生成 routes.rou.xml）
+Step 2) 生成车辆需求与路由（生成 routes.rou.xml）(每辆车计划的路段序列)
 ------------------------------------------------------------
 
-python $SUMO_HOME/tools/randomTrips.py -n net.net.xml \
+python3 $SUMO_HOME/tools/randomTrips.py -n basenet1.net.xml \
   --begin 0 --end 3600 -p 1.0 --seed 42 \
-  --route-file routes.rou.xml
+  --route-file routes1.rou.xml
+
+// 72000 veh/h
+--begin 0 --end 3600 -p 0.05 \
+--fringe-factor 4 \
+--min-distance 4000 \
+
+// 100000 veh/h
+--begin 0 --end 3600 -p 0.036 \
+--fringe-factor 4 \
+--min-distance 4000 \
+
+// 120000 veh/h
+--begin 0 --end 3600 -p 0.03 \
+--fringe-factor 5
+--min-distance 5000
+
+python3 $SUMO_HOME/tools/randomTrips.py -n net_tls1.net.xml \
+--begin 0 --end 3600 -p 0.05 --seed 42 \
+--validate \
+--vehicle-class passenger \
+--fringe-factor 4 \
+--min-distance 4000 \
+--route-file routes_tls_72000.rou.xml
 
 # 说明：
 # - randomTrips.py：SUMO 自带工具，随机生成 trips，并自动路由生成可直接仿真的 routes 文件
@@ -50,11 +93,24 @@ python $SUMO_HOME/tools/randomTrips.py -n net.net.xml \
 # - --seed 42：随机种子（保证可复现）
 # - --route-file routes.rou.xml：输出路由文件
 
+
+sumo -n net_tls1.net.xml -r routes_tls1.rou.xml \
+  --vehroute-output vehroutes_tls1.xml \
+  --vehroute-output.exit-times \
+  --vehroute-output.write-unfinished \
+  --vehroute-output.sorted \
+  --fcd-output fcd_tls.csv \
+  --fcd-output.geo \
+  --device.fcd.period 1 \
+  --fcd-output.attributes id,lane,pos,speed,x,y \
+  --output.column-header plain \
+  --output.column-separator ,
+
 ------------------------------------------------------------
-Step 3) 跑仿真并导出轨迹（FCD：fcd.xml）
+Step 3) 跑仿真并导出轨迹（FCD：fcd.xml）（每辆车实际的路段时序序列，如果没有reoute，路段序列和计划路段序列通常一致）
 ------------------------------------------------------------
 
-sumo -n net.net.xml -r routes.rou.xml \
+sumo -n net.net.xml -r routes1.rou.xml \
   --step-length 0.5 \
   --fcd-output fcd_geo.xml \
   --fcd-output.geo true \
@@ -78,7 +134,7 @@ sumo -n net.net.xml -r routes.rou.xml \
 #   如果你要严格验证“是否闯红灯/过停止线时相位是什么”，full.xml 很有用
 
 （可选：用 GUI 直观看是否遵守红绿灯）
-sumo-gui -n net.net.xml -r routes.rou.xml
+sumo-gui -n net_tls1.net.xml -r routes_tls_72000.rou.xml
 
 # 说明：
 # - GUI 下可以观察车辆是否在红灯前排队停车、绿灯放行
