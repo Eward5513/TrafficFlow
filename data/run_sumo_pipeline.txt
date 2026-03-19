@@ -77,12 +77,12 @@ python3 $SUMO_HOME/tools/randomTrips.py -n basenet1.net.xml \
 --min-distance 5000
 
 python3 $SUMO_HOME/tools/randomTrips.py -n net_tls1.net.xml \
---begin 0 --end 3600 -p 0.05 --seed 42 \
+--begin 0 --end 3600 -p 0.5 --seed 42 \
 --validate \
 --vehicle-class passenger \
 --fringe-factor 4 \
 --min-distance 4000 \
---route-file routes_tls_72000.rou.xml
+--route-file routes_tls_7200.rou.xml
 
 # 说明：
 # - randomTrips.py：SUMO 自带工具，随机生成 trips，并自动路由生成可直接仿真的 routes 文件
@@ -94,12 +94,12 @@ python3 $SUMO_HOME/tools/randomTrips.py -n net_tls1.net.xml \
 # - --route-file routes.rou.xml：输出路由文件
 
 
-sumo -n net_tls1.net.xml -r routes_tls1.rou.xml \
-  --vehroute-output vehroutes_tls1.xml \
+sumo -n net_tls1.net.xml -r routes_tls_36000.rou.xml \
+  --vehroute-output vehroutes_tls_36000.xml \
   --vehroute-output.exit-times \
   --vehroute-output.write-unfinished \
   --vehroute-output.sorted \
-  --fcd-output fcd_tls.csv \
+  --fcd-output fcd_tls_36000.csv \
   --fcd-output.geo \
   --device.fcd.period 1 \
   --fcd-output.attributes id,lane,pos,speed,x,y \
@@ -134,7 +134,7 @@ sumo -n net.net.xml -r routes.rou.xml \
 #   如果你要严格验证“是否闯红灯/过停止线时相位是什么”，full.xml 很有用
 
 （可选：用 GUI 直观看是否遵守红绿灯）
-sumo-gui -n net_tls1.net.xml -r routes_tls_72000.rou.xml
+sumo-gui -n net_tls1.net.xml -r routes_tls_36000.rou.xml
 
 # 说明：
 # - GUI 下可以观察车辆是否在红灯前排队停车、绿灯放行

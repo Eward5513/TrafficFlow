@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Optional
 import xml.etree.ElementTree as ET
+
+HMS_TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 
 
 def local_name(tag: str) -> str:
@@ -24,7 +27,7 @@ def simplify_edge_id(edge_id: str) -> str:
     return token.split("#", 1)[0]
 
 
-def count_edges(xml_path: Path, simplify: bool) -> tuple[Counter[str], int, int]:
+def count_edges_from_rou_xml(xml_path: Path, simplify: bool) -> tuple[Counter[str], int, int]:
     edge_counter: Counter[str] = Counter()
     vehicle_count = 0
     route_count = 0
@@ -49,6 +52,60 @@ def count_edges(xml_path: Path, simplify: bool) -> tuple[Counter[str], int, int]
         elem.clear()
 
     return edge_counter, vehicle_count, route_count
+
+
+def count_edges_from_route_by_edge_txt(txt_path: Path) -> tuple[Counter[str], int, int]:
+    edge_counter: Counter[str] = Counter()
+    vehicle_count = 0
+    route_count = 0
+
+    # Format per line:
+    # vin hh:mm:ss edge_id hh:mm:ss edge_id ...
+    for raw_line in txt_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = line.split()
+        if not parts:
+            continue
+
+        vehicle_count += 1
+        seen_edge_in_route = False
+
+        # Skip the first token (vin), parse remaining in [time, edge_id] pairs.
+        idx = 1
+        while idx + 1 < len(parts):
+            time_token = parts[idx]
+            edge_token = parts[idx + 1]
+            idx += 2
+
+            if not HMS_TIME_RE.match(time_token):
+                continue
+
+            # route_by_edge.txt keeps original edge ids, no simplify.
+            edge_id = edge_token
+            if edge_id:
+                edge_counter[edge_id] += 1
+                seen_edge_in_route = True
+
+        if seen_edge_in_route:
+            route_count += 1
+
+    return edge_counter, vehicle_count, route_count
+
+
+def count_edges(input_path: Path, simplify: bool) -> tuple[Counter[str], int, int]:
+    if input_path.suffix.lower() == ".xml":
+        return count_edges_from_rou_xml(input_path, simplify=simplify)
+
+    if input_path.suffix.lower() == ".txt":
+        return count_edges_from_route_by_edge_txt(input_path)
+
+    raise ValueError(
+        f"Unsupported input format: {input_path}. "
+        "Only .rou.xml and route_by_edge-style .txt are supported."
+    )
 
 
 def write_outputs(
@@ -113,13 +170,13 @@ def parse_args() -> argparse.Namespace:
     default_output = Path(__file__).resolve().parent / "edge_frequency_top.json"
 
     parser = argparse.ArgumentParser(
-        description="Count most frequent edge ids in a SUMO .rou.xml file."
+        description="Count most frequent edge ids from SUMO .rou.xml or route_by_edge.txt."
     )
     parser.add_argument(
         "--input",
         type=Path,
         default=default_input,
-        help=f"Input .rou.xml path (default: {default_input})",
+        help=f"Input path (.rou.xml or route_by_edge.txt format, default: {default_input})",
     )
     parser.add_argument(
         "--output",

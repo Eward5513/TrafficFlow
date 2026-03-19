@@ -134,20 +134,14 @@
     const gap = 12;
     const margin = 12;
     const statsRect = statsPanelEl.getBoundingClientRect();
-    const startEndRect = startEndPanelEl.getBoundingClientRect();
 
     const statsX = Math.max(margin, window.innerWidth - statsRect.width - margin);
     const statsY = margin;
     setPanelPosition(statsPanelEl, statsX, statsY);
 
-    let startEndX = statsX - gap - startEndRect.width;
-    let startEndY = statsY;
-
-    // Fallback to stacked layout when viewport is too narrow.
-    if (startEndX < margin) {
-      startEndX = statsX;
-      startEndY = statsY + statsRect.height + gap;
-    }
+    // Keep the second panel in a vertical stack by default.
+    const startEndX = statsX;
+    const startEndY = statsY + statsRect.height + gap;
     setPanelPosition(startEndPanelEl, startEndX, startEndY);
     bringPanelToFront(startEndPanelEl);
     bringPanelToFront(statsPanelEl);
@@ -895,12 +889,12 @@
 
   makePanelDraggable(statsPanelEl, statsPanelHeaderEl);
   makePanelDraggable(startEndPanelEl, startEndPanelHeaderEl);
-  applyDefaultPanelLayout();
 
-  setPanelCollapsed(false);
+  setPanelCollapsed(true);
   setListCollapsed(false);
-  setStartEndPanelCollapsed(false);
+  setStartEndPanelCollapsed(true);
   setStartEndListCollapsed(false);
+  applyDefaultPanelLayout();
 
   checkHealth();
   loadBasemap();

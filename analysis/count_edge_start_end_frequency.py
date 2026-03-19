@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 import xml.etree.ElementTree as ET
+
+HMS_TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 
 
 def local_name(tag: str) -> str:
@@ -29,7 +32,7 @@ def _normalize_edge(edge_id: str, simplify: bool) -> str:
     return edge_id.strip()
 
 
-def count_start_end_edges(
+def count_start_end_edges_from_rou_xml(
     xml_path: Path, simplify: bool
 ) -> tuple[Counter[str], Counter[str], Counter[str], int, int]:
     start_counter: Counter[str] = Counter()
@@ -65,6 +68,73 @@ def count_start_end_edges(
         elem.clear()
 
     return start_counter, end_counter, start_or_end_counter, vehicle_count, route_count
+
+
+def count_start_end_edges_from_route_by_edge_txt(
+    txt_path: Path,
+) -> tuple[Counter[str], Counter[str], Counter[str], int, int]:
+    start_counter: Counter[str] = Counter()
+    end_counter: Counter[str] = Counter()
+    start_or_end_counter: Counter[str] = Counter()
+    vehicle_count = 0
+    route_count = 0
+
+    # Format per line:
+    # vin hh:mm:ss edge_id hh:mm:ss edge_id ...
+    for raw_line in txt_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = line.split()
+        if not parts:
+            continue
+
+        vehicle_count += 1
+        route_edges: list[str] = []
+
+        # Skip the first token (vin), parse remaining in [time, edge_id] pairs.
+        idx = 1
+        while idx + 1 < len(parts):
+            time_token = parts[idx]
+            edge_token = parts[idx + 1].strip()
+            idx += 2
+
+            if not HMS_TIME_RE.match(time_token):
+                continue
+            if edge_token:
+                # route_by_edge.txt keeps original edge ids, no simplify.
+                route_edges.append(edge_token)
+
+        if not route_edges:
+            continue
+
+        route_count += 1
+        start_edge = route_edges[0]
+        end_edge = route_edges[-1]
+
+        start_counter[start_edge] += 1
+        end_counter[end_edge] += 1
+        # B 口径：起点或终点按角色累计，同边可重复计数
+        start_or_end_counter[start_edge] += 1
+        start_or_end_counter[end_edge] += 1
+
+    return start_counter, end_counter, start_or_end_counter, vehicle_count, route_count
+
+
+def count_start_end_edges(
+    input_path: Path, simplify: bool
+) -> tuple[Counter[str], Counter[str], Counter[str], int, int]:
+    if input_path.suffix.lower() == ".xml":
+        return count_start_end_edges_from_rou_xml(input_path, simplify=simplify)
+
+    if input_path.suffix.lower() == ".txt":
+        return count_start_end_edges_from_route_by_edge_txt(input_path)
+
+    raise ValueError(
+        f"Unsupported input format: {input_path}. "
+        "Only .rou.xml and route_by_edge-style .txt are supported."
+    )
 
 
 def build_group_result(counter: Counter[str], top_k: int) -> dict:
@@ -153,13 +223,13 @@ def parse_args() -> argparse.Namespace:
     default_output = Path(__file__).resolve().parent / "edge_start_end_frequency_top.json"
 
     parser = argparse.ArgumentParser(
-        description="Count start/end edge distributions in a SUMO .rou.xml file."
+        description="Count start/end edge distributions from SUMO .rou.xml or route_by_edge.txt."
     )
     parser.add_argument(
         "--input",
         type=Path,
         default=default_input,
-        help=f"Input .rou.xml path (default: {default_input})",
+        help=f"Input path (.rou.xml or route_by_edge.txt format, default: {default_input})",
     )
     parser.add_argument(
         "--output",
@@ -194,6 +264,7 @@ def main() -> None:
     args = parse_args()
     input_path = args.input.resolve()
     output_path = args.output.resolve()
+    simplify_applied = args.simplify if input_path.suffix.lower() == ".xml" else False
 
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -211,7 +282,7 @@ def main() -> None:
     write_outputs(
         output_json=output_path,
         source_xml=input_path,
-        simplify=args.simplify,
+        simplify=simplify_applied,
         vehicle_count=vehicle_count,
         route_count=route_count,
         start_result=start_result,

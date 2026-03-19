@@ -10,3 +10,9 @@ data/*
 !data/generate_no_overtake_fcd.py
 !data/run_sumo_pipeline.txt
 !data/map.osm.xml
+
+analysis/ocr_output/*
+analysis/snapshoot/*
+analysis/snapshoot_all/*
+analysis/*.json
+analysis/*.txt
