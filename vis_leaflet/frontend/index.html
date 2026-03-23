@@ -83,12 +83,39 @@
           <div id="startEndList" class="stats-list"></div>
         </div>
       </div>
+      <div id="vinPanel" class="right-panel tertiary-panel">
+        <div class="panel-header">
+          <div class="panel-title">VIN 轨迹查询</div>
+          <button id="toggleVinPanelBtn" type="button" class="collapse-btn">收起</button>
+        </div>
+        <div id="vinPanelBody" class="panel-body">
+          <div class="line panel-hint">支持合并/不合并轨迹查询，并展示时间戳</div>
+          <div class="controls">
+            <input id="vinInput" type="text" placeholder="输入 VIN，例如 1" />
+            <button id="drawVinBtn" type="button">绘制轨迹</button>
+            <button id="nextVinRouteBtn" type="button">下一条</button>
+            <button id="clearVinBtn" type="button">清除</button>
+          </div>
+          <div class="line">
+            <label class="toggle">
+              <input id="vinMergeToggle" type="checkbox" checked />
+              合并轨迹（route_by_edge.txt）
+            </label>
+          </div>
+          <div id="vinStatus" class="line">VIN 轨迹：未绘制</div>
+          <div class="stats-list-header vin-data-header">
+            <span>轨迹明细（时间戳 + 边ID）</span>
+          </div>
+          <div id="vinRouteDataList" class="vin-route-list"></div>
+        </div>
+      </div>
     </div>
 
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
       crossorigin=""
     ></script>
+    <script src="/frontend/vin-route.js"></script>
     <script src="/frontend/main.js"></script>
   </body>
 </html>

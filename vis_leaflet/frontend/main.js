@@ -3,6 +3,13 @@
 (function bootstrap() {
   const healthEl = document.getElementById("health");
   const dataEl = document.getElementById("data");
+  const vinInputEl = document.getElementById("vinInput");
+  const drawVinBtnEl = document.getElementById("drawVinBtn");
+  const nextVinRouteBtnEl = document.getElementById("nextVinRouteBtn");
+  const clearVinBtnEl = document.getElementById("clearVinBtn");
+  const vinMergeToggleEl = document.getElementById("vinMergeToggle");
+  const vinStatusEl = document.getElementById("vinStatus");
+  const vinRouteDataListEl = document.getElementById("vinRouteDataList");
   const statsMetaEl = document.getElementById("statsMeta");
   const statsSummaryEl = document.getElementById("statsSummary");
   const statsListEl = document.getElementById("statsList");
@@ -25,6 +32,9 @@
   const startEndPanelHeaderEl = startEndPanelEl ? startEndPanelEl.querySelector(".panel-header") : null;
   const toggleStartEndPanelBtnEl = document.getElementById("toggleStartEndPanelBtn");
   const toggleStartEndListBtnEl = document.getElementById("toggleStartEndListBtn");
+  const vinPanelEl = document.getElementById("vinPanel");
+  const vinPanelHeaderEl = vinPanelEl ? vinPanelEl.querySelector(".panel-header") : null;
+  const toggleVinPanelBtnEl = document.getElementById("toggleVinPanelBtn");
   const START_END_HIGHLIGHT_COLOR = "rgb(139, 0, 0)";
 
   const state = {
@@ -42,6 +52,7 @@
     maxHighlightCount: 1,
     panelCollapsed: false,
     listCollapsed: false,
+    vinPanelCollapsed: false,
     startEndPanelCollapsed: false,
     startEndListCollapsed: false,
     startEndStatsPayload: null,
@@ -49,17 +60,37 @@
     startEndCurrentType: "start",
     startEndRawTopEdges: [],
     startEndEdgeCountByBaseId: new Map(),
-    startEndMinHighlightCount: 0,
-    startEndMaxHighlightCount: 1,
     startEndHighlightLayer: null,
     startEndHighlightFeatureCount: 0,
     startEndHighlightVisible: true,
+    vinRouteLayer: null,
+    vinStartEndLayer: null,
+    vinQuery: "",
+    vinRoutes: [],
+    vinRouteCursor: 0,
+    vinSourceFile: "-",
+    vinMergeEnabled: true,
     panelZSeed: 1100,
   };
 
   function setText(el, text) {
     if (el) {
       el.textContent = text;
+    }
+  }
+
+  function bringLayerToFront(layer) {
+    if (!layer) {
+      return;
+    }
+    if (typeof layer.bringToFront === "function") {
+      layer.bringToFront();
+      return;
+    }
+    if (typeof layer.eachLayer === "function") {
+      layer.eachLayer((child) => {
+        bringLayerToFront(child);
+      });
     }
   }
 
@@ -127,7 +158,7 @@
   }
 
   function applyDefaultPanelLayout() {
-    if (!statsPanelEl || !startEndPanelEl) {
+    if (!statsPanelEl || !startEndPanelEl || !vinPanelEl) {
       return;
     }
 
@@ -143,6 +174,11 @@
     const startEndX = statsX;
     const startEndY = statsY + statsRect.height + gap;
     setPanelPosition(startEndPanelEl, startEndX, startEndY);
+    const startEndRect = startEndPanelEl.getBoundingClientRect();
+    const vinX = statsX;
+    const vinY = startEndY + startEndRect.height + gap;
+    setPanelPosition(vinPanelEl, vinX, vinY);
+    bringPanelToFront(vinPanelEl);
     bringPanelToFront(startEndPanelEl);
     bringPanelToFront(statsPanelEl);
   }
@@ -201,20 +237,12 @@
     return clamp01((Math.log1p(c) - Math.log1p(minC)) / denom);
   }
 
-  function getCountRatio(count) {
-    return getCountRatioByRange(count, state.minHighlightCount, state.maxHighlightCount);
-  }
-
   function getCountColorByRange(count, minValue, maxValue) {
     // Low count -> vivid purple; high count -> deep purple.
     // Keep the whole range highlighted while still encoding count differences.
     const light = [170, 82, 255];
     const dark = [70, 16, 130];
     return toRgbString(interpolateRgb(light, dark, getCountRatioByRange(count, minValue, maxValue)));
-  }
-
-  function getCountColor(count) {
-    return getCountColorByRange(count, state.minHighlightCount, state.maxHighlightCount);
   }
 
   function getFeatureBaseId(feature) {
@@ -239,9 +267,9 @@
       return { color: "rgba(0,0,0,0)", weight: 0, opacity: 0 };
     }
 
-    const ratio = getCountRatio(match.count);
+    const ratio = getCountRatioByRange(match.count, state.minHighlightCount, state.maxHighlightCount);
     return {
-      color: getCountColor(match.count),
+      color: getCountColorByRange(match.count, state.minHighlightCount, state.maxHighlightCount),
       weight: 2 + ratio * 4,
       opacity: 1.0,
     };
@@ -272,16 +300,6 @@
 
   function countMatchedFeatures() {
     return state.highlightFeatureCount;
-  }
-
-  function refreshMapHighlight() {
-    if (!state.highlightLayer) {
-      return;
-    }
-    state.highlightLayer.setStyle(getHighlightFeatureStyle);
-    state.highlightLayer.eachLayer((layer) => {
-      bindEdgePopup(layer, layer.feature);
-    });
   }
 
   function updateBasemapStatus() {
@@ -382,6 +400,16 @@
     }
     if (toggleListBtnEl) {
       toggleListBtnEl.textContent = state.listCollapsed ? "展开列表" : "收起";
+    }
+  }
+
+  function setVinPanelCollapsed(collapsed) {
+    state.vinPanelCollapsed = !!collapsed;
+    if (vinPanelEl) {
+      vinPanelEl.classList.toggle("is-collapsed", state.vinPanelCollapsed);
+    }
+    if (toggleVinPanelBtnEl) {
+      toggleVinPanelBtnEl.textContent = state.vinPanelCollapsed ? "展开" : "收起";
     }
   }
 
@@ -541,10 +569,8 @@
     const topEdges = group && Array.isArray(group.top_edges) ? group.top_edges : [];
     state.startEndRawTopEdges = topEdges;
 
-    const { mapping, maxCount, minCount } = buildEdgeMapping(topEdges);
+    const { mapping } = buildEdgeMapping(topEdges);
     state.startEndEdgeCountByBaseId = mapping;
-    state.startEndMinHighlightCount = minCount;
-    state.startEndMaxHighlightCount = maxCount;
 
     renderStartEndRows(topEdges, 200);
     rebuildStartEndHighlightLayer();
@@ -561,6 +587,17 @@
     maxZoom: 19,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(map);
+
+  const vinRouteController = createVinRouteController({
+    map,
+    state,
+    vinMergeToggleEl,
+    vinStatusEl,
+    vinRouteDataListEl,
+    nextVinRouteBtnEl,
+    setText,
+    bringLayerToFront,
+  });
 
   async function checkHealth() {
     try {
@@ -863,6 +900,39 @@
     });
   }
 
+  if (drawVinBtnEl) {
+    drawVinBtnEl.addEventListener("click", () => {
+      const vin = vinInputEl ? vinInputEl.value : "";
+      vinRouteController.draw(vin);
+    });
+  }
+
+  if (nextVinRouteBtnEl) {
+    nextVinRouteBtnEl.addEventListener("click", () => {
+      vinRouteController.next();
+    });
+  }
+
+  if (vinInputEl) {
+    vinInputEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        vinRouteController.draw(vinInputEl.value);
+      }
+    });
+  }
+
+  if (clearVinBtnEl) {
+    clearVinBtnEl.addEventListener("click", () => {
+      vinRouteController.clear();
+    });
+  }
+
+  if (vinMergeToggleEl) {
+    vinMergeToggleEl.addEventListener("change", () => {
+      vinRouteController.redrawCurrent();
+    });
+  }
+
   if (togglePanelBtnEl) {
     togglePanelBtnEl.addEventListener("click", () => {
       setPanelCollapsed(!state.panelCollapsed);
@@ -887,13 +957,21 @@
     });
   }
 
+  if (toggleVinPanelBtnEl) {
+    toggleVinPanelBtnEl.addEventListener("click", () => {
+      setVinPanelCollapsed(!state.vinPanelCollapsed);
+    });
+  }
+
   makePanelDraggable(statsPanelEl, statsPanelHeaderEl);
   makePanelDraggable(startEndPanelEl, startEndPanelHeaderEl);
+  makePanelDraggable(vinPanelEl, vinPanelHeaderEl);
 
   setPanelCollapsed(true);
   setListCollapsed(false);
   setStartEndPanelCollapsed(true);
   setStartEndListCollapsed(false);
+  setVinPanelCollapsed(true);
   applyDefaultPanelLayout();
 
   checkHealth();

@@ -7,6 +7,7 @@ from validate_ocr_summary import INT_RE, TIME_RE, is_vin_token
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT_TXT = BASE_DIR / "ocr_output" / "route_by_edge_draft4.txt"
 DEFAULT_OUTPUT_TXT = BASE_DIR / "ocr_output" / "route_by_edge.txt"
+DEFAULT_OUTPUT_NO_MERGE_TXT = BASE_DIR / "ocr_output" / "route_by_edge_no_merge.txt"
 DEFAULT_LOG_TXT = BASE_DIR / "ocr_output" / "route_by_edge_build_log.txt"
 
 
@@ -148,6 +149,46 @@ def merge_groups_by_vin(groups: list[dict]) -> list[dict]:
     return list(merged.values())
 
 
+def build_routes_no_merge(groups: list[dict]) -> tuple[list[str], list[str]]:
+    """
+    Same as build_routes but skips merging: each group becomes its own trajectory.
+    VIN order check is still performed. Log entries use a separate tag.
+    """
+    log_lines: list[str] = []
+    check_vin_order(groups, log_lines)
+
+    output_lines: list[str] = []
+    for group in groups:
+        vin = group["vin"]
+        pairs = group["pairs"]
+        line_range = (
+            f"lines {group['start_line']}-{group['end_line']}"
+            if group["start_line"] != group["end_line"]
+            else f"line {group['start_line']}"
+        )
+
+        if not pairs:
+            log_lines.append(f"[no-merge-skip] vin={vin} {line_range}")
+            log_lines.append("reason: no valid pairs found")
+            log_lines.append("")
+            continue
+
+        ok, reason = check_time_order(pairs)
+        if not ok:
+            log_lines.append(f"[no-merge-skip] vin={vin} {line_range}")
+            log_lines.append(f"reason: {reason}")
+            log_lines.append("")
+            continue
+
+        tokens = [vin]
+        for ts, edge_id in pairs:
+            tokens.append(ts)
+            tokens.append(edge_id)
+        output_lines.append(" ".join(tokens))
+
+    return output_lines, log_lines
+
+
 def build_routes(groups: list[dict]) -> tuple[list[str], list[str]]:
     log_lines: list[str] = []
 
@@ -197,38 +238,56 @@ def main() -> None:
         description="Build final route file from draft OCR output."
     )
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT_TXT, help="Input draft txt path.")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_TXT, help="Output route txt path.")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_TXT, help="Output route txt path (merged).")
+    parser.add_argument("--output-no-merge", type=Path, default=DEFAULT_OUTPUT_NO_MERGE_TXT, help="Output route txt path (no merge, one trajectory per group).")
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG_TXT, help="Log txt path.")
     args = parser.parse_args()
 
     input_path = args.input.resolve()
     output_path = args.output.resolve()
+    output_no_merge_path = args.output_no_merge.resolve()
     log_path = args.log.resolve()
 
     if not input_path.exists():
         raise FileNotFoundError(f"Input not found: {input_path}")
 
     groups = parse_file(input_path)
-    output_lines, log_lines = build_routes(groups)
-
     unique_vins = len({g["vin"] for g in groups})
     merged_count = len(groups) - unique_vins
 
+    # Merged output
+    output_lines, log_lines = build_routes(groups)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(output_lines), encoding="utf-8")
 
+    # No-merge output
+    no_merge_lines, no_merge_log_lines = build_routes_no_merge(groups)
+    output_no_merge_path.parent.mkdir(parents=True, exist_ok=True)
+    output_no_merge_path.write_text("\n".join(no_merge_lines), encoding="utf-8")
+
+    # Combined log
+    all_log: list[str] = []
+    if log_lines:
+        all_log += ["=== merged mode ===", ""] + log_lines
+    if no_merge_log_lines:
+        all_log += ["=== no-merge mode ===", ""] + no_merge_log_lines
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(
-        "\n".join(log_lines) if log_lines else "All trajectories processed successfully.",
+        "\n".join(all_log) if all_log else "All trajectories processed successfully.",
         encoding="utf-8",
     )
 
     print(f"Total trajectory groups parsed : {len(groups)}")
     print(f"Unique VINs                    : {unique_vins}")
     print(f"Merged duplicate VIN groups    : {merged_count}")
+    print(f"--- merged output ---")
     print(f"Output trajectories            : {len(output_lines)}")
     print(f"Skipped trajectories           : {unique_vins - len(output_lines)}")
-    print(f"Output : {output_path}")
+    print(f"Output                         : {output_path}")
+    print(f"--- no-merge output ---")
+    print(f"Output trajectories            : {len(no_merge_lines)}")
+    print(f"Skipped trajectories           : {len(groups) - len(no_merge_lines)}")
+    print(f"Output                         : {output_no_merge_path}")
     print(f"Log    : {log_path}")
 
 
