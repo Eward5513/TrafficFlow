@@ -9,13 +9,10 @@ data/*
 !data/download_osm.py
 !data/generate_no_overtake_fcd.py
 !data/run_sumo_pipeline.txt
-!data/map.osm.xml
+!data/basemap.osm.xml
+!data/basemap.geojson
 
-analysis/ocr_output/*
-analysis/snapshoot/*
-analysis/snapshoot_all/*
-analysis/*.json
-analysis/*.txt
-analysis/matching/*.json
-analysis/matching/*.txt
-analysis/matching/*.xml
+analysis/**
+!analysis/**/*.py
+!analysis/**/README.md
+!analysis/**/
