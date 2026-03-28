@@ -22,8 +22,8 @@
 完整流程可以概括为下面 5 步：
 
 1. 读取 SUMO 路网 XML。
-2. 提取普通 SUMO edge，忽略 internal edge。
-3. 根据 `<connection>` 建立 SUMO edge 图。
+2. 提取普通 SUMO edge，忽略 internal edge，并过滤掉 `passenger` 不能进入的 edge。
+3. 根据 `<connection>` 建立 SUMO edge 图，只保留对 `passenger` 合法的转移。
 4. 逐行读取轨迹文件，解析出 `vin`、`timestamps`、`osm_edges`。
 5. 对每条轨迹执行“候选映射 + 局部邻居缓存查询 + BFS 最短路 + 分层动态规划”，输出满足顺序约束的最短 SUMO edge 序列。
 
@@ -69,6 +69,7 @@ flowchart TD
 
 - 忽略 `id` 以 `:` 开头的 edge
 - 忽略 `function="internal"` 的 edge
+- 结合 `<type>` 默认权限与 `<lane>` 上的 `allow/disallow`，过滤掉 `passenger` 不可进入的 edge
 
 每条普通 edge 会保留这些信息：
 
@@ -76,11 +77,14 @@ flowchart TD
 - `from_node`
 - `to_node`
 - `priority`
+- `edge_type`
 - `function`
 - `lanes`
   - `lane_id`
   - `length`
   - `speed`
+  - `allow_classes`
+  - `disallow_classes`
 
 对应的数据结构：
 
@@ -90,14 +94,14 @@ flowchart TD
 
 ### 3.3 建图规则
 
-建图完全基于 `net.net.xml` 里的 `<connection>` 元素。
+建图完全基于 `net.net.xml` 里的 `<connection>` 元素，但前提是边本身对 `passenger` 可通行。
 
 如果存在：
 
 - `from="A"`
 - `to="B"`
 
-并且 `A` 和 `B` 都是普通 edge，那么就在图中加入：
+并且 `A` 和 `B` 都是普通 edge，且都允许 `passenger` 进入，那么就在图中加入：
 
 - `A -> B`
 
@@ -115,6 +119,8 @@ flowchart TD
 - `reverse_graph`
 
 这三个结构会常驻内存，供后续所有轨迹复用，避免重复解析路网。
+
+当前默认的建图目标是小汽车，因此 `load_sumo_edge_graph()` 默认按 `vehicle_class="passenger"` 过滤边与连接。
 
 
 ## 4. 轨迹文件解析
@@ -556,6 +562,7 @@ current_costs[u] + distance(u, v)
 1. 如果 `osm_edges` 为空，返回失败：`empty_osm_edges`
 2. 构造 `candidate_sets`
 3. 如果任何一层候选为空，返回失败：`missing_candidate`
+   - 同时记录第一个空候选层对应的 OSM edge id
 4. 如果只有一层候选：
    - 直接返回排序后的第一个候选
 5. 如果有多层：
@@ -609,7 +616,7 @@ vin sumo_edge_1 sumo_edge_2 sumo_edge_3 ...
 格式为制表符分隔：
 
 ```text
-vin    reason    line_no    osm_edges...
+vin    reason    line_no    missing_osm_edge_id    osm_edges...
 ```
 
 其中 `reason` 目前主要包括：
@@ -617,6 +624,11 @@ vin    reason    line_no    osm_edges...
 - `missing_candidate`
 - `unreachable_between_candidate_sets`
 - `empty_osm_edges`
+
+其中：
+
+- `missing_osm_edge_id` 只在 `missing_candidate` 时有值，表示第一个候选集合为空的那一层对应的 OSM edge id
+- `osm_edges...` 是这条轨迹原始完整的 OSM 边序列
 
 
 ## 12. 流式处理与内存策略
@@ -767,7 +779,7 @@ O(sum(|Ci| * |Ci+1|) * (|V| + |E|))
    - 不是按几何长度
    - 不是按时间代价
 
-3. BFS 使用的是拓扑连通性
+3. BFS 使用的是带权限过滤的拓扑连通性
    - 不区分不同 turn penalty
    - 不考虑交通灯延迟、速度或长度
 
@@ -789,7 +801,7 @@ O(sum(|Ci| * |Ci+1|) * (|V| + |E|))
 
 ## 17. 命令行使用方式
 
-脚本主入口是：
+轨迹匹配脚本是：
 
 - `analysis/matching/parse_trajectories.py`
 
@@ -806,6 +818,39 @@ python analysis/matching/parse_trajectories.py --net data/net_tls1.net.xml --tra
 - `--output`
 - `--failed-output`
 - `--preview`
+
+把成功匹配结果导出成 SUMO `.rou.xml` 的脚本是：
+
+- `analysis/matching/export_sumo_routes.py`
+
+示例：
+
+```bash
+python analysis/matching/export_sumo_routes.py --matched analysis/matching/matched_routes.txt --output analysis/matching/matched_routes.rou.xml
+```
+
+默认输出格式参考 `data/routes_tls1.rou.xml`，会生成：
+
+- `<routes ...>`
+- `<vType id="passenger" vClass="passenger"/>`
+- 多个 `<vehicle id="..." type="passenger" depart="...">`
+- 每个 `vehicle` 内嵌一个 `<route edges="..."/>`
+
+其中：
+
+- `vehicle id` 默认使用成功匹配行里的 `vin`
+- 如果同一个 `vin` 重复出现，会自动补后缀保证唯一
+- `depart` 默认限制在 `0~3600s`
+- 脚本会把所有成功轨迹的出发时间均匀分配到这个范围内，保证都能在时限内出发
+
+可选参数：
+
+- `--matched`
+- `--output`
+- `--vehicle-type-id`
+- `--vehicle-class`
+- `--depart-begin`
+- `--depart-end`
 
 
 ## 18. 代码接口一览
@@ -839,6 +884,13 @@ python analysis/matching/parse_trajectories.py --net data/net_tls1.net.xml --tra
 ### 批处理相关
 
 - `process_trajectory_file()`
+
+### SUMO route 导出相关
+
+- `parse_matched_route_line()`
+- `iter_matched_route_file()`
+- `build_sumo_routes_tree()`
+- `write_sumo_routes_file()`
 
 
 ## 19. 一句话总结

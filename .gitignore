@@ -2,7 +2,7 @@ vis/frontend/Cesium-1.127
 
 .cursor
 
-vis/backend/__pycache__
+__pycache__/
 
 data/*
 
@@ -16,3 +16,6 @@ analysis/snapshoot/*
 analysis/snapshoot_all/*
 analysis/*.json
 analysis/*.txt
+analysis/matching/*.json
+analysis/matching/*.txt
+analysis/matching/*.xml

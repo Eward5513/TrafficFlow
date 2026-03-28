@@ -21,6 +21,7 @@ class MatchResult:
     candidate_sets: list[list[str]] = field(default_factory=list)
     matched_sumo_edges: list[str] = field(default_factory=list)
     total_cost: int | None = None
+    missing_osm_edge_id: str | None = None
 
 
 def normalize_osm_key_from_sumo_edge(edge_id: str) -> str:
@@ -209,11 +210,15 @@ def match_trajectory_to_sumo(
 
     candidate_sets = build_candidate_sets(osm_edges, valid_edges, candidate_index)
     if any(not candidates for candidates in candidate_sets):
+        missing_layer_idx = next(
+            idx for idx, candidates in enumerate(candidate_sets) if not candidates
+        )
         return MatchResult(
             success=False,
             reason="missing_candidate",
             osm_edges=list(osm_edges),
             candidate_sets=candidate_sets,
+            missing_osm_edge_id=osm_edges[missing_layer_idx],
         )
 
     if len(candidate_sets) == 1:

@@ -243,6 +243,7 @@ def format_failed_output(record: TrajectoryRecord, result: MatchResult) -> str:
             record.vin,
             result.reason or "unknown_match_failure",
             line_no,
+            result.missing_osm_edge_id or "",
             " ".join(record.osm_edges),
         ]
     )

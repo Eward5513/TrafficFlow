@@ -9,7 +9,10 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent.parent
 DEFAULT_NET_FILE = PROJECT_ROOT / "data" / "net_tls1.net.xml"
+DEFAULT_VEHICLE_CLASS = "passenger"
 NearbyPathCache = dict[tuple[str, str], tuple[int, list[str]]]
+VehicleClassSet = frozenset[str]
+PermissionRule = tuple[VehicleClassSet | None, VehicleClassSet | None]
 
 
 @dataclass(slots=True)
@@ -17,6 +20,15 @@ class LaneInfo:
     lane_id: str
     length: float | None
     speed: float | None
+    allow_classes: VehicleClassSet | None = None
+    disallow_classes: VehicleClassSet | None = None
+
+    def allows_vehicle_class(self, vehicle_class: str) -> bool:
+        if self.allow_classes is not None:
+            return vehicle_class in self.allow_classes
+        if self.disallow_classes is not None:
+            return vehicle_class not in self.disallow_classes
+        return True
 
 
 @dataclass(slots=True)
@@ -25,6 +37,7 @@ class EdgeInfo:
     from_node: str | None
     to_node: str | None
     priority: int | None
+    edge_type: str | None
     function: str | None
     lanes: list[LaneInfo] = field(default_factory=list)
 
@@ -39,6 +52,9 @@ class EdgeInfo:
     @property
     def lane_speeds(self) -> list[float | None]:
         return [lane.speed for lane in self.lanes]
+
+    def allows_vehicle_class(self, vehicle_class: str) -> bool:
+        return any(lane.allows_vehicle_class(vehicle_class) for lane in self.lanes)
 
 
 @dataclass(slots=True)
@@ -66,17 +82,50 @@ def parse_optional_int(value: str | None) -> int | None:
     return int(value)
 
 
-def parse_edge_element(edge_elem: ET.Element) -> EdgeInfo:
-    """Extract one normal SUMO edge and its lane metadata."""
+def parse_vehicle_classes(value: str | None) -> VehicleClassSet | None:
+    if value in (None, ""):
+        return None
+    return frozenset(value.split())
+
+
+def resolve_permissions(
+    *,
+    allow: str | None,
+    disallow: str | None,
+    default_rule: PermissionRule,
+) -> PermissionRule:
+    allow_classes = parse_vehicle_classes(allow)
+    disallow_classes = parse_vehicle_classes(disallow)
+    default_allow, default_disallow = default_rule
+    return (
+        allow_classes if allow_classes is not None else default_allow,
+        disallow_classes if disallow_classes is not None else default_disallow,
+    )
+
+
+def parse_edge_element(
+    edge_elem: ET.Element,
+    edge_type_rules: dict[str, PermissionRule],
+) -> EdgeInfo:
+    """Extract one normal SUMO edge and its effective lane permissions."""
+    edge_type = edge_elem.get("type")
+    default_rule = edge_type_rules.get(edge_type or "", (None, None))
     lanes: list[LaneInfo] = []
     for child in edge_elem:
         if strip_namespace(child.tag) != "lane":
             continue
+        allow_classes, disallow_classes = resolve_permissions(
+            allow=child.get("allow"),
+            disallow=child.get("disallow"),
+            default_rule=default_rule,
+        )
         lanes.append(
             LaneInfo(
                 lane_id=child.get("id", ""),
                 length=parse_optional_float(child.get("length")),
                 speed=parse_optional_float(child.get("speed")),
+                allow_classes=allow_classes,
+                disallow_classes=disallow_classes,
             )
         )
 
@@ -85,6 +134,7 @@ def parse_edge_element(edge_elem: ET.Element) -> EdgeInfo:
         from_node=edge_elem.get("from"),
         to_node=edge_elem.get("to"),
         priority=parse_optional_int(edge_elem.get("priority")),
+        edge_type=edge_type,
         function=edge_elem.get("function"),
         lanes=lanes,
     )
@@ -102,13 +152,15 @@ def is_normal_edge(edge_id: str | None, function: str | None) -> bool:
 
 def parse_sumo_net(
     net_file: Path,
+    vehicle_class: str = DEFAULT_VEHICLE_CLASS,
 ) -> tuple[dict[str, EdgeInfo], list[tuple[str, str]]]:
     """
     Parse a SUMO net.xml file in a streaming way.
 
     Returns:
         valid_edges:
-            Mapping from normal edge id to parsed metadata.
+            Mapping from normal edge id to parsed metadata for the requested
+            vehicle class.
         raw_connections:
             All (from_edge, to_edge) pairs seen in <connection> elements.
     """
@@ -118,6 +170,7 @@ def parse_sumo_net(
 
     valid_edges: dict[str, EdgeInfo] = {}
     raw_connections: list[tuple[str, str]] = []
+    edge_type_rules: dict[str, PermissionRule] = {}
 
     try:
         context = ET.iterparse(net_path, events=("start", "end"))
@@ -129,13 +182,24 @@ def parse_sumo_net(
 
             tag = strip_namespace(elem.tag)
 
-            if tag == "edge":
+            if tag == "type":
+                type_id = elem.get("id")
+                if type_id:
+                    edge_type_rules[type_id] = (
+                        parse_vehicle_classes(elem.get("allow")),
+                        parse_vehicle_classes(elem.get("disallow")),
+                    )
+                elem.clear()
+                root.clear()
+
+            elif tag == "edge":
                 edge_id = elem.get("id")
                 function = elem.get("function")
 
                 if is_normal_edge(edge_id, function):
-                    edge_info = parse_edge_element(elem)
-                    valid_edges[edge_info.edge_id] = edge_info
+                    edge_info = parse_edge_element(elem, edge_type_rules)
+                    if edge_info.allows_vehicle_class(vehicle_class):
+                        valid_edges[edge_info.edge_id] = edge_info
 
                 elem.clear()
                 root.clear()
@@ -215,18 +279,21 @@ def build_nearby_path_cache(
     return nearby_path_cache
 
 
-def load_sumo_edge_graph(net_file: Path = DEFAULT_NET_FILE) -> SumoEdgeGraph:
+def load_sumo_edge_graph(
+    net_file: Path = DEFAULT_NET_FILE,
+    vehicle_class: str = DEFAULT_VEHICLE_CLASS,
+) -> SumoEdgeGraph:
     """
     Parse the SUMO net file and keep all required structures in memory.
 
     Returns:
         SumoEdgeGraph:
-            - edges: normal edge metadata
+            - edges: normal edge metadata reachable by the requested vehicle class
             - graph: outgoing adjacency
             - reverse_graph: incoming adjacency
             - nearby_path_cache: precomputed 1-hop/2-hop local paths
     """
-    valid_edges, raw_connections = parse_sumo_net(net_file)
+    valid_edges, raw_connections = parse_sumo_net(net_file, vehicle_class=vehicle_class)
     graph, reverse_graph = build_edge_graph(raw_connections, valid_edges)
     nearby_path_cache = build_nearby_path_cache(graph, max_hops=2)
     return SumoEdgeGraph(
@@ -239,6 +306,7 @@ def load_sumo_edge_graph(net_file: Path = DEFAULT_NET_FILE) -> SumoEdgeGraph:
 
 __all__ = [
     "DEFAULT_NET_FILE",
+    "DEFAULT_VEHICLE_CLASS",
     "EdgeInfo",
     "LaneInfo",
     "NearbyPathCache",
