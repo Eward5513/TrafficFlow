@@ -136,6 +136,8 @@ sumo -n net.net.xml -r routes.rou.xml \
 （可选：用 GUI 直观看是否遵守红绿灯）
 sumo-gui -n net_tls1.net.xml -r routes_tls_36000.rou.xml
 
+sumo-gui -n data/net_tls1.net.xml -r analysis/matching/matched_routes.rou.xml
+
 # 说明：
 # - GUI 下可以观察车辆是否在红灯前排队停车、绿灯放行
 
