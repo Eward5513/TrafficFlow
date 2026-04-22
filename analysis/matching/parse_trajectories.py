@@ -14,6 +14,7 @@ try:
         MatchResult,
         PathCache,
         build_osm_candidate_index,
+        fuzzy_match_trajectory_to_sumo,
         match_trajectory_to_sumo,
     )
 except ImportError:
@@ -23,6 +24,7 @@ except ImportError:
         MatchResult,
         PathCache,
         build_osm_candidate_index,
+        fuzzy_match_trajectory_to_sumo,
         match_trajectory_to_sumo,
     )
 
@@ -83,6 +85,7 @@ class TrajectoryStreamStats:
 @dataclass(slots=True)
 class MatchingRunStats:
     matched_trajectories: int = 0
+    fuzzy_matched_trajectories: int = 0
     failed_trajectories: int = 0
     failed_examples: list[str] = field(default_factory=list)
     max_failed_examples: int = 5
@@ -218,11 +221,17 @@ def match_trajectory_record(
     *,
     candidate_index: CandidateIndex | None = None,
     path_cache: PathCache | None = None,
+    enable_fuzzy_fallback: bool = True,
 ) -> MatchResult:
     """
     Match one parsed trajectory record against the in-memory SUMO edge graph.
+
+    When the strict match fails because some OSM edges have no SUMO candidate
+    (typically due to SUMO network modifications) and ``enable_fuzzy_fallback``
+    is True, retry with a fuzzy match that drops the missing OSM edges and
+    bridges the remaining segments through shortest SUMO paths.
     """
-    return match_trajectory_to_sumo(
+    result = match_trajectory_to_sumo(
         record.osm_edges,
         net.graph,
         net.edges,
@@ -230,6 +239,31 @@ def match_trajectory_record(
         nearby_path_cache=net.nearby_path_cache,
         path_cache=path_cache,
     )
+
+    if (
+        not result.success
+        and result.reason == "missing_candidate"
+        and enable_fuzzy_fallback
+    ):
+        fuzzy_result = fuzzy_match_trajectory_to_sumo(
+            record.osm_edges,
+            net.graph,
+            net.edges,
+            candidate_index=candidate_index,
+            nearby_path_cache=net.nearby_path_cache,
+            path_cache=path_cache,
+        )
+        if fuzzy_result.success:
+            return fuzzy_result
+        # Prefer the original strict failure reason so downstream reporting
+        # still points at the first unmatchable OSM edge.
+        fuzzy_result.reason = fuzzy_result.reason or result.reason
+        fuzzy_result.missing_osm_edge_id = (
+            fuzzy_result.missing_osm_edge_id or result.missing_osm_edge_id
+        )
+        return fuzzy_result
+
+    return result
 
 
 def format_matched_output(vin: str, matched_sumo_edges: list[str]) -> str:
@@ -267,6 +301,7 @@ def print_run_summary(
     print(f"Parsed trajectories   : {parse_stats.successful_lines}")
     print(f"Bad lines skipped     : {parse_stats.bad_lines}")
     print(f"Matched trajectories  : {match_stats.matched_trajectories}")
+    print(f"  of which fuzzy match: {match_stats.fuzzy_matched_trajectories}")
     print(f"Failed trajectories   : {match_stats.failed_trajectories}")
     print(f"Matched output        : {output_file}")
     print(f"Failed output         : {failed_output_file}")
@@ -336,12 +371,16 @@ def process_trajectory_file(
 
             if result.success:
                 match_stats.matched_trajectories += 1
+                if result.fuzzy:
+                    match_stats.fuzzy_matched_trajectories += 1
                 matched_fh.write(
                     format_matched_output(record.vin, result.matched_sumo_edges) + "\n"
                 )
                 if len(success_examples) < preview_count:
+                    fuzzy_tag = " [fuzzy]" if result.fuzzy else ""
                     success_examples.append(
-                        f"vin={record.vin} sumo_edges={preview_edges(result.matched_sumo_edges)}"
+                        f"vin={record.vin}{fuzzy_tag} "
+                        f"sumo_edges={preview_edges(result.matched_sumo_edges)}"
                     )
                 continue
 
@@ -426,6 +465,7 @@ __all__ = [
     "TrajectoryStreamStats",
     "format_failed_output",
     "format_matched_output",
+    "fuzzy_match_trajectory_to_sumo",
     "iter_trajectory_file",
     "load_trajectory_file",
     "match_trajectory_record",

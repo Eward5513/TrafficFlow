@@ -22,6 +22,9 @@ class MatchResult:
     matched_sumo_edges: list[str] = field(default_factory=list)
     total_cost: int | None = None
     missing_osm_edge_id: str | None = None
+    fuzzy: bool = False
+    dropped_osm_edges: list[str] = field(default_factory=list)
+    kept_osm_edges: list[str] = field(default_factory=list)
 
 
 def normalize_osm_key_from_sumo_edge(edge_id: str) -> str:
@@ -311,6 +314,87 @@ def match_trajectory_to_sumo(
     )
 
 
+def fuzzy_match_trajectory_to_sumo(
+    osm_edges: list[str],
+    graph: dict[str, set[str]],
+    valid_edges: dict[str, EdgeInfo],
+    *,
+    candidate_index: CandidateIndex | None = None,
+    nearby_path_cache: NearbyPathCache | None = None,
+    path_cache: PathCache | None = None,
+) -> MatchResult:
+    """
+    Fuzzy-match an OSM edge sequence by dropping every OSM edge that has no
+    corresponding SUMO candidate (typically because the underlying SUMO network
+    was modified after the trajectory was recorded). The remaining OSM edges
+    are then matched with the normal DP, which connects neighbouring candidates
+    using the shortest SUMO path — effectively bridging the dropped segments.
+    """
+    if not osm_edges:
+        return MatchResult(
+            success=False,
+            reason="empty_osm_edges",
+            osm_edges=list(osm_edges),
+            fuzzy=True,
+        )
+
+    candidate_sets = build_candidate_sets(osm_edges, valid_edges, candidate_index)
+    kept_pairs: list[tuple[int, str]] = [
+        (idx, osm_edges[idx])
+        for idx, candidates in enumerate(candidate_sets)
+        if candidates
+    ]
+    dropped_osm_edges: list[str] = [
+        osm_edges[idx]
+        for idx, candidates in enumerate(candidate_sets)
+        if not candidates
+    ]
+
+    if not kept_pairs:
+        return MatchResult(
+            success=False,
+            reason="fuzzy_no_surviving_candidates",
+            osm_edges=list(osm_edges),
+            candidate_sets=candidate_sets,
+            fuzzy=True,
+            dropped_osm_edges=dropped_osm_edges,
+        )
+
+    if not dropped_osm_edges:
+        # Nothing to drop — fuzzy mode degenerates into a normal match.
+        return match_trajectory_to_sumo(
+            osm_edges,
+            graph,
+            valid_edges,
+            candidate_index=candidate_index,
+            nearby_path_cache=nearby_path_cache,
+            path_cache=path_cache,
+        )
+
+    kept_osm_edges = [edge_id for _, edge_id in kept_pairs]
+    inner_result = match_trajectory_to_sumo(
+        kept_osm_edges,
+        graph,
+        valid_edges,
+        candidate_index=candidate_index,
+        nearby_path_cache=nearby_path_cache,
+        path_cache=path_cache,
+    )
+
+    return MatchResult(
+        success=inner_result.success,
+        reason=inner_result.reason,
+        osm_edges=list(osm_edges),
+        candidate_sets=candidate_sets,
+        matched_sumo_edges=inner_result.matched_sumo_edges,
+        total_cost=inner_result.total_cost,
+        missing_osm_edge_id=inner_result.missing_osm_edge_id,
+        fuzzy=True,
+        dropped_osm_edges=dropped_osm_edges,
+        kept_osm_edges=kept_osm_edges,
+    )
+
+
 __all__ = [
     "CandidateIndex",
     "MatchResult",
@@ -318,6 +402,7 @@ __all__ = [
     "build_candidate_sets",
     "build_osm_candidate_index",
     "candidate_matches_osm_edge",
+    "fuzzy_match_trajectory_to_sumo",
     "get_candidate_sumo_edges",
     "match_trajectory_to_sumo",
     "normalize_osm_key_from_sumo_edge",
