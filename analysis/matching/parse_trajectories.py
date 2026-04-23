@@ -16,6 +16,7 @@ try:
         build_osm_candidate_index,
         fuzzy_match_trajectory_to_sumo,
         match_trajectory_to_sumo,
+        remove_simple_loops,
     )
 except ImportError:
     from build_sumo_edge_graph import DEFAULT_NET_FILE, SumoEdgeGraph, load_sumo_edge_graph
@@ -26,6 +27,7 @@ except ImportError:
         build_osm_candidate_index,
         fuzzy_match_trajectory_to_sumo,
         match_trajectory_to_sumo,
+        remove_simple_loops,
     )
 
 
@@ -87,12 +89,20 @@ class MatchingRunStats:
     matched_trajectories: int = 0
     fuzzy_matched_trajectories: int = 0
     failed_trajectories: int = 0
+    loop_trajectories: int = 0
+    total_loops_removed: int = 0
     failed_examples: list[str] = field(default_factory=list)
+    loop_examples: list[str] = field(default_factory=list)
     max_failed_examples: int = 5
+    max_loop_examples: int = 5
 
     def add_failed_example(self, text: str) -> None:
         if len(self.failed_examples) < self.max_failed_examples:
             self.failed_examples.append(text)
+
+    def add_loop_example(self, text: str) -> None:
+        if len(self.loop_examples) < self.max_loop_examples:
+            self.loop_examples.append(text)
 
 
 def is_valid_timestamp(token: str) -> bool:
@@ -302,6 +312,8 @@ def print_run_summary(
     print(f"Bad lines skipped     : {parse_stats.bad_lines}")
     print(f"Matched trajectories  : {match_stats.matched_trajectories}")
     print(f"  of which fuzzy match: {match_stats.fuzzy_matched_trajectories}")
+    print(f"  with simple loops   : {match_stats.loop_trajectories}")
+    print(f"Simple loops removed  : {match_stats.total_loops_removed}")
     print(f"Failed trajectories   : {match_stats.failed_trajectories}")
     print(f"Matched output        : {output_file}")
     print(f"Failed output         : {failed_output_file}")
@@ -316,6 +328,12 @@ def print_run_summary(
         print("")
         print("Match failure examples:")
         for text in match_stats.failed_examples:
+            print(f"- {text}")
+
+    if match_stats.loop_examples:
+        print("")
+        print("Simple loop examples:")
+        for text in match_stats.loop_examples:
             print(f"- {text}")
 
     if success_examples:
@@ -373,14 +391,25 @@ def process_trajectory_file(
                 match_stats.matched_trajectories += 1
                 if result.fuzzy:
                     match_stats.fuzzy_matched_trajectories += 1
+                cleaned_edges, loops_removed = remove_simple_loops(
+                    result.matched_sumo_edges
+                )
+                if loops_removed > 0:
+                    match_stats.loop_trajectories += 1
+                    match_stats.total_loops_removed += loops_removed
+                    match_stats.add_loop_example(
+                        f"vin={record.vin} loops_removed={loops_removed} "
+                        f"before={preview_edges(result.matched_sumo_edges, limit=6)} "
+                        f"after={preview_edges(cleaned_edges, limit=6)}"
+                    )
                 matched_fh.write(
-                    format_matched_output(record.vin, result.matched_sumo_edges) + "\n"
+                    format_matched_output(record.vin, cleaned_edges) + "\n"
                 )
                 if len(success_examples) < preview_count:
                     fuzzy_tag = " [fuzzy]" if result.fuzzy else ""
                     success_examples.append(
                         f"vin={record.vin}{fuzzy_tag} "
-                        f"sumo_edges={preview_edges(result.matched_sumo_edges)}"
+                        f"sumo_edges={preview_edges(cleaned_edges)}"
                     )
                 continue
 

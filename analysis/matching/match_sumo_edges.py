@@ -161,6 +161,38 @@ def shortest_path_between_edges(
     return None
 
 
+def remove_simple_loops(
+    sumo_edges: list[str],
+) -> tuple[list[str], int]:
+    """
+    Collapse simple ``A B A`` loops in a matched SUMO edge sequence.
+
+    A *simple loop* is a contiguous triplet ``(X, Y, X)`` where a single
+    intermediate edge ``Y`` separates two occurrences of the same edge ``X``.
+    Such triplets are collapsed by dropping ``Y`` (and the duplicate ``X``),
+    so the sequence continues with the single ``X``. This removes obviously
+    redundant "go out one step and come back" detours while keeping all
+    other edges untouched.
+
+    The routine uses a single left-to-right pass with a stack, which also
+    correctly handles chained/overlapping loops such as ``A B A C A`` (all
+    loops collapse to a single ``A``) without needing repeated passes.
+
+    Returns:
+        (cleaned_edges, loops_removed) where ``loops_removed`` is the number
+        of simple ``A B A`` triplets that were collapsed.
+    """
+    cleaned: list[str] = []
+    loops_removed = 0
+    for edge in sumo_edges:
+        if len(cleaned) >= 2 and cleaned[-2] == edge:
+            cleaned.pop()
+            loops_removed += 1
+        else:
+            cleaned.append(edge)
+    return cleaned, loops_removed
+
+
 def reconstruct_matched_path(
     end_candidate: str,
     parents_by_layer: list[dict[str, str | None]],
@@ -407,5 +439,6 @@ __all__ = [
     "match_trajectory_to_sumo",
     "normalize_osm_key_from_sumo_edge",
     "reconstruct_matched_path",
+    "remove_simple_loops",
     "shortest_path_between_edges",
 ]

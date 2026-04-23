@@ -19,13 +19,14 @@
 
 ## 2. 整体处理流程
 
-完整流程可以概括为下面 5 步：
+完整流程可以概括为下面 6 步：
 
 1. 读取 SUMO 路网 XML。
 2. 提取普通 SUMO edge，忽略 internal edge，并过滤掉 `passenger` 不能进入的 edge。
 3. 根据 `<connection>` 建立 SUMO edge 图，只保留对 `passenger` 合法的转移。
 4. 逐行读取轨迹文件，解析出 `vin`、`timestamps`、`osm_edges`。
-5. 对每条轨迹执行“候选映射 + 局部邻居缓存查询 + BFS 最短路 + 分层动态规划”，输出满足顺序约束的最短 SUMO edge 序列。
+5. 对每条轨迹执行“候选映射 + 局部邻居缓存查询 + BFS 最短路 + 分层动态规划”，得到满足顺序约束的最短 SUMO edge 序列。
+6. 在写入 `matched_routes.txt` 前，做一次简单环路清理（`A B A -> A`），去掉“出去一步又回到原边”的冗余片段。
 
 ```mermaid
 flowchart TD
@@ -594,8 +595,9 @@ current_costs[u] + distance(u, v)
 3. 创建全局 `path_cache`
 4. 逐条读取轨迹
 5. 对每条轨迹执行匹配
-6. 成功写入成功文件
-7. 失败写入失败文件
+6. 对成功匹配结果执行简单环路清理（`A B A -> A`）
+7. 清理后写入成功文件
+8. 失败写入失败文件
 
 ### 11.2 输出文件
 
@@ -608,6 +610,12 @@ current_costs[u] + distance(u, v)
 ```text
 vin sumo_edge_1 sumo_edge_2 sumo_edge_3 ...
 ```
+
+其中每条成功轨迹在写出前会执行一次简单环路清理：
+
+- 识别连续三段 `X Y X`
+- 删除前两个边（`X Y`），只保留后一个 `X`
+- 这等价于把 `X Y X` 折叠为 `X`
 
 失败输出文件默认是：
 
@@ -629,6 +637,11 @@ vin    reason    line_no    missing_osm_edge_id    osm_edges...
 
 - `missing_osm_edge_id` 只在 `missing_candidate` 时有值，表示第一个候选集合为空的那一层对应的 OSM edge id
 - `osm_edges...` 是这条轨迹原始完整的 OSM 边序列
+
+此外，运行汇总里会额外给出简单环路相关统计：
+
+- `with simple loops`：发生过至少一次 `A B A` 清理的轨迹条数
+- `Simple loops removed`：总共清理掉的简单环路次数
 
 
 ## 12. 流式处理与内存策略
@@ -672,6 +685,8 @@ C1, C2, C3
 ```
 
 这样可以正确处理回环、停留、重复经过等情况。
+
+需要注意的是：这条规则针对的是输入匹配层，不会在匹配前去重。匹配完成后，输出阶段会额外清理 `A B A` 这种“单边往返”简单环路。
 
 ### 13.2 相邻层共享同一个候选
 
