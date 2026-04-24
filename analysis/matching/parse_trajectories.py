@@ -35,6 +35,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_TRAJ_FILE = BASE_DIR.parent / "ocr_output" / "route_by_edge_no_merge.txt"
 DEFAULT_OUTPUT_FILE = BASE_DIR / "matched_routes.txt"
 DEFAULT_FAILED_OUTPUT_FILE = BASE_DIR / "failed_routes.txt"
+DEFAULT_FUZZY_LOG_FILE = BASE_DIR / "fuzzy_match_logs.txt"
 TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 
 
@@ -293,6 +294,83 @@ def format_failed_output(record: TrajectoryRecord, result: MatchResult) -> str:
     )
 
 
+def find_chosen_candidate_positions(
+    matched_sumo_edges: list[str],
+    chosen_candidates: list[str],
+) -> list[int] | None:
+    """
+    Locate each chosen candidate in the matched edge sequence with an
+    order-preserving left-to-right scan.
+    """
+    positions: list[int] = []
+    cursor = 0
+    for candidate in chosen_candidates:
+        while cursor < len(matched_sumo_edges) and matched_sumo_edges[cursor] != candidate:
+            cursor += 1
+        if cursor >= len(matched_sumo_edges):
+            return None
+        positions.append(cursor)
+        cursor += 1
+    return positions
+
+
+def build_fuzzy_quoted_edge_indexes(
+    result: MatchResult,
+    matched_sumo_edges: list[str],
+) -> set[int]:
+    """
+    Return indexes of SUMO edges that were inserted to bridge dropped OSM
+    segments during fuzzy matching. These indexes should be quoted in logs.
+    """
+    if not result.fuzzy or not result.candidate_sets or len(result.kept_osm_edges) < 2:
+        return set()
+
+    kept_indices = [
+        idx
+        for idx, candidates in enumerate(result.candidate_sets)
+        if candidates
+    ]
+    if len(kept_indices) < 2:
+        return set()
+
+    positions = find_chosen_candidate_positions(matched_sumo_edges, result.chosen_candidates)
+    if positions is None or len(positions) != len(kept_indices):
+        return set()
+
+    quoted_indexes: set[int] = set()
+    for pair_idx in range(len(kept_indices) - 1):
+        left_idx = kept_indices[pair_idx]
+        right_idx = kept_indices[pair_idx + 1]
+        has_missing_between = any(
+            not result.candidate_sets[inner_idx]
+            for inner_idx in range(left_idx + 1, right_idx)
+        )
+        if not has_missing_between:
+            continue
+
+        bridge_start = positions[pair_idx]
+        bridge_end = positions[pair_idx + 1]
+        for edge_pos in range(bridge_start + 1, bridge_end):
+            quoted_indexes.add(edge_pos)
+
+    return quoted_indexes
+
+
+def format_fuzzy_log_output(record: TrajectoryRecord, result: MatchResult) -> str:
+    """
+    Format one fuzzy-match log line:
+        vin edge_a "inserted_1" "inserted_2" edge_b ...
+    """
+    quoted_indexes = build_fuzzy_quoted_edge_indexes(result, result.matched_sumo_edges)
+    rendered_edges: list[str] = []
+    for idx, edge_id in enumerate(result.matched_sumo_edges):
+        if idx in quoted_indexes:
+            rendered_edges.append(f"\"{edge_id}\"")
+        else:
+            rendered_edges.append(edge_id)
+    return " ".join([record.vin, *rendered_edges])
+
+
 def preview_edges(edges: list[str], limit: int = 10) -> str:
     if len(edges) <= limit:
         return " ".join(edges)
@@ -305,6 +383,7 @@ def print_run_summary(
     success_examples: list[str],
     output_file: Path,
     failed_output_file: Path,
+    fuzzy_log_output_file: Path,
 ) -> None:
     print(f"Total lines           : {parse_stats.total_lines}")
     print(f"Empty lines skipped   : {parse_stats.empty_lines}")
@@ -317,6 +396,7 @@ def print_run_summary(
     print(f"Failed trajectories   : {match_stats.failed_trajectories}")
     print(f"Matched output        : {output_file}")
     print(f"Failed output         : {failed_output_file}")
+    print(f"Fuzzy match logs      : {fuzzy_log_output_file}")
 
     if parse_stats.bad_line_examples:
         print("")
@@ -348,6 +428,7 @@ def process_trajectory_file(
     traj_file: str | Path,
     output_file: str | Path,
     failed_output_file: str | Path,
+    fuzzy_log_output_file: str | Path,
     *,
     preview_count: int = 5,
     warn: bool = True,
@@ -368,8 +449,10 @@ def process_trajectory_file(
 
     output_path = Path(output_file).expanduser().resolve()
     failed_output_path = Path(failed_output_file).expanduser().resolve()
+    fuzzy_log_output_path = Path(fuzzy_log_output_file).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     failed_output_path.parent.mkdir(parents=True, exist_ok=True)
+    fuzzy_log_output_path.parent.mkdir(parents=True, exist_ok=True)
 
     parse_stats = TrajectoryStreamStats()
     match_stats = MatchingRunStats()
@@ -378,6 +461,7 @@ def process_trajectory_file(
     with (
         output_path.open("w", encoding="utf-8") as matched_fh,
         failed_output_path.open("w", encoding="utf-8") as failed_fh,
+        fuzzy_log_output_path.open("w", encoding="utf-8") as fuzzy_log_fh,
     ):
         for record in iter_trajectory_file(traj_file, warn=warn, stats=parse_stats):
             result = match_trajectory_record(
@@ -391,6 +475,7 @@ def process_trajectory_file(
                 match_stats.matched_trajectories += 1
                 if result.fuzzy:
                     match_stats.fuzzy_matched_trajectories += 1
+                    fuzzy_log_fh.write(format_fuzzy_log_output(record, result) + "\n")
                 cleaned_edges, loops_removed = remove_simple_loops(
                     result.matched_sumo_edges
                 )
@@ -449,6 +534,15 @@ def main() -> None:
         help="Path to failed trajectory output file.",
     )
     parser.add_argument(
+        "--fuzzy-log-output",
+        type=Path,
+        default=DEFAULT_FUZZY_LOG_FILE,
+        help=(
+            "Path to fuzzy-match detail logs. Inserted bridge edges caused by "
+            "missing candidates are wrapped in double quotes."
+        ),
+    )
+    parser.add_argument(
         "--preview",
         type=int,
         default=5,
@@ -462,11 +556,13 @@ def main() -> None:
     net = load_sumo_edge_graph(args.net.expanduser().resolve())
     output_path = args.output.expanduser().resolve()
     failed_output_path = args.failed_output.expanduser().resolve()
+    fuzzy_log_output_path = args.fuzzy_log_output.expanduser().resolve()
     parse_stats, match_stats, success_examples = process_trajectory_file(
         net,
         args.traj,
         output_path,
         failed_output_path,
+        fuzzy_log_output_path,
         preview_count=args.preview,
         warn=True,
     )
@@ -477,6 +573,7 @@ def main() -> None:
         success_examples=success_examples,
         output_file=output_path,
         failed_output_file=failed_output_path,
+        fuzzy_log_output_file=fuzzy_log_output_path,
     )
 
 
@@ -484,6 +581,7 @@ __all__ = [
     "BadLineInfo",
     "CandidateIndex",
     "DEFAULT_FAILED_OUTPUT_FILE",
+    "DEFAULT_FUZZY_LOG_FILE",
     "DEFAULT_OUTPUT_FILE",
     "DEFAULT_TRAJ_FILE",
     "MatchResult",
@@ -493,6 +591,7 @@ __all__ = [
     "TrajectoryRecord",
     "TrajectoryStreamStats",
     "format_failed_output",
+    "format_fuzzy_log_output",
     "format_matched_output",
     "fuzzy_match_trajectory_to_sumo",
     "iter_trajectory_file",

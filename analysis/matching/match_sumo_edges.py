@@ -25,6 +25,7 @@ class MatchResult:
     fuzzy: bool = False
     dropped_osm_edges: list[str] = field(default_factory=list)
     kept_osm_edges: list[str] = field(default_factory=list)
+    chosen_candidates: list[str] = field(default_factory=list)
 
 
 def normalize_osm_key_from_sumo_edge(edge_id: str) -> str:
@@ -197,7 +198,7 @@ def reconstruct_matched_path(
     end_candidate: str,
     parents_by_layer: list[dict[str, str | None]],
     segment_paths_by_layer: list[dict[str, list[str]]],
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """
     Reconstruct the full SUMO edge sequence from DP back-pointers.
     """
@@ -220,7 +221,7 @@ def reconstruct_matched_path(
         else:
             matched_sumo_edges.extend(segment[1:])
 
-    return matched_sumo_edges
+    return chosen_candidates, matched_sumo_edges
 
 
 def match_trajectory_to_sumo(
@@ -265,6 +266,7 @@ def match_trajectory_to_sumo(
             candidate_sets=candidate_sets,
             matched_sumo_edges=[chosen_edge],
             total_cost=1,
+            chosen_candidates=[chosen_edge],
         )
 
     current_costs: dict[str, int] = {candidate: 1 for candidate in candidate_sets[0]}
@@ -330,7 +332,7 @@ def match_trajectory_to_sumo(
         segment_paths_by_layer.append(next_segment_paths)
 
     end_candidate = min(sorted(current_costs), key=lambda edge_id: current_costs[edge_id])
-    matched_sumo_edges = reconstruct_matched_path(
+    chosen_candidates, matched_sumo_edges = reconstruct_matched_path(
         end_candidate=end_candidate,
         parents_by_layer=parents_by_layer,
         segment_paths_by_layer=segment_paths_by_layer,
@@ -343,6 +345,7 @@ def match_trajectory_to_sumo(
         candidate_sets=candidate_sets,
         matched_sumo_edges=matched_sumo_edges,
         total_cost=len(matched_sumo_edges),
+        chosen_candidates=chosen_candidates,
     )
 
 
@@ -424,6 +427,7 @@ def fuzzy_match_trajectory_to_sumo(
         fuzzy=True,
         dropped_osm_edges=dropped_osm_edges,
         kept_osm_edges=kept_osm_edges,
+        chosen_candidates=inner_result.chosen_candidates,
     )
 
 
