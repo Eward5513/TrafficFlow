@@ -8,7 +8,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent.parent
-DEFAULT_NET_FILE = PROJECT_ROOT / "data" / "net_tls1.net.xml"
+DEFAULT_NET_FILE = PROJECT_ROOT / "analysis" / "data" / "net_tls1.net.xml"
 DEFAULT_VEHICLE_CLASS = "passenger"
 NearbyPathCache = dict[tuple[str, str], tuple[int, list[str]]]
 VehicleClassSet = frozenset[str]

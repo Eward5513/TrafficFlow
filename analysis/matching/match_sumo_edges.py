@@ -166,31 +166,42 @@ def remove_simple_loops(
     sumo_edges: list[str],
 ) -> tuple[list[str], int]:
     """
-    Collapse simple ``A B A`` loops in a matched SUMO edge sequence.
+    Collapse contiguous loops in a matched SUMO edge sequence.
 
-    A *simple loop* is a contiguous triplet ``(X, Y, X)`` where a single
-    intermediate edge ``Y`` separates two occurrences of the same edge ``X``.
-    Such triplets are collapsed by dropping ``Y`` (and the duplicate ``X``),
-    so the sequence continues with the single ``X``. This removes obviously
-    redundant "go out one step and come back" detours while keeping all
-    other edges untouched.
+    A loop is any contiguous subsequence ``X ... X`` where an edge appears
+    again later in the current path. When this happens, all edges between the
+    two ``X`` are dropped and the path continues from the first ``X``. This
+    removes redundant detours regardless of loop length (for example, both
+    ``A B A`` and ``A B C D A`` collapse to ``A``).
 
-    The routine uses a single left-to-right pass with a stack, which also
-    correctly handles chained/overlapping loops such as ``A B A C A`` (all
-    loops collapse to a single ``A``) without needing repeated passes.
+    The routine runs in a single left-to-right pass while tracking the current
+    path stack and each edge's latest position in that stack.
 
     Returns:
         (cleaned_edges, loops_removed) where ``loops_removed`` is the number
-        of simple ``A B A`` triplets that were collapsed.
+        of collapsed loops.
     """
     cleaned: list[str] = []
+    edge_pos: dict[str, int] = {}
     loops_removed = 0
+
     for edge in sumo_edges:
-        if len(cleaned) >= 2 and cleaned[-2] == edge:
-            cleaned.pop()
-            loops_removed += 1
-        else:
+        loop_start_idx = edge_pos.get(edge)
+        if loop_start_idx is None:
+            edge_pos[edge] = len(cleaned)
             cleaned.append(edge)
+            continue
+
+        if loop_start_idx == len(cleaned) - 1:
+            # Ignore consecutive duplicates: no intermediate segment to collapse.
+            continue
+
+        removed_edges = cleaned[loop_start_idx + 1 :]
+        cleaned = cleaned[: loop_start_idx + 1]
+        for removed_edge in removed_edges:
+            edge_pos.pop(removed_edge, None)
+        loops_removed += 1
+
     return cleaned, loops_removed
 
 

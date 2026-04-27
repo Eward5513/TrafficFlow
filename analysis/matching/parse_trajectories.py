@@ -391,8 +391,8 @@ def print_run_summary(
     print(f"Bad lines skipped     : {parse_stats.bad_lines}")
     print(f"Matched trajectories  : {match_stats.matched_trajectories}")
     print(f"  of which fuzzy match: {match_stats.fuzzy_matched_trajectories}")
-    print(f"  with simple loops   : {match_stats.loop_trajectories}")
-    print(f"Simple loops removed  : {match_stats.total_loops_removed}")
+    print(f"  with loops cleaned  : {match_stats.loop_trajectories}")
+    print(f"Loops removed         : {match_stats.total_loops_removed}")
     print(f"Failed trajectories   : {match_stats.failed_trajectories}")
     print(f"Matched output        : {output_file}")
     print(f"Failed output         : {failed_output_file}")
@@ -412,7 +412,7 @@ def print_run_summary(
 
     if match_stats.loop_examples:
         print("")
-        print("Simple loop examples:")
+        print("Loop cleanup examples:")
         for text in match_stats.loop_examples:
             print(f"- {text}")
 
