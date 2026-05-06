@@ -1,0 +1,10 @@
+<configuration>
+    <input>
+        <net-file value="data/net_tls1.net.xml"/>
+        <route-files value="matching/matched_routes.rou.xml, matching/matched_routes_shuffled_depart.rou.xml"/>
+    </input>
+
+    <time>
+        <begin value="0"/>
+    </time>
+</configuration>

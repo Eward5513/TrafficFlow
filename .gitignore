@@ -4,16 +4,22 @@ vis/frontend/Cesium-1.127
 
 __pycache__/
 
-data/*
+analysis/**/*.xml
+analysis/**/*.json
+analysis/**/*.csv
+analysis/**/*.txt
+analysis/ocr_output
+analysis/snapshoot
+analysis/snapshoot_all
 
-!data/download_osm.py
-!data/generate_no_overtake_fcd.py
-!data/run_sumo_pipeline.txt
-!data/basemap.osm.xml
-!data/basemap.geojson
-!data/net_tls1.net.xml
 
-analysis/**
 !analysis/**/*.py
 !analysis/**/README.md
-!analysis/**/
+
+!analysis/data/run_sumo_pipeline.txt
+!analysis/data/basemap.osm.xml
+!analysis/data/basemap.geojson
+!analysis/data/net_tls1.net.xml
+
+!analysis/data/net_tls1.net.xml
+!analysis/data/basemap.geojson
