@@ -120,7 +120,7 @@ python3 $SUMO_HOME/tools/randomTrips.py \
   --vtype random_passenger \
   --seed 42
 
-  sed -i 's/random_passenger/passenger/g' random_routes_1w.rou.xml
+<vType id="random_passenger" vClass="passenger" />
 
 ------------------------------------------------------------
 Step 3) 跑仿真并导出轨迹（FCD：fcd.xml）（每辆车实际的路段时序序列，如果没有reoute，路段序列和计划路段序列通常一致）

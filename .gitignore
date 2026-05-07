@@ -11,6 +11,7 @@ analysis/**/*.txt
 analysis/ocr_output
 analysis/snapshoot
 analysis/snapshoot_all
+analysis/random_passenger
 
 
 !analysis/**/*.py

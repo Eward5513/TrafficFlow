@@ -1,10 +1,18 @@
 <configuration>
     <input>
         <net-file value="data/net_tls1.net.xml"/>
-        <route-files value="matching/matched_routes.rou.xml, matching/matched_routes_shuffled_depart.rou.xml"/>
+        <route-files value="matching/matched_routes.rou.xml, matching/matched_routes_shuffled_depart.rou.xml, random_routes_1w.rou.xml"/>
     </input>
+
+    <processing>
+        <device.rerouting.explicit value="shuffled_*,random*"/>
+        <device.rerouting.period value="60"/>
+        <device.rerouting.adaptation-interval value="10"/>
+        <device.rerouting.adaptation-steps value="30"/>
+    </processing>
 
     <time>
         <begin value="0"/>
+        <time-to-teleport value="300"/>
     </time>
 </configuration>
