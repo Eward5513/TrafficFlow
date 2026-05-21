@@ -1,7 +1,8 @@
 <configuration>
     <input>
         <net-file value="data/net_tls1.net.xml"/>
-        <route-files value="matching/matched_routes.rou.xml, matching/matched_routes_shuffled_depart.rou.xml, random_routes_1w.rou.xml"/>
+        <!-- <route-files value="basic_data.rou.xml"/> -->
+        <route-files value="penetration/30.rou.xml"/>
     </input>
 
     <processing>
@@ -15,4 +16,7 @@
         <begin value="0"/>
         <time-to-teleport value="300"/>
     </time>
+    <random_number>
+        <seed value="42"/>
+    </random_number>
 </configuration>

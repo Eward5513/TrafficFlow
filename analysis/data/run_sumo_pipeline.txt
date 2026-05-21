@@ -149,6 +149,22 @@ sumo -n net.net.xml -r routes.rou.xml \
 # - --full-output full.xml：输出全量仿真快照（车辆、道路、车道、以及交通灯状态等）
 #   如果你要严格验证“是否闯红灯/过停止线时相位是什么”，full.xml 很有用
 
+sumo -c simulation.sumocfg \
+  --seed 42 \
+  --threads 1 \
+  --fcd-output output/fcd.xml \
+  --fcd-output.geo \
+  --tripinfo-output output/tripinfo.xml \
+  --vehroute-output output/vehroute.xml \
+  --vehroute-output.exit-times \
+  --vehroute-output.sorted \
+  --vehroute-output.write-unfinished \
+  --summary-output output/summary.xml \
+  --statistic-output output/statistics.xml
+
+
+sumo -c simulation.sumocfg --seed 42 --threads 1
+
 （可选：用 GUI 直观看是否遵守红绿灯）
 sumo-gui -n net_tls1.net.xml -r routes_tls_36000.rou.xml
 
