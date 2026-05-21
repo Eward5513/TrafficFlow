@@ -39,6 +39,10 @@ def output_name_for_penetration(penetration: float, seed: int | None) -> str:
     return f"{penetration_text}_{seed_text}.rou.xml"
 
 
+def sample_name_for_penetration(penetration: float) -> str:
+    return f"{format_number_for_filename(penetration)}_sample.txt"
+
+
 def select_vehicle_indices(
     vehicle_count: int,
     penetration: float,
@@ -56,10 +60,9 @@ def select_vehicle_indices(
 def apply_penetration_sample(
     input_file: Path,
     output_file: Path,
+    sample_file: Path,
     penetration: float,
     *,
-    sampled_color: str = DEFAULT_SAMPLED_COLOR,
-    unsampled_color: str = DEFAULT_UNSAMPLED_COLOR,
     seed: int | None = None,
 ) -> tuple[int, int]:
     if not input_file.exists():
@@ -72,16 +75,23 @@ def apply_penetration_sample(
 
     vehicles = [element for element in root if local_name(element.tag) == "vehicle"]
     selected_indices = select_vehicle_indices(len(vehicles), penetration, seed=seed)
+    selected_vehicle_ids: list[str] = []
 
     for index, vehicle in enumerate(vehicles):
         if index in selected_indices:
-            vehicle.set("color", sampled_color)
+            vehicle.set("color", DEFAULT_SAMPLED_COLOR)
+            vehicle_id = vehicle.get("id")
+            if vehicle_id is None:
+                raise ValueError("Selected vehicle is missing required id attribute.")
+            selected_vehicle_ids.append(vehicle_id)
         else:
-            vehicle.set("color", unsampled_color)
+            vehicle.set("color", DEFAULT_UNSAMPLED_COLOR)
 
     ET.indent(root, space="    ")
     output_file.parent.mkdir(parents=True, exist_ok=True)
     tree.write(output_file, encoding="utf-8", xml_declaration=True)
+    sample_file.parent.mkdir(parents=True, exist_ok=True)
+    sample_file.write_text("\n".join(selected_vehicle_ids) + "\n", encoding="utf-8")
     return len(selected_indices), len(vehicles)
 
 
@@ -114,16 +124,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--sampled-color",
-        "--color",
-        dest="sampled_color",
-        default=DEFAULT_SAMPLED_COLOR,
-        help="Color applied to sampled vehicles. Defaults to light red RGB 255,80,80.",
-    )
-    parser.add_argument(
-        "--unsampled-color",
-        default=DEFAULT_UNSAMPLED_COLOR,
-        help="Color applied to non-sampled vehicles. Defaults to gray RGB 160,160,160.",
+        "--sample-output",
+        type=Path,
+        default=None,
+        help=(
+            "Output text file for sampled vehicle ids. Defaults to "
+            "analysis/penetration/<rate>_sample.txt."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -141,17 +148,19 @@ def main() -> None:
         penetration,
         args.seed,
     )
+    sample_file = args.sample_output or BASE_DIR / sample_name_for_penetration(
+        penetration,
+    )
     selected_count, vehicle_count = apply_penetration_sample(
         args.input,
         output_file,
+        sample_file,
         penetration,
-        sampled_color=args.sampled_color,
-        unsampled_color=args.unsampled_color,
         seed=args.seed,
     )
     print(
         f"Selected {selected_count}/{vehicle_count} vehicles "
-        f"({penetration:g}%) into {output_file}"
+        f"({penetration:g}%) into {output_file}; ids written to {sample_file}"
     )
 
 

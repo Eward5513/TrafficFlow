@@ -187,3 +187,17 @@ python $SUMO_HOME/tools/xml/xml2csv.py fcd_geo.xml > fcd_geo.csv
 # 将生成路网转化为geojson数据格式，与生成的轨迹保持一致
 python $SUMO_HOME/tools/net/net2geojson.py -n net.net.xml -o roadnet.geojson --lanes --internal
 
+    <output>
+        <fcd-output value="output/fcd.xml"/>
+        <fcd-output.geo value="true"/>
+
+        <tripinfo-output value="output/tripinfo.xml"/>
+
+        <vehroute-output value="output/vehroute.xml"/>
+        <vehroute-output.exit-times value="true"/>
+        <vehroute-output.sorted value="true"/>
+        <vehroute-output.write-unfinished value="true"/>
+
+        <summary-output value="output/summary.xml"/>
+        <statistic-output value="output/statistics.xml"/>
+    </output>

@@ -1,0 +1,37 @@
+<configuration>
+    <input>
+        <net-file value="data/net_tls1.net.xml"/>
+        <route-files value="penetration/50.rou.xml"/>
+    </input>
+
+    <processing>
+        <seed value="42"/>
+        <threads value="1"/>
+
+        <device.rerouting.explicit value="shuffled_*,random*"/>
+        <device.rerouting.period value="60"/>
+        <device.rerouting.adaptation-interval value="10"/>
+        <device.rerouting.adaptation-steps value="30"/>
+    </processing>
+
+    <time>
+        <begin value="0"/>
+        <time-to-teleport value="300"/>
+    </time>
+
+    <output>
+        <fcd-output value="output/fcd.xml"/>
+        <fcd-output.geo value="true"/>
+        <fcd-output.period value="1"/>
+
+        <tripinfo-output value="output/tripinfo.xml"/>
+
+        <vehroute-output value="output/vehroute.xml"/>
+        <vehroute-output.exit-times value="true"/>
+        <vehroute-output.sorted value="true"/>
+        <vehroute-output.write-unfinished value="true"/>
+
+        <summary-output value="output/summary.xml"/>
+        <statistic-output value="output/statistics.xml"/>
+    </output>
+</configuration>
