@@ -6,7 +6,6 @@ vis/frontend/Cesium-1.127
 __pycache__/
 
 analysis/ocr
-analysis/simulation/**
 
 !analysis/simulation/simulation_output.sumocfg
 !analysis/simulation/simulation_replay.sumocfg
@@ -18,3 +17,7 @@ analysis/matching/**
 analysis/flow/**
 !analysis/flow/**/
 !analysis/flow/**/*.py
+
+analysis/simulation/**
+!analysis/simulation/**/
+!analysis/simulation/**/*.py
