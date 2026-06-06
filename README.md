@@ -50,7 +50,6 @@ ocr ───────────┘
 | `refine_ocr_summary.py` | 用合法 edge id 集合修正 OCR 把一个 edge 切成两个 token 的错误、删除以 `(` 开头的无关行、删除连续重复行、合并 OCR 抖动产生的近似重复行，输出 `all_ocr_no_blank_lines_refined.txt` 与对应日志 |
 | `build_routes.py` | 把"以 vin 起头的连续行"聚合成轨迹组，做时间戳单调性检查，输出两份：`route_by_edge.txt`（按 vin 合并）和 `route_by_edge_no_merge.txt`（每个原始组独立一条），以及合并/跳过日志 |
 | `export_routes_json.py` | 把单行过长的 `route_by_edge.txt` 按每行最多 N 对 `(timestamp, edge_id)` 折行，便于后续阅读和分块处理 |
-| `merge_basic_routes.py` | 把 `analysis/matching/matched_routes.rou.xml`、`matched_routes_shuffled_depart.rou.xml` 和 `analysis/simulation/random_routes_1w.rou.xml` 合并并按 depart 排序，输出到 `analysis/simulation/basic_data.rou.xml`（即仿真的"基础需求"） |
 
 ### 子目录
 
@@ -67,9 +66,6 @@ get_snapshoot.py
   → build_routes.py                  (聚合成轨迹)
   → 交给 matching/
 ```
-
-`merge_basic_routes.py` 是出口阶段，把 OSM 匹配出的 SUMO 路由和随机生成的背景流量合并成仿真的统一输入。
-
 
 ## 3. matching/
 
@@ -101,6 +97,7 @@ get_snapshoot.py
 | `simulation_output.sumocfg` | SUMO 输出模板配置，可由 `run_penetration_simulations.py` 按渗透率生成对应配置 |
 | `simulation_output_5.sumocfg` | 渗透率 5% 的对照版本 |
 | `simulation_replay.sumocfg` | 只含 input/processing/time 的复盘模板，由 `replay.py` 按渗透率生成对应 cfg |
+| `merge_basic_routes.py` | 把 `analysis/matching/matched_routes.rou.xml`、`matched_routes_shuffled_depart.rou.xml` 和 `analysis/simulation/random_routes_1w.rou.xml` 合并并按 depart 排序，输出到 `analysis/simulation/basic_data.rou.xml`（即仿真的"基础需求"） |
 | `run_penetration_simulations.py` | 按脚本顶部写死的渗透率批量生成 `sumocfg/simulation_output_<rate>_<seed>.sumocfg`，并并行执行 `sumo -c`，日志写到 `sumocfg/*.log` |
 | `replay.py` | 复盘用 helper：`python replay.py 105 -p 50` ⇒ 生成 `sumocfg/simulation_replay_50_42.sumocfg` 后执行 `sumo-gui --load-state state/50/state_105.00.xml.gz --begin 105` |
 
@@ -110,7 +107,7 @@ get_snapshoot.py
 
 - `random_passenger` —— duarouter 输出的纯 vType 定义（`<vType id="random_passenger" vClass="passenger"/>`）。
 - `random_trips_1w.trips.xml` / `random_routes_1w.rou.xml` —— `randomTrips.py --validate` 生成的 1 万条背景随机流，以及 duarouter 排好的对应路由。
-- `basic_data.rou.xml` —— 由 `analysis/ocr/merge_basic_routes.py` 合成的"完整需求"（matched + matched_shuffled + random），是 `penetration/` 抽样的源头。
+- `basic_data.rou.xml` —— 由 `analysis/simulation/merge_basic_routes.py` 合成的"完整需求"（matched + matched_shuffled + random），是 `penetration/` 抽样的源头。
 
 ### penetration/
 
@@ -173,7 +170,7 @@ metrics/
 2. `ocr/get_snapshoot.py` → `extract_routes_from_screenshots.py` → `validate_ocr_summary.py` → `refine_ocr_summary.py` → `build_routes.py`。
 3. `matching/parse_trajectories.py` → `matching/export_sumo_routes.py`。
 4. `randomTrips.py` 生成背景流量（命令见下方「SUMO 命令备忘」）。
-5. `ocr/merge_basic_routes.py` 合并出 `simulation/basic_data.rou.xml`。
+5. `simulation/merge_basic_routes.py` 合并出 `simulation/basic_data.rou.xml`。
 6. `simulation/penetration/generate_penetration_routes.py -p <rate>` 抽样。
 7. `cd analysis/simulation && python run_penetration_simulations.py` 跑仿真，得到 `output/<rate>/fcd.csv` 与 `state/<rate>/`。
 8. `flow/print_junction_tls.py` → `flow/count_edge_departures_by_cycle.py -p <rate>`。
