@@ -26,7 +26,8 @@ except ImportError:
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_FILE = BASE_DIR / "matched_trips.rou.xml"
-DEFAULT_REACHABILITY_LOG_FILE = BASE_DIR / "reachability_prune_logs.txt"
+LOG_DIR = BASE_DIR / "log"
+DEFAULT_REACHABILITY_LOG_FILE = LOG_DIR / "reachability_prune_logs.txt"
 DEFAULT_VEHICLE_TYPE_ID = "passenger"
 DEFAULT_VEHICLE_CLASS = "passenger"
 DEFAULT_DEPART_BEGIN = 0.0
@@ -388,6 +389,7 @@ __all__ = [
     "DEFAULT_PREVIEW_COUNT",
     "DEFAULT_VEHICLE_CLASS",
     "DEFAULT_VEHICLE_TYPE_ID",
+    "LOG_DIR",
     "MatchedTrip",
     "build_depart_times",
     "build_osm_candidate_index",

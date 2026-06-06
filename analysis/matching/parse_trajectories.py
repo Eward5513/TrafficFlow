@@ -32,12 +32,11 @@ except ImportError:
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_TRAJ_FILE = (
-    BASE_DIR.parent / "ocr" / "ocr_output" / "route_by_edge_no_merge.txt"
-)
+DEFAULT_TRAJ_FILE = BASE_DIR / "route_by_edge_no_merge.txt"
 DEFAULT_OUTPUT_FILE = BASE_DIR / "matched_routes.txt"
-DEFAULT_FAILED_OUTPUT_FILE = BASE_DIR / "failed_routes.txt"
-DEFAULT_FUZZY_LOG_FILE = BASE_DIR / "fuzzy_match_logs.txt"
+LOG_DIR = BASE_DIR / "log"
+DEFAULT_FAILED_OUTPUT_FILE = LOG_DIR / "failed_routes.txt"
+DEFAULT_FUZZY_LOG_FILE = LOG_DIR / "fuzzy_match_logs.txt"
 TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 
 
@@ -586,6 +585,7 @@ __all__ = [
     "DEFAULT_FUZZY_LOG_FILE",
     "DEFAULT_OUTPUT_FILE",
     "DEFAULT_TRAJ_FILE",
+    "LOG_DIR",
     "MatchResult",
     "MatchingRunStats",
     "PathCache",
