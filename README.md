@@ -222,7 +222,7 @@ sumo-gui -n analysis/road_network/net_tls.net.xml
 当前项目生成 1 万条背景随机流的命令：
 
 ```bash
-python $SUMO_HOME/tools/randomTrips.py \
+python3 $SUMO_HOME/tools/randomTrips.py \
   -n analysis/road_network/net_tls.net.xml \
   -o analysis/simulation/random_trips_1w.trips.xml \
   -r analysis/simulation/random_routes_1w.rou.xml \
@@ -257,7 +257,7 @@ python $SUMO_HOME/tools/randomTrips.py \
 
 ```bash
 sumo -n analysis/road_network/net_tls.net.xml \
-  -r analysis/matching/matched_routes.rou.xml \
+  -r analysis/matching/simulation/basic_data.rou.xml \
   --vehroute-output analysis/simulation/output/vehroute.xml \
   --vehroute-output.exit-times \
   --vehroute-output.write-unfinished \
@@ -273,21 +273,6 @@ sumo -n analysis/road_network/net_tls.net.xml \
 通过配置文件运行：
 
 ```bash
-cd analysis/simulation
-
-sumo -c simulation_output.sumocfg \
-  --seed 42 \
-  --threads 1 \
-  --fcd-output output/fcd.xml \
-  --fcd-output.geo \
-  --tripinfo-output output/tripinfo.xml \
-  --vehroute-output output/vehroute.xml \
-  --vehroute-output.exit-times \
-  --vehroute-output.sorted \
-  --vehroute-output.write-unfinished \
-  --summary-output output/summary.xml \
-  --statistic-output output/statistics.xml
-
 sumo -c simulation_output.sumocfg --seed 42 --threads 1
 ```
 
@@ -295,7 +280,7 @@ sumo -c simulation_output.sumocfg --seed 42 --threads 1
 
 ```bash
 sumo-gui -n analysis/road_network/net_tls.net.xml \
-  -r analysis/matching/matched_routes.rou.xml
+  -r analysis/simulation/basic_data.rou.xml
 ```
 
 ### 输出转换与复盘

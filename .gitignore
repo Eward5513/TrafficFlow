@@ -4,6 +4,7 @@ vis/frontend/Cesium-1.127
 .vscode
 
 __pycache__/
+random_passenger
 
 analysis/ocr
 
