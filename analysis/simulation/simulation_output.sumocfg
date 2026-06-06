@@ -1,0 +1,42 @@
+<configuration>
+    <input>
+        <net-file value="../road_network/net_tls.net.xml"/>
+        <route-files value="penetration/50_42.rou.xml"/>
+    </input>
+
+    <processing>
+        <seed value="42"/>
+        <threads value="1"/>
+
+        <device.rerouting.explicit value="shuffled_*,random*"/>
+        <device.rerouting.period value="60"/>
+        <device.rerouting.adaptation-interval value="10"/>
+        <device.rerouting.adaptation-steps value="30"/>
+    </processing>
+
+    <time>
+        <begin value="0"/>
+        <time-to-teleport value="300"/>
+    </time>
+
+    <output>
+        <fcd-output value="output/50/fcd.csv"/>
+        <fcd-output.geo value="true"/>
+        <device.fcd.period value="1"/>
+        <fcd-output.attributes value="id,x,y,angle,type,speed,pos,lane"/>
+
+        <output.column-header value="plain"/>
+        <output.column-separator value=","/>
+
+        <tripinfo-output value="output/50/tripinfo.xml"/>
+
+        <vehroute-output value="output/50/vehroute.xml"/>
+        <vehroute-output.exit-times value="true"/>
+        <vehroute-output.sorted value="true"/>
+        <vehroute-output.write-unfinished value="true"/>
+
+        <summary-output value="output/50/summary.xml"/>
+        <statistic-output value="output/50/statistics.xml"/>
+
+    </output>
+</configuration>
