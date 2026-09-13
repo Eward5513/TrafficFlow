@@ -1,0 +1,93 @@
+{
+  "model_name": "stgcn",
+  "framework": "pytorch",
+  "code_version": "0.1.0",
+  "data_root": "reimplementation/stgcn/prepared_data/r-only",
+  "weighted_adjacency": "reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy",
+  "graph_metadata": "reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_weighted_adjacency_metadata.json",
+  "graph_validation": "reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_weighted_adjacency_validation.json",
+  "r_nodes": "analysis/graph/r_graph/r_nodes.csv",
+  "node_mapping": "reimplementation/stgcn/prepared_data/r-only/node_mapping.csv",
+  "normalization": "reimplementation/stgcn/prepared_data/r-only/normalization.json",
+  "split_manifest": "reimplementation/stgcn/prepared_data/r-only/split_manifest.json",
+  "dataset_metadata": "reimplementation/stgcn/prepared_data/r-only/dataset_metadata.json",
+  "data_validation": "reimplementation/stgcn/prepared_data/r-only/validation_summary.json",
+  "output_root": "reimplementation/stgcn/experiments/r_only",
+  "rates": ["p05", "p10", "p20", "p30", "p40", "p50", "p70"],
+  "n_his": 12,
+  "n_pred_original": 9,
+  "target_mode": "last-observed-step",
+  "num_nodes": 56,
+  "input_channels": 1,
+  "output_channels": 1,
+  "output_steps": 1,
+  "Ks": 3,
+  "Kt": 3,
+  "blocks": [[1, 32, 64], [64, 32, 128]],
+  "epochs": 50,
+  "batch_size": 50,
+  "learning_rate": 0.001,
+  "optimizer": "RMSProp",
+  "rmsprop_alpha": 0.9,
+  "rmsprop_eps": 1e-10,
+  "lr_decay_epochs": 5,
+  "lr_decay_rate": 0.7,
+  "keep_prob": 1.0,
+  "dropout": 0.0,
+  "weight_decay": 0.0,
+  "weight_decay_in_optimizer": false,
+  "seed": 42,
+  "device": "auto",
+  "num_workers": 0,
+  "early_stopping_patience": 0,
+  "amp": false,
+  "gradient_clip": 0.0,
+  "checkpoint_monitor": "validation_mae_raw",
+  "clip_negative_predictions": false,
+  "expected_undirected_neighbors": 137,
+  "expected_nonzero_offdiag": 274,
+  "adaptations": [
+    {
+      "field": "num_nodes",
+      "original_value": 228,
+      "adapted_value": 56,
+      "adaptation_reason": "R-only subgraph has 56 SUMO edges."
+    },
+    {
+      "field": "n_pred / output_steps / target_mode",
+      "original_value": "n_pred=9, label = next frames after the 12-step window, recursive multi-step inference",
+      "adapted_value": "output_steps=1, target_mode=last-observed-step, label = full flow at slot s+11",
+      "adaptation_reason": "This project reconstructs same-window full flow, not PeMS future forecasting. Do not feed n_his+1 future slices."
+    },
+    {
+      "field": "graph input",
+      "original_value": "weight_matrix(csv) with /10000 and Gaussian kernel",
+      "adapted_value": "load finished stgcn_weighted_adjacency.npy",
+      "adaptation_reason": "W is already Gaussian-weighted on metre distances; PeMS /10000 must not be copied."
+    },
+    {
+      "field": "dropout keep_prob",
+      "original_value": "placeholder keep_prob, always fed 1.0 in trainer.py",
+      "adapted_value": "dropout=0.0",
+      "adaptation_reason": "Original training never dropped units."
+    },
+    {
+      "field": "weight_decay_in_optimizer",
+      "original_value": "tf.nn.l2_loss weights collected but not added to minimize()",
+      "adapted_value": false,
+      "adaptation_reason": "Match original backprop target: prediction l2_loss only. Collected L2 is logged."
+    },
+    {
+      "field": "lr_decay_step_unit",
+      "original_value": "tf.train.exponential_decay staircase, decay_steps=5*epoch_step, global_steps += 1 each training batch",
+      "adapted_value": "torch.optim.lr_scheduler.StepLR(step_size=5*batches_per_epoch, gamma=0.7) stepped after every training batch",
+      "adaptation_reason": "Keep the original 0.7 drop every 5 epochs measured in optimizer steps. Do not step the scheduler once per epoch."
+    },
+    {
+      "field": "framework",
+      "original_value": "TensorFlow 1.x",
+      "adapted_value": "PyTorch",
+      "adaptation_reason": "Project-wide reimplementation standard."
+    }
+  ]
+}

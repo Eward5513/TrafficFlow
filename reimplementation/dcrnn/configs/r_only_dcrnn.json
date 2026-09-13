@@ -1,0 +1,111 @@
+{
+  "model_name": "dcrnn",
+  "framework": "pytorch",
+  "code_version": "0.1.0",
+  "data_root": "reimplementation/stgcn/prepared_data/r-only",
+  "adjacency": "reimplementation/dcrnn/prepared_data/r-only/adjacency_matrix/dcrnn_weighted_adjacency.npy",
+  "adjacency_pickle": "reimplementation/dcrnn/prepared_data/r-only/adjacency_matrix/dcrnn_adj_mx.pkl",
+  "graph_metadata": "reimplementation/dcrnn/prepared_data/r-only/adjacency_matrix/dcrnn_graph_metadata.json",
+  "graph_validation": "reimplementation/dcrnn/prepared_data/r-only/adjacency_matrix/dcrnn_graph_validation.json",
+  "r_nodes": "analysis/graph/r_graph/r_nodes.csv",
+  "node_mapping": "reimplementation/stgcn/prepared_data/r-only/node_mapping.csv",
+  "normalization": "reimplementation/stgcn/prepared_data/r-only/normalization.json",
+  "split_manifest": "reimplementation/stgcn/prepared_data/r-only/split_manifest.json",
+  "dataset_metadata": "reimplementation/stgcn/prepared_data/r-only/dataset_metadata.json",
+  "data_validation": "reimplementation/stgcn/prepared_data/r-only/validation_summary.json",
+  "output_root": "reimplementation/dcrnn/experiments/r_only",
+  "rates": ["p05", "p10", "p20", "p30", "p40", "p50", "p70"],
+  "seq_len": 12,
+  "n_his": 12,
+  "horizon": 1,
+  "output_steps": 1,
+  "target_mode": "last-observed-step",
+  "num_nodes": 56,
+  "input_channels": 1,
+  "output_channels": 1,
+  "rnn_units": 64,
+  "num_rnn_layers": 2,
+  "max_diffusion_step": 2,
+  "filter_type": "dual_random_walk",
+  "use_curriculum_learning": true,
+  "cl_decay_steps": 2000,
+  "use_gc_for_ru": true,
+  "epochs": 100,
+  "batch_size": 64,
+  "learning_rate": 0.01,
+  "optimizer": "adam",
+  "adam_eps": 0.001,
+  "lr_decay_ratio": 0.1,
+  "lr_decay_epochs": [20, 30, 40, 50],
+  "min_learning_rate": 2e-06,
+  "max_grad_norm": 5.0,
+  "dropout": 0.0,
+  "weight_decay": 0.0,
+  "l1_decay": 0.0,
+  "seed": 42,
+  "device": "auto",
+  "num_workers": 0,
+  "early_stopping_patience": 0,
+  "amp": false,
+  "checkpoint_monitor": "validation_mae_raw_all",
+  "clip_negative_predictions": false,
+  "loss": "masked_mae_raw_null_val_0",
+  "null_val": 0.0,
+  "initialization": "xavier_uniform weights; gate bias 1.0; candidate bias 0.0; projection has no bias",
+  "adaptations": [
+    {
+      "field": "num_nodes",
+      "original_value": 207,
+      "adapted_value": 56,
+      "adaptation_reason": "R-only subgraph has 56 SUMO edges."
+    },
+    {
+      "field": "input_dim",
+      "original_value": 2,
+      "adapted_value": 1,
+      "adaptation_reason": "Prepared NPZ stores a single observed-flow channel, not PeMS speed + time-of-day."
+    },
+    {
+      "field": "horizon / target_mode",
+      "original_value": "horizon=12 future steps",
+      "adapted_value": "horizon=1, last-observed-step reconstruction, Y = full_flow[s+11]",
+      "adaptation_reason": "Same-window full-flow reconstruction, not PeMS future forecasting."
+    },
+    {
+      "field": "graph input",
+      "original_value": "scripts/gen_adj_mx.py with std Gaussian and normalized_k=0.1",
+      "adapted_value": "load finished dcrnn_weighted_adjacency.npy / dcrnn_adj_mx.pkl",
+      "adaptation_reason": "Directed metre-scale Gaussian W is already prepared; do not rerun PeMS construction."
+    },
+    {
+      "field": "filter_type",
+      "original_value": "code default laplacian; official METR-LA/PEMS-BAY yaml dual_random_walk",
+      "adapted_value": "dual_random_walk",
+      "adaptation_reason": "Official training configs use dual_random_walk."
+    },
+    {
+      "field": "checkpoint_monitor",
+      "original_value": "masked MAE val_loss (zeros excluded)",
+      "adapted_value": "validation MAE on raw counts including zeros",
+      "adaptation_reason": "Project-wide checkpoint rule. Original masked loss is still the training objective."
+    },
+    {
+      "field": "test during training",
+      "original_value": "evaluate test every 10 epochs",
+      "adapted_value": "test once after loading the best checkpoint",
+      "adaptation_reason": "Test must not influence model selection."
+    },
+    {
+      "field": "early_stopping_patience",
+      "original_value": 50,
+      "adapted_value": 0,
+      "adaptation_reason": "Official yaml has patience 50, but this project requires the same 100-epoch budget for every penetration rate and selects the best checkpoint inside that fixed range."
+    },
+    {
+      "field": "framework",
+      "original_value": "TensorFlow 1.x",
+      "adapted_value": "PyTorch",
+      "adaptation_reason": "Project-wide reimplementation standard. TensorFlow is not installed."
+    }
+  ]
+}

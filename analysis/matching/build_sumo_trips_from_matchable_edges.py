@@ -1,3 +1,28 @@
+"""
+备选路径：把原始 OSM 轨迹宽松匹配成 SUMO `<trip>` 文件（当前未启用）。
+
+主流水线（严格匹配）是 `parse_trajectories.py` -> `export_sumo_routes.py`：
+要求整条轨迹的 SUMO edge 序列顺序连通，逐边还原出完整 `<route>`，
+路径和出发时刻都忠于观测数据（高保真），匹配不上的整条轨迹会被丢进
+`failed_routes.txt`。
+
+本脚本提供另一条宽松的路：不要求顺序连通，只要轨迹中至少 2 个 OSM edge
+能映射到 SUMO edge 且按序可达，就取 首边=from、末边=to、中间边=via 输出
+`<trip>`，把缺口留给 SUMO/duarouter 自己补路。这样能把严格匹配失败的
+轨迹也救回来，换取更大的样本量。
+
+当前不使用它的原因：
+1. 路径保真度低——边与边之间的缺口由路由器按最短路补全，不一定是
+   车辆实际走过的路；而本项目以高保真复现实测交通为目标。
+2. 出发时刻失真——depart 是在 [0, 3600] 秒内人为均匀铺开的，不是
+   轨迹的真实首边进入时刻。
+3. 与 `matched_routes.rou.xml` 来自同一批轨迹，同时使用会重复投放车辆。
+
+产物 `matched_trips.rou.xml` 没有接入下游仿真（`merge_basic_routes.py`
+和各 .sumocfg 均不引用）。如需启用，需先经 duarouter 转成完整 route，
+再替换/加入 merge 的输入。
+"""
+
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET

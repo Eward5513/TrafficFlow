@@ -1,0 +1,94 @@
+<additional xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/additional_file.xsd">
+
+    <!-- 其它时间方案：offpeak -->
+    <tlLogic id="cluster_1247897642_2350807770"
+             type="static"
+             programID="offpeak"
+             offset="0">
+
+        <phase duration="45" state="GGGGGGGrrrrrrrrrrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyy"/>
+        <phase duration="30" state="rrrrrrGGGGGrrrrGrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyy"/>
+        <phase duration="25" state="GrrrrrrrrrGGGGGGrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyy"/>
+        <phase duration="30" state="GrrrrrGrrrrrrrrGGG"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyy"/>
+
+    </tlLogic>
+
+
+    <!-- 晚高峰方案：evening_peak -->
+    <tlLogic id="cluster_1247897642_2350807770"
+             type="static"
+             programID="evening_peak"
+             offset="0">
+
+        <phase duration="30" state="GGGGGGGrrrrrrrrrrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyy"/>
+        <phase duration="30" state="rrrrrrGGGGGrrrrGrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyy"/>
+        <phase duration="45" state="GrrrrrrrrrGGGGGGrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyy"/>
+        <phase duration="30" state="GrrrrrGrrrrrrrrGGG"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyy"/>
+
+    </tlLogic>
+
+    <tlLogic id="cluster_1262396675_2350807772" 
+              type="static" 
+              programID="offpeak" 
+              offset="0">
+
+        <phase duration="45" state="GrrrrrGrrrrrrrrrGGGGG"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyyyyy"/>
+        <phase duration="30" state="GGGGGGGrrrrGrrrrrrrrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyyyyy"/>
+        <phase duration="30" state="GrrrrrrrrrrGGGGGGrrrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyyyyy"/>
+        <phase duration="30" state="rrrrrrGGGGGGrrrrGrrrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyyyyy"/>
+
+    </tlLogic>
+
+    <tlLogic id="cluster_1262396675_2350807772" 
+             type="static" 
+             programID="evening_peak" 
+             offset="0">
+
+        <phase duration="30" state="GrrrrrGrrrrrrrrrGGGGG"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyyyyy"/>
+        <phase duration="30" state="GGGGGGGrrrrGrrrrrrrrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyyyyy"/>
+        <phase duration="45" state="GrrrrrrrrrrGGGGGGrrrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyyyyy"/>
+        <phase duration="30" state="rrrrrrGGGGGGrrrrGrrrr"/>
+        <phase duration="3"  state="yyyyyyyyyyyyyyyyyyyyy"/>
+        
+    </tlLogic>
+
+
+    <!-- 分时段切换表 -->
+    <WAUT id="daily_tls_schedule"
+          refTime="0"
+          startProg="offpeak"
+          period="0">
+
+        <!-- 60000s 切换到晚高峰方案 -->
+        <wautSwitch time="60000" to="evening_peak"/>
+
+        <!-- 75000s 切回其它时间方案 -->
+        <wautSwitch time="75000" to="offpeak"/>
+
+    </WAUT>
+
+
+    <!-- 把这个切换表绑定到该路口 -->
+    <wautJunction wautID="daily_tls_schedule"
+                  junctionID="cluster_1247897642_2350807770"/>
+
+    <wautJunction wautID="daily_tls_schedule"
+                  junctionID="cluster_1262396675_2350807772"/>
+
+</additional>

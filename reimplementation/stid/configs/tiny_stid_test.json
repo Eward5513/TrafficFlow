@@ -1,0 +1,20 @@
+{
+  "kind": "tiny_stid_test",
+  "not_official_default": true,
+  "num_nodes": 4,
+  "input_len": 4,
+  "input_dim": 3,
+  "embed_dim": 8,
+  "output_len": 1,
+  "num_layer": 2,
+  "if_node": true,
+  "node_dim": 8,
+  "if_T_i_D": true,
+  "if_D_i_W": true,
+  "temp_dim_tid": 8,
+  "temp_dim_diw": 8,
+  "time_of_day_size": 288,
+  "day_of_week_size": 7,
+  "dropout": 0.0,
+  "seed": 42
+}

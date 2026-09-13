@@ -32,7 +32,7 @@ except ImportError:
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_TRAJ_FILE = BASE_DIR / "route_by_edge_no_merge.txt"
+DEFAULT_TRAJ_FILE = BASE_DIR.parent.parent / "ocr" / "ocr_output_all" / "route_by_edge_split.txt"
 DEFAULT_OUTPUT_FILE = BASE_DIR / "matched_routes.txt"
 LOG_DIR = BASE_DIR / "log"
 DEFAULT_FAILED_OUTPUT_FILE = LOG_DIR / "failed_routes.txt"
@@ -278,8 +278,14 @@ def match_trajectory_record(
     return result
 
 
-def format_matched_output(vin: str, matched_sumo_edges: list[str]) -> str:
-    return " ".join([vin, *matched_sumo_edges])
+def format_matched_output(
+    vin: str, start_time: str, matched_sumo_edges: list[str]
+) -> str:
+    """
+    One matched trajectory per line: vin, entry time of the first edge,
+    then the SUMO edge sequence.
+    """
+    return " ".join([vin, start_time, *matched_sumo_edges])
 
 
 def format_failed_output(record: TrajectoryRecord, result: MatchResult) -> str:
@@ -489,7 +495,8 @@ def process_trajectory_file(
                         f"after={preview_edges(cleaned_edges, limit=6)}"
                     )
                 matched_fh.write(
-                    format_matched_output(record.vin, cleaned_edges) + "\n"
+                    format_matched_output(record.vin, record.timestamps[0], cleaned_edges)
+                    + "\n"
                 )
                 if len(success_examples) < preview_count:
                     fuzzy_tag = " [fuzzy]" if result.fuzzy else ""
