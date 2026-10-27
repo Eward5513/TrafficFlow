@@ -1,0 +1,24 @@
+# Official Xuancheng26 trip-repair configuration.
+# Paths point at the read-only source tree and the writable data tree.
+
+source_root: /data5/tzhang174/Xuancheng26
+data_root: /data5/tzhang174/TrafficFlow/xuancheng26
+code_root: /home/tzhang174/TrafficFlow/dataset/xuancheng26/simulation
+
+sumo_net: /data5/tzhang174/Xuancheng26/network/xuancheng.net.xml
+cityflow_roadnet: /data5/tzhang174/Xuancheng26/network/roadnet_xuancheng250319.json
+trips_glob: data_2023_04_*_type_filtered.json
+
+max_inserted_edges: 3
+expected_normal_edges: 1744
+min_route_edges: 2
+depart_time_limit: 86400
+default_workers: 10
+max_workers: 10
+seed: 42
+
+# Official activity data keeps 29 unique dates.
+exclude_dates:
+  "2023-04-09": excluded_duplicate_of=2023-04-08
+
+keep_date_for_duplicate: "2023-04-08"

@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+from _paths import simulation_data_dir
+
 BASE_DIR = Path(__file__).resolve().parent
 ANALYSIS_DIR = BASE_DIR.parent
 
@@ -49,7 +51,7 @@ MATCHED_ROUTES_FILE = ANALYSIS_DIR / "matching" / "matched_routes.rou.xml"
 REVERSE_PAIRS_FILE = ANALYSIS_DIR / "road_network" / "reverse_edge_pairs.txt"
 # 用于连通性检测的路网文件
 NET_FILE = ANALYSIS_DIR / "road_network" / "net_tls.net.xml"
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = simulation_data_dir()
 # generate_random_routes.py 的产物目录，同时也是编号与种子的唯一来源
 RANDOM_DIR = DATA_DIR / "random_trip"
 # 20 份日需求的输出目录

@@ -33,12 +33,12 @@ batch `64`, epochs `100`. MLP dropout is hardcoded `0.15` in `mlp.py`.
 
 ## Isolation
 
-- Output is `reimplementation/stid/experiments/r_only/`.
+- Output is `/data5/tzhang174/TrafficFlow/training_results/stid/`.
 - Never write into DCRNN, Graph WaveNet, STSGCN, STFGNN, PDFormer, or STGCN
   experiment directories.
 - Prepared NPZ and R graphs are read-only. STID does not load adjacency.
 - Unit tests and `--smoke-test-only` must not create official checkpoints.
-- Prefer CPU while DCRNN may be using the machine.
+- Default device is `cuda`. `--smoke-test-only` still forces CPU.
 
 ## Task definition
 
@@ -66,3 +66,9 @@ python3 reimplementation/stid/train_r_only_stid.py
 
 `--smoke-test-only` runs one p70 training batch on CPU and discards the
 model. Do not pass graph flags; the CLI does not accept them.
+
+Official `run_single_rate` trains 100 epochs, selects `best_checkpoint.pt`
+by validation raw MAE, then reloads that checkpoint and writes
+`test_metrics.json` plus `test_predictions.npz` through
+`reimplementation.common.evaluation`. Test is never used for checkpoint
+selection. There is no early stopping.

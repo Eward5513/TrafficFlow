@@ -78,7 +78,11 @@ OUTPUT_ARTIFACTS = (
 GRAPH_DIR = Path(__file__).resolve().parent
 ANALYSIS_DIR = GRAPH_DIR.parent
 PROJECT_ROOT = ANALYSIS_DIR.parent
-DEFAULT_SUBGRAPH_FILE = ANALYSIS_DIR / "simulation" / "data" / "subgraph.txt"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from data_root import subgraph_file  # noqa: E402
+
+DEFAULT_SUBGRAPH_FILE = subgraph_file()
 DEFAULT_NET_FILE = ANALYSIS_DIR / "road_network" / "net_tls.net.xml"
 DEFAULT_OUTPUT_DIR = GRAPH_DIR / "r_graph"
 

@@ -4,13 +4,28 @@ vis/frontend/Cesium-1.127
 .vscode
 
 __pycache__/
+.pytest_cache/
 random_passenger
 
-ocr/
-reference/
+# Xuancheng26 generated configs, logs, and the derived 3-second TLS copy.
+# The hand-edited net and night_peak.add.xml stay tracked.
+dataset/xuancheng26/fcd_configs/
+dataset/xuancheng26/fcd_configs_3s/
+dataset/xuancheng26/fcd_batch*.log
+dataset/xuancheng26/fcd_batch*.pid
+dataset/xuancheng26/tls_3s_audit.json
+dataset/xuancheng26/tls_3s_audit.md
+dataset/xuancheng26/tls_3s_phase_durations.csv
+dataset/xuancheng26/xuancheng_tls_3s.net.xml
+dataset/xuancheng26/night_peak_3s.add.xml
+fcd_batch*.log
+fcd_batch*.pid
 
-!analysis/simulation/simulation_output.sumocfg
-!analysis/simulation/simulation_replay.sumocfg
+ocr/**
+!ocr/**/
+!ocr/**/*.py
+!ocr/**/README.md
+reference/
 
 analysis/matching/**
 !analysis/matching/**/

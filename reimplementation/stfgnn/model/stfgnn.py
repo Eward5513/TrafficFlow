@@ -29,7 +29,7 @@ class STFGNN(nn.Module):
         temporal_adj: np.ndarray,
         *,
         seq_len: int = 12,
-        num_nodes: int = 56,
+        num_nodes: int | None = None,
         input_channels: int = 1,
         first_layer_embedding_size: int = 64,
         filters: Sequence[Sequence[int]] | None = None,
@@ -49,7 +49,7 @@ class STFGNN(nn.Module):
         if module_type != "individual":
             raise ValueError("official STFGNN entry only implements module_type=individual")
         self.seq_len = int(seq_len)
-        self.num_nodes = int(num_nodes)
+        self.num_nodes = int(spatial_adj.shape[0] if num_nodes is None else num_nodes)
         self.input_channels = int(input_channels)
         self.first_layer_embedding_size = int(first_layer_embedding_size)
         self.filter_list = [[int(channel) for channel in group] for group in filters]

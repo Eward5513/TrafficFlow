@@ -36,8 +36,14 @@ CALENDAR_DAY_SOURCE = "calendar"
 ALLOWED_DAY_SOURCES = {ORIGINAL_DAY_SOURCE, CALENDAR_DAY_SOURCE}
 
 
+def _as_int64_vector(value: np.ndarray | torch.Tensor) -> np.ndarray:
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy().astype(np.int64, copy=False).reshape(-1)
+    return np.asarray(value, dtype=np.int64).reshape(-1)
+
+
 def slot_series(window_start_slot: np.ndarray | torch.Tensor, n_his: int) -> np.ndarray:
-    starts = np.asarray(window_start_slot, dtype=np.int64).reshape(-1)
+    starts = _as_int64_vector(window_start_slot)
     offsets = np.arange(int(n_his), dtype=np.int64)
     return starts[:, None] + offsets[None, :]
 
@@ -63,7 +69,7 @@ def assert_target_is_last_history(
     n_his: int,
 ) -> np.ndarray:
     last = last_history_slot(window_start_slot, n_his)
-    target = np.asarray(target_slot, dtype=np.int64).reshape(-1)
+    target = _as_int64_vector(target_slot)
     if last.shape != target.shape or not np.array_equal(last, target):
         raise ReimplementationError(
             "target_slot must equal window_start_slot + n_his - 1 "
@@ -94,7 +100,7 @@ def long_index_from_fraction(
 
 def sequential_day_of_week_index(day_index: np.ndarray | torch.Tensor) -> np.ndarray:
     """Original PeMS: ``(i // 288) % 7``. Explicit, not a silent calendar guess."""
-    indices = np.asarray(day_index, dtype=np.int64).reshape(-1)
+    indices = _as_int64_vector(day_index)
     if np.any(indices < 0):
         raise ReimplementationError("day_index must be non-negative")
     return indices % DAY_OF_WEEK_SIZE
@@ -145,7 +151,7 @@ def calendar_day_of_week_index(
     mapping: Mapping[str, int],
     all_days: Sequence[str],
 ) -> np.ndarray:
-    indices = np.asarray(day_index, dtype=np.int64).reshape(-1)
+    indices = _as_int64_vector(day_index)
     names = [str(item) for item in all_days]
     weekdays = np.empty(indices.shape, dtype=np.int64)
     for position, index in enumerate(indices.tolist()):

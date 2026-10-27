@@ -12,7 +12,7 @@ Usage:
 
     python3 analysis/simulation/count_edge_flow.py \\
         --trajectories .../day_01/trajectories.csv \\
-        --subgraph analysis/simulation/data/subgraph.txt \\
+        --subgraph simulation_data/subgraph.txt \\
         --output-dir .../day_01 \\
         --day-label day_01
 """

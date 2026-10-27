@@ -1,0 +1,5 @@
+# Xuancheng26 trip repair. Python 3.10+.
+# Runtime uses the standard library plus PyYAML (already present).
+# Metadata is jsonl.gz because PyArrow is not installed.
+PyYAML>=6.0
+pytest>=8.0

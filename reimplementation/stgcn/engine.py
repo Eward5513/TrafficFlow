@@ -21,7 +21,19 @@ from reimplementation.common.data.r_only_npz_dataset import (
     invert_target,
     rate_tag,
 )
+from reimplementation.common.evaluation import reload_best_checkpoint
 from reimplementation.common.errors import ReimplementationError
+from reimplementation.common.experiment_protocol import (
+    ExperimentClock,
+    assert_official_rates,
+    attach_prediction_aliases,
+    build_run_metadata,
+    finalize_completed_rate,
+    mark_rate_failed,
+    reset_peak_memory,
+    trainable_parameter_count,
+    write_prediction_npz,
+)
 from reimplementation.common.metrics.traffic_metrics import traffic_metrics
 from reimplementation.common.utils.atomic_io import atomic_write_json, atomic_write_npz
 from reimplementation.common.utils.checkpoint import (
@@ -37,6 +49,15 @@ from reimplementation.stgcn.validation import (
     validate_graph,
     validate_model_shapes,
     validate_prepared_data,
+)
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from data_root import (
+    PathLayoutError,
+    assert_training_results_output,
+    resolve_repo_or_data_path,
 )
 
 
@@ -70,10 +91,17 @@ def resolve_device(name: str) -> torch.device:
 
 
 def resolve_path(project_root: Path, value: str | Path) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return (project_root / path).resolve()
+    return resolve_repo_or_data_path(project_root, value)
+
+
+def resolve_training_output(project_root: Path, value: str | Path, *, model_name: str) -> Path:
+    try:
+        return assert_training_results_output(
+            resolve_repo_or_data_path(project_root, value),
+            model_name=model_name,
+        )
+    except PathLayoutError as exc:
+        raise ReimplementationError(str(exc)) from exc
 
 
 def parameter_sha256(model: torch.nn.Module) -> str:
@@ -272,7 +300,7 @@ def evaluate_one_epoch(
         "sample_index": np.concatenate(sample_index, axis=0),
     }
     order = np.argsort(packed["sample_index"], kind="stable")
-    packed = {key: value[order] for key, value in packed.items()}
+    packed = attach_prediction_aliases({key: value[order] for key, value in packed.items()})
     metrics = traffic_metrics(packed["y_pred_raw"], packed["y_true_raw"], clip_negative=False)
     metrics["prediction_loss"] = total_pred / max(n_batches, 1)
     packed["metrics"] = metrics
@@ -309,16 +337,11 @@ def _write_split_outputs(
 ) -> None:
     metrics = dict(result["metrics"])
     atomic_write_json(output_dir / f"{split}_metrics.json", metrics)
-    atomic_write_npz(
+    write_prediction_npz(
         output_dir / f"{split}_predictions.npz",
-        y_pred_normalized=result["y_pred_normalized"],
-        y_pred_raw=result["y_pred_raw"],
-        y_true_normalized=result["y_true_normalized"],
-        y_true_raw=result["y_true_raw"],
-        day_index=result["day_index"],
-        window_start_slot=result["window_start_slot"],
-        target_slot=result["target_slot"],
-        sample_index=result["sample_index"],
+        result,
+        expected_count=int(result["y_pred_raw"].shape[0]),
+        n_his=12,
     )
     if not write_tables:
         return
@@ -487,6 +510,7 @@ def run_single_rate(
     device = resolve_device(str(config.get("device", "auto")))
     rate_dir = output_root / tag / f"seed_{seed}"
     rate_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(rate_dir / "resolved_config.json", dict(config))
     loaders_pack = build_dataloaders(data_root, tag, config, data_info["sample_counts"])
     model = build_model(config, graph_info["cheb_kernel"]).to(device)
     init_hash = parameter_sha256(model)
@@ -503,6 +527,8 @@ def run_single_rate(
     start_epoch = 0
     best_metric = float("inf")
     best_epoch = -1
+    clock = ExperimentClock()
+    clock.mark_experiment_start()
     if resume_path is not None:
         payload = load_checkpoint(resume_path, map_location=device)
         assert_checkpoint_compatible(
@@ -569,6 +595,9 @@ def run_single_rate(
     patience = int(config.get("early_stopping_patience", 0))
     epochs_without_improve = 0
     epochs = int(config["epochs"])
+    param_count = trainable_parameter_count(model)
+    reset_peak_memory(device)
+    clock.mark_train_start()
     for epoch in range(start_epoch, epochs):
         epoch_start = time.time()
         train_stats = train_one_epoch(
@@ -646,16 +675,14 @@ def run_single_rate(
         if patience > 0 and epochs_without_improve >= patience:
             break
 
+    clock.mark_train_end()
     atomic_write_csv_rows(
         rate_dir / "training_history.csv",
         list(history_rows[0].keys()) if history_rows else ["epoch"],
         history_rows,
     )
     atomic_write_json(rate_dir / "training_history.json", history_rows)
-    best_path = rate_dir / "best_checkpoint.pt"
-    if best_path.is_file():
-        payload = load_checkpoint(best_path, map_location=device)
-        model.load_state_dict(payload["model_state_dict"])
+    reload_best_checkpoint(model, rate_dir / "best_checkpoint.pt", device)
     val_best = evaluate_one_epoch(
         model, loaders_pack["loaders"]["validation"], criterion, device, mean_y, std_y
     )
@@ -682,22 +709,45 @@ def run_single_rate(
         write_tables=True,
         node_ids=list(data_info["node_ids"]),
     )
-    atomic_write_json(
-        rate_dir / "run_metadata.json",
-        {
-            "penetration_rate": tag,
-            "seed": seed,
-            "best_epoch": best_epoch,
-            "best_metric": best_metric,
-            "parameter_count": model.parameter_count(),
+    clock.mark_experiment_end()
+    metadata = build_run_metadata(
+        model="stgcn",
+        penetration=tag,
+        seed=seed,
+        device=device,
+        parameter_count=param_count,
+        training_loss="normalized_l2",
+        optimizer="RMSProp",
+        initial_lr=float(config["learning_rate"]),
+        scheduler="StepLR_5_epochs_gamma_0.7_per_batch",
+        max_epochs=epochs,
+        epochs_executed=len(history_rows),
+        best_epoch=best_epoch,
+        best_metric=best_metric,
+        early_stopping=False,
+        early_stopping_patience=None,
+        selection_metric="validation_mae_raw_including_zero",
+        clock=clock,
+        extra={
             "init_parameter_sha256": init_hash,
             "code_version": CODE_VERSION,
             "graph_sha256": graph_info["graph_sha256"],
             "data_file_sha256": train_hash,
-            "target_mode": "last-observed-step",
-            "did_not_use_test_for_selection": True,
-            "checkpoint_monitor": config.get("checkpoint_monitor", "validation_mae_raw"),
+            "checkpoint_monitor": "validation_mae_raw",
+            "early_stopped": False,
+            "rmsprop_alpha": float(config.get("rmsprop_alpha", 0.9)),
+            "rmsprop_eps": float(config.get("rmsprop_eps", 1e-10)),
         },
+    )
+    output_check = finalize_completed_rate(
+        rate_dir,
+        metadata=metadata,
+        history=history_rows,
+        expected_test_count=int(data_info["sample_counts"]["test"]),
+        expected_val_count=int(data_info["sample_counts"]["validation"]),
+        n_his=int(config["n_his"]),
+        history_metric_key="validation_mae_raw",
+        history_rule="lt",
     )
     atomic_write_json(
         rate_dir / "run_validation.json",
@@ -708,10 +758,13 @@ def run_single_rate(
         },
     )
     return {
-        "status": "trained",
+        "status": "completed",
+        "rate": tag,
         "best_epoch": best_epoch,
         "best_metric": best_metric,
-        "parameter_count": model.parameter_count(),
+        "early_stopped": False,
+        "epochs_executed": len(history_rows),
+        "parameter_count": param_count,
         "init_parameter_sha256": init_hash,
         "validation_mae_raw": float(val_best["metrics"]["mae"]),
         "validation_rmse_raw": float(val_best["metrics"]["rmse"]),
@@ -721,6 +774,9 @@ def run_single_rate(
         "test_rmse_raw": float(test_best["metrics"]["rmse"]),
         "test_mape_nonzero": float(test_best["metrics"]["mape_nonzero"]),
         "test_wape": float(test_best["metrics"]["wape"]),
+        "train_wall_time_sec": metadata["train_wall_time_sec"],
+        "average_epoch_time_sec": metadata["average_epoch_time_sec"],
+        "output_check": output_check,
         "output_dir": rate_dir,
     }
 
@@ -738,7 +794,7 @@ def run_all_rates(
     smoke_only: bool = False,
     resume: Path | None = None,
 ) -> dict[str, Any]:
-    rate_list = [rate_tag(item) for item in rates]
+    rate_list = assert_official_rates(rates)
     if resume is not None and len(rate_list) > 1:
         raise ReimplementationError("use --resume together with --rate; do not share checkpoints across penetrations")
     logger.log({"stage": "scanning", "model_name": "stgcn", "status": "ok"})
@@ -824,18 +880,27 @@ def run_all_rates(
     init_hashes = []
     for rate in rate_list:
         print(f"[stgcn] stage=training_start rate={rate_tag(rate)} seed={config['seed']}", flush=True)
-        result = run_single_rate(
-            config,
-            project_root=project_root,
-            rate=rate,
-            data_root=data_root,
-            output_root=output_root,
-            graph_info=graph_info,
-            data_info=data_info,
-            logger=logger,
-            resume_path=resume if resume is not None else None,
-            smoke_only=False,
-        )
+        try:
+            result = run_single_rate(
+                config,
+                project_root=project_root,
+                rate=rate,
+                data_root=data_root,
+                output_root=output_root,
+                graph_info=graph_info,
+                data_info=data_info,
+                logger=logger,
+                resume_path=resume if resume is not None else None,
+                smoke_only=False,
+            )
+            if str(result.get("status")) != "completed":
+                raise ReimplementationError(f"{rate_tag(rate)} did not reach status=completed")
+        except Exception as exc:
+            mark_rate_failed(
+                output_root / rate_tag(rate) / f"seed_{int(config['seed'])}",
+                reason=str(exc),
+            )
+            raise
         init_hashes.append(result.get("init_parameter_sha256"))
         summaries.append({"rate": rate_tag(rate), **{k: v for k, v in result.items() if k != "output_dir"}})
         print(

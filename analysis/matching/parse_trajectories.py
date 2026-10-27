@@ -32,7 +32,12 @@ except ImportError:
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_TRAJ_FILE = BASE_DIR.parent.parent / "ocr" / "ocr_output_all" / "route_by_edge_split.txt"
+_REPO_ROOT = BASE_DIR.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from data_root import ocr_data_dir
+
+DEFAULT_TRAJ_FILE = ocr_data_dir() / "ocr_output_all" / "route_by_edge_split.txt"
 DEFAULT_OUTPUT_FILE = BASE_DIR / "matched_routes.txt"
 LOG_DIR = BASE_DIR / "log"
 DEFAULT_FAILED_OUTPUT_FILE = LOG_DIR / "failed_routes.txt"

@@ -19,6 +19,7 @@ from reimplementation.stgcn.engine import (
     evaluate_one_epoch,
     resolve_device,
     resolve_path,
+    resolve_training_output,
     _write_split_outputs,
 )
 from reimplementation.stgcn.losses import STGCNPredictionLoss
@@ -49,7 +50,7 @@ def main() -> None:
     data_root = resolve_path(PROJECT_ROOT, args.data_root or config["data_root"])
     adjacency = resolve_path(PROJECT_ROOT, args.weighted_adjacency or config["weighted_adjacency"])
     r_nodes = resolve_path(PROJECT_ROOT, args.r_nodes or config["r_nodes"])
-    output_dir = resolve_path(PROJECT_ROOT, args.output_dir)
+    output_dir = resolve_training_output(PROJECT_ROOT, args.output_dir, model_name="stgcn")
     if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite:
         raise ReimplementationError(f"{output_dir} is not empty; pass --overwrite")
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -27,7 +27,19 @@ from reimplementation.common.data.r_only_npz_dataset import (
     rate_tag,
     read_target_scaler,
 )
+from reimplementation.common.evaluation import reload_best_checkpoint, upsert_overall_summary
 from reimplementation.common.errors import ReimplementationError
+from reimplementation.common.experiment_protocol import (
+    ExperimentClock,
+    assert_official_rates,
+    attach_prediction_aliases,
+    build_run_metadata,
+    finalize_completed_rate,
+    mark_rate_failed,
+    reset_peak_memory,
+    trainable_parameter_count,
+    write_prediction_npz,
+)
 from reimplementation.common.metrics.traffic_metrics import traffic_metrics
 from reimplementation.common.utils.atomic_io import atomic_write_json, atomic_write_npz
 from reimplementation.common.utils.checkpoint import (
@@ -327,7 +339,7 @@ def evaluate_one_epoch(
         "sample_index": np.concatenate(sample_index, axis=0),
     }
     order = np.argsort(packed["sample_index"], kind="stable")
-    packed = {key: value[order] for key, value in packed.items()}
+    packed = attach_prediction_aliases({key: value[order] for key, value in packed.items()})
     metrics = traffic_metrics(packed["y_pred_raw"], packed["y_true_raw"], clip_negative=False)
     metrics["training_loss"] = total_loss / max(n_batches, 1)
     packed["metrics"] = metrics
@@ -335,17 +347,7 @@ def evaluate_one_epoch(
 
 
 def save_predictions(path: Path, packed: Mapping[str, Any]) -> None:
-    atomic_write_npz(
-        path,
-        y_pred_normalized=packed["y_pred_normalized"],
-        y_true_normalized=packed["y_true_normalized"],
-        y_pred_raw=packed["y_pred_raw"],
-        y_true_raw=packed["y_true_raw"],
-        day_index=packed["day_index"],
-        window_start_slot=packed["window_start_slot"],
-        target_slot=packed["target_slot"],
-        sample_index=packed["sample_index"],
-    )
+    write_prediction_npz(path, packed, expected_count=int(packed["y_pred_raw"].shape[0]))
 
 
 def _prediction_stats(pred: np.ndarray) -> dict[str, float]:
@@ -582,6 +584,7 @@ def run_single_rate(
     device = resolve_device(str(config.get("device", "auto")))
     rate_dir = output_root / tag / f"seed_{seed}"
     rate_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(rate_dir / "resolved_config.json", dict(config))
     loaders_pack = build_dataloaders(data_root, tag, config, data_info["sample_counts"])
     model = build_model(
         config,
@@ -600,6 +603,8 @@ def run_single_rate(
     start_epoch = 0
     best_metric = float("inf")
     best_epoch = -1
+    clock = ExperimentClock()
+    clock.mark_experiment_start()
     if resume_path is not None:
         payload = load_checkpoint(resume_path, map_location=device)
         assert_checkpoint_compatible(
@@ -641,13 +646,16 @@ def run_single_rate(
 
     history_rows: list[dict[str, Any]] = []
     epochs = int(config["epochs"])
+    param_count = trainable_parameter_count(model)
     print(
         (
-            f"[stfgnn] stage=building_model rate={tag} params={model.parameter_count()} "
+            f"[stfgnn] stage=building_model rate={tag} params={param_count} "
             f"init={init_hash[:16]} device={device}"
         ),
         flush=True,
     )
+    reset_peak_memory(device)
+    clock.mark_train_start()
     for epoch in range(start_epoch, epochs):
         t0 = time.time()
         train_stats = train_one_epoch(
@@ -691,8 +699,8 @@ def run_single_rate(
             flush=True,
         )
 
-    best_payload = load_checkpoint(rate_dir / "best_checkpoint.pt", map_location=device)
-    model.load_state_dict(best_payload["model_state_dict"])
+    clock.mark_train_end()
+    reload_best_checkpoint(model, rate_dir / "best_checkpoint.pt", device)
     test_packed = evaluate_one_epoch(
         model,
         loaders_pack["loaders"]["test"],
@@ -715,11 +723,54 @@ def run_single_rate(
     atomic_write_json(rate_dir / "validation_metrics.json", val_packed["metrics"])
     atomic_write_json(rate_dir / "test_metrics.json", test_packed["metrics"])
     atomic_write_json(rate_dir / "training_history.json", history_rows)
+    clock.mark_experiment_end()
+    metadata = build_run_metadata(
+        model="stfgnn",
+        penetration=tag,
+        seed=seed,
+        device=device,
+        parameter_count=param_count,
+        training_loss="huber_delta_1_raw",
+        optimizer="Adam",
+        initial_lr=float(config["learning_rate"]),
+        scheduler="PolyScheduler_power_2_warmup_1_epoch",
+        max_epochs=epochs,
+        epochs_executed=len(history_rows),
+        best_epoch=best_epoch,
+        best_metric=best_metric,
+        early_stopping=False,
+        early_stopping_patience=None,
+        selection_metric="validation_mae_raw_including_zero",
+        clock=clock,
+        extra={
+            "init_parameter_sha256": init_hash,
+            "code_version": CODE_VERSION,
+            "graph_sha256": graph_info["graph_sha256"],
+            "temporal_sha256": graph_info.get("temporal_sha256"),
+            "data_file_sha256": train_hash,
+            "checkpoint_monitor": "validation_mae_raw_all",
+            "early_stopped": False,
+            "huber_rho": float(config.get("huber_rho", 1.0)),
+        },
+    )
+    output_check = finalize_completed_rate(
+        rate_dir,
+        metadata=metadata,
+        history=history_rows,
+        expected_test_count=int(data_info["sample_counts"]["test"]),
+        expected_val_count=int(data_info["sample_counts"]["validation"]),
+        n_his=int(config["seq_len"]),
+        history_metric_key="validation_mae_raw",
+        history_rule="lt",
+    )
     result = {
+        "status": "completed",
         "rate": tag,
         "best_epoch": best_epoch,
         "best_metric": best_metric,
-        "parameter_count": model.parameter_count(),
+        "early_stopped": False,
+        "epochs_executed": len(history_rows),
+        "parameter_count": param_count,
         "init_parameter_sha256": init_hash,
         "validation_mae_raw": float(val_packed["metrics"]["mae"]),
         "validation_rmse_raw": float(val_packed["metrics"]["rmse"]),
@@ -729,6 +780,9 @@ def run_single_rate(
         "test_rmse_raw": float(test_packed["metrics"]["rmse"]),
         "test_mape_nonzero": float(test_packed["metrics"]["mape_nonzero"]),
         "test_wape": float(test_packed["metrics"]["wape"]),
+        "train_wall_time_sec": metadata["train_wall_time_sec"],
+        "average_epoch_time_sec": metadata["average_epoch_time_sec"],
+        "output_check": output_check,
         "output_dir": rate_dir.as_posix(),
     }
     del model
@@ -744,8 +798,6 @@ def run_all_rates(
     data_root: Path,
     output_root: Path,
     topology_path: Path,
-    metadata_path: Path,
-    graph_validation_path: Path,
     r_nodes_path: Path,
     temporal_path: Path | None,
     logger: JsonlLogger,
@@ -758,8 +810,6 @@ def run_all_rates(
         temporal_adj = test_only_temporal_adjacency(int(config["num_nodes"]))
         graph_info = validate_stfgnn_graph(
             topology_path=topology_path,
-            metadata_path=metadata_path,
-            validation_path=graph_validation_path,
             r_nodes_path=r_nodes_path,
             node_ids=node_ids,
             expected_nodes=int(config["num_nodes"]),
@@ -771,8 +821,6 @@ def run_all_rates(
             raise ReimplementationError("official STFGNN training requires --temporal-adjacency")
         graph_info = validate_stfgnn_graph(
             topology_path=topology_path,
-            metadata_path=metadata_path,
-            validation_path=graph_validation_path,
             r_nodes_path=r_nodes_path,
             node_ids=node_ids,
             expected_nodes=int(config["num_nodes"]),
@@ -817,19 +865,30 @@ def run_all_rates(
             "smoke": smoke_result,
         }
     summaries = []
+    rates = assert_official_rates(rates)
     for rate in rates:
         print(f"[stfgnn] stage=training_start rate={rate_tag(rate)} seed={config['seed']}", flush=True)
-        result = run_single_rate(
-            config,
-            rate=rate,
-            data_root=data_root,
-            output_root=output_root,
-            graph_info=graph_info,
-            data_info=data_info,
-            logger=logger,
-            resume_path=resume,
-        )
+        try:
+            result = run_single_rate(
+                config,
+                rate=rate,
+                data_root=data_root,
+                output_root=output_root,
+                graph_info=graph_info,
+                data_info=data_info,
+                logger=logger,
+                resume_path=resume,
+            )
+            if str(result.get("status")) != "completed":
+                raise ReimplementationError(f"{rate_tag(rate)} did not reach status=completed")
+        except Exception as exc:
+            mark_rate_failed(
+                output_root / rate_tag(rate) / f"seed_{int(config['seed'])}",
+                reason=str(exc),
+            )
+            raise
         summaries.append({"rate": rate_tag(rate), **{k: v for k, v in result.items() if k != "output_dir"}})
+        upsert_overall_summary(output_root / "overall_summary.json", summaries)
     return {
         "rates": summaries,
         "data_info": data_preview,

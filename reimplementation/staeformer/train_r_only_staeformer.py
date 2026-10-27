@@ -16,10 +16,12 @@ import torch
 
 from reimplementation.common.data.r_only_npz_dataset import rate_tag
 from reimplementation.common.errors import ReimplementationError
+from reimplementation.common.evaluation import upsert_overall_summary
 from reimplementation.common.utils.atomic_io import atomic_write_json
 from reimplementation.common.utils.hashing import sha256_file
 from reimplementation.common.utils.structured_logging import JsonlLogger
-from reimplementation.stgcn.engine import resolve_path
+from data_root import runtime_roots, xuancheng26_model_config
+from reimplementation.stgcn.engine import resolve_path, resolve_training_output
 from reimplementation.staeformer.engine import collect_data_info, collect_smoke_data_info, run_all_rates, run_p70_smoke
 from reimplementation.staeformer.model.staeformer import CODE_VERSION
 from reimplementation.staeformer.temporal_features import ORIGINAL_PEMS_NPZ_DOW
@@ -27,7 +29,7 @@ from reimplementation.staeformer.validation import validate_no_graph_config
 
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_ROOT = SCRIPT_PATH.parents[2]
-DEFAULT_CONFIG = SCRIPT_PATH.parent / "configs" / "r_only_staeformer.json"
+DEFAULT_CONFIG = xuancheng26_model_config("staeformer")
 
 ORIGINAL_TO_MIGRATED = {
     "reference/STAEformer/model/STAEformer.py::STAEformer": "reimplementation/staeformer/model/staeformer.py::STAEformer",
@@ -200,7 +202,7 @@ def main() -> None:
         config["out_steps"] = int(config.get("output_window", 1))
     _assert_task(config)
     data_root = resolve_path(PROJECT_ROOT, config["data_root"])
-    output_root = resolve_path(PROJECT_ROOT, config["output_root"])
+    output_root = resolve_training_output(PROJECT_ROOT, config["output_root"], model_name="staeformer")
     protected_dirs = [
         PROJECT_ROOT / "reimplementation" / "dcrnn",
         PROJECT_ROOT / "reimplementation" / "graph_wavenet",
@@ -209,7 +211,6 @@ def main() -> None:
         PROJECT_ROOT / "reimplementation" / "pdformer",
         PROJECT_ROOT / "reimplementation" / "stid",
         PROJECT_ROOT / "reimplementation" / "stgcn",
-        PROJECT_ROOT / "reimplementation" / "stgcn" / "prepared_data",
         PROJECT_ROOT / "analysis" / "graph" / "r_graph",
     ]
     for path in protected_dirs:
@@ -236,11 +237,12 @@ def main() -> None:
     data_info = collect_data_info(data_root, config, project_root=PROJECT_ROOT)
     output_root.mkdir(parents=True, exist_ok=True)
     atomic_write_json(output_root / "resolved_config.json", config)
+    atomic_write_json(output_root / "environment.json", {"code_version": CODE_VERSION, **runtime_roots()})
     atomic_write_json(output_root / "source_code_manifest.json", source_manifest(SCRIPT_PATH.parent))
     atomic_write_json(output_root / "original_hashes.json", original_hashes(PROJECT_ROOT))
     logger = JsonlLogger(output_root / "training_log.jsonl")
     try:
-        run_all_rates(
+        result = run_all_rates(
             config,
             data_root=data_root,
             output_root=output_root,
@@ -248,6 +250,7 @@ def main() -> None:
             logger=logger,
             resume_path=args.resume,
         )
+        upsert_overall_summary(output_root / "overall_summary.json", result["rates"])
     finally:
         logger.close()
 

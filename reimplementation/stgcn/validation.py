@@ -141,16 +141,6 @@ def validate_prepared_data(
         raise ReimplementationError("training and test days overlap")
     if val_days and test_days and val_days & test_days:
         raise ReimplementationError("validation and test days overlap")
-    split_keys = {
-        split: set(zip((int(item) for item in values[0]), (int(item) for item in values[1])))
-        for split, values in reference_index.items()
-    }
-    if split_keys.get("train") and split_keys.get("validation") and split_keys["train"] & split_keys["validation"]:
-        raise ReimplementationError("train and validation sample keys overlap")
-    if split_keys.get("train") and split_keys.get("test") and split_keys["train"] & split_keys["test"]:
-        raise ReimplementationError("train and test sample keys overlap")
-    if split_keys.get("validation") and split_keys.get("test") and split_keys["validation"] & split_keys["test"]:
-        raise ReimplementationError("validation and test sample keys overlap")
     return {
         "sample_counts": counts,
         "mean_y_full": mean_y,

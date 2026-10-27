@@ -23,7 +23,7 @@ python train.py --gcn_bool --adjtype doubletransition --addaptadj --randomadj
 
 ## Isolation from DCRNN
 
-- Output is `reimplementation/graph_wavenet/experiments/r_only/`.
+- Output is `/data5/tzhang174/TrafficFlow/training_results/graph_wavenet/`.
 - Never write into `reimplementation/dcrnn/experiments/`.
 - Never modify DCRNN source while a DCRNN run is in progress.
 - Prepared NPZ and the directed adjacency are read-only.
@@ -33,8 +33,8 @@ If DCRNN is already using the only CPU/GPU, finish unit tests and
 
 ## Inputs
 
-- Prepared windows: `reimplementation/stgcn/prepared_data/r-only/pXX/{train,validation,test}.npz`
-- Directed weighted adjacency: `reimplementation/dcrnn/prepared_data/r-only/adjacency_matrix/dcrnn_weighted_adjacency.npy`
+- Prepared windows: `training_data/r-only/pXX/{train,validation,test}.npz`
+- Directed weighted adjacency: `training_data/r-only/dcrnn/dcrnn_weighted_adjacency.npy`
 - R nodes: `analysis/graph/r_graph/r_nodes.csv`
 
 Do not use the STGCN symmetric W. Do not scale observed flow by `1/p`.
@@ -59,4 +59,5 @@ python3 reimplementation/graph_wavenet/train_r_only_gwn.py
 ```
 
 Checkpoint monitor: raw validation MAE including zeros. Test is evaluated
-once after loading the best checkpoint.
+once after loading the best checkpoint. Each official penetration trains
+an independent model. A run may pass one rate or several.

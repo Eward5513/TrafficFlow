@@ -32,7 +32,9 @@ graph is custom Sakoe-Chiba DTW with `sparsity=0.01`.
 
 ## Isolation
 
-- Output is `reimplementation/stfgnn/experiments/r_only/`.
+- Output is `/data5/tzhang174/TrafficFlow/training_results/stfgnn/`.
+- Official training writes `overall_summary.json` at that model root (same as STGCN/STID), plus per-rate `pXX/seed_42/`.
+- Temporal graph preprocessing writes `/data5/tzhang174/TrafficFlow/training_data/stfgnn/`.
 - Never write into DCRNN, Graph WaveNet, STSGCN, or STGCN experiment directories.
 - Never modify DCRNN, Graph WaveNet, or STSGCN source while those runs are in progress.
 - Prepared NPZ and spatial adjacency files are read-only.
@@ -41,9 +43,9 @@ graph is custom Sakoe-Chiba DTW with `sparsity=0.01`.
 
 ## Inputs
 
-- Prepared windows: `reimplementation/stgcn/prepared_data/r-only/pXX/{train,validation,test}.npz`
+- Prepared windows: `training_data/r-only/pXX/{train,validation,test}.npz`
 - Spatial graph: `.../adjacency_matrix/stgcn_undirected_topology.npy` (0/1 undirected connectivity)
-- Temporal graph: produced later by `prepare_temporal_graph.py` from training-day full flow only
+- Temporal graph: an input file. DTW math used to check it lives in `model/dtw.py`.
 - R nodes: `analysis/graph/r_graph/r_nodes.csv`
 
 Do not use `stgcn_weighted_adjacency.npy` or DCRNN directed W.

@@ -19,10 +19,10 @@ python train.py --gcn_bool --adjtype doubletransition --addaptadj --randomadj
 
 ```text
 ORIGINAL_GWN_ROOT     = reference/Graph-WaveNet
-PREPARED_DATA_ROOT    = reimplementation/stgcn/prepared_data/r-only
-DIRECTED_ADJACENCY    = reimplementation/dcrnn/prepared_data/r-only/adjacency_matrix/dcrnn_weighted_adjacency.npy
+PREPARED_DATA_ROOT    = /data5/tzhang174/TrafficFlow/training_data/r-only
+DIRECTED_ADJACENCY    = /data5/tzhang174/TrafficFlow/training_data/r-only/dcrnn/dcrnn_weighted_adjacency.npy
 TRAIN_SCRIPT          = reimplementation/graph_wavenet/train_r_only_gwn.py
-OUTPUT_ROOT           = reimplementation/graph_wavenet/experiments/r_only
+OUTPUT_ROOT           = /data5/tzhang174/TrafficFlow/training_results/graph_wavenet
 ```
 
 不得写入 DCRNN / STGCN 实验目录，也不得修改 prepared data 或图文件。
@@ -34,3 +34,5 @@ python3 reimplementation/graph_wavenet/train_r_only_gwn.py --help
 python3 reimplementation/graph_wavenet/train_r_only_gwn.py --smoke-test-only
 python3 reimplementation/graph_wavenet/train_r_only_gwn.py
 ```
+
+每个官方渗透率独立训练，一次运行可以只传一个渗透率。

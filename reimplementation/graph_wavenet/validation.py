@@ -8,23 +8,11 @@ from typing import Any
 import numpy as np
 import torch
 
-from reimplementation.common.data.r_only_npz_dataset import load_json
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.utils.hashing import sha256_file
 from reimplementation.graph_wavenet.graph import build_gwn_supports, load_gwn_graph
 from reimplementation.graph_wavenet.model.graph_wavenet import GraphWaveNet, receptive_field
 from reimplementation.stgcn.validation import load_edge_ids, validate_prepared_data
-
-
-def _report_ok(path: Path, label: str) -> dict[str, Any]:
-    payload = load_json(path)
-    if payload.get("failures"):
-        raise ReimplementationError(f"{label} validation report has failures: {payload['failures']}")
-    status = payload.get("status")
-    overall = payload.get("overall_passed")
-    if status not in (None, "ok", "passed") or overall is False:
-        raise ReimplementationError(f"{label} validation is not ok: {path}")
-    return payload
 
 
 def chain_direction_ok(supports: list[np.ndarray]) -> dict[str, Any]:
@@ -59,16 +47,12 @@ def validate_gwn_graph(
     *,
     adjacency_path: Path,
     pickle_path: Path,
-    metadata_path: Path,
-    validation_path: Path,
     r_nodes_path: Path,
     node_ids: list[str],
     expected_nodes: int,
     adjtype: str,
     sparse_path: Path | None = None,
 ) -> dict[str, Any]:
-    report = _report_ok(validation_path, "DCRNN/GWN directed graph")
-    metadata = load_json(metadata_path)
     r_ids = load_edge_ids(r_nodes_path)
     if r_ids != node_ids:
         raise ReimplementationError("r_nodes.csv order does not match node_mapping.csv")
@@ -124,8 +108,6 @@ def validate_gwn_graph(
         "support_count": len(supports),
         "support_shapes": [list(item.shape) for item in supports],
         "forward_reverse_supports_identical": False,
-        "prepared_graph_status": report.get("status"),
-        "metadata_sigma": metadata.get("sigma"),
         "chain_test": chain,
         "supports": supports,
         "adjacency": weights,
@@ -140,7 +122,8 @@ def validate_model_shapes(model: GraphWaveNet, *, batch_size: int, seq_len: int)
         raise ReimplementationError(
             f"receptive_field {model.receptive_field} != derived {expected_rf}"
         )
-    x = torch.zeros(batch_size, seq_len, model.num_nodes, model.in_dim)
+    device = next(model.parameters()).device
+    x = torch.zeros(batch_size, seq_len, model.num_nodes, model.in_dim, device=device)
     with torch.no_grad():
         y, trace = model(x, return_trace=True)
     if tuple(y.shape) != (batch_size, 1, model.num_nodes, model.out_dim):

@@ -42,7 +42,7 @@ ocr ───────────┘
 
 先把远端原始路线文本折行成适合展示和截图的 txt，再对"远程桌面里翻 txt 截图"这种半结构化数据做 OCR，还原成 `vin time edge_id time edge_id ...` 形式的逐车轨迹文本。
 
-详细脚本职责、输入输出和运行顺序见 `ocr/README.md`。
+脚本在代码仓库 `ocr/`，截图和 OCR 文本在数据盘 `ocr_data/`。详细职责、输入输出和运行顺序见 `ocr/README.md`。
 
 ## 3. matching/
 
@@ -52,7 +52,7 @@ ocr ───────────┘
 |---|---|
 | `build_sumo_edge_graph.py` | 流式读 `road_network/net_tls.net.xml`，过滤掉 internal edge 与 passenger 不可走的 edge，按 `<connection>` 建"以 SUMO edge 为节点"的有向图，并预算 1/2 跳邻居缓存 |
 | `match_sumo_edges.py` | OSM→SUMO 候选索引、BFS 最短路、分层动态规划、模糊匹配兜底等核心匹配逻辑 |
-| `parse_trajectories.py` | 入口脚本：流式读 `ocr/ocr_output/route_by_edge_no_merge.txt`，对每条轨迹调用匹配；写 `matched_routes.txt`、`failed_routes.txt`、`fuzzy_match_logs.txt` |
+| `parse_trajectories.py` | 入口脚本：流式读 `ocr_data/ocr_output_all/route_by_edge_split.txt`，对每条轨迹调用匹配；写 `matched_routes.txt`、`failed_routes.txt`、`fuzzy_match_logs.txt` |
 | `export_sumo_routes.py` | 把 `matched_routes.txt` 渲染成 SUMO 标准 `<routes>` XML：`matched_routes.rou.xml` 与按 depart 打散后的 `matched_routes_shuffled_depart.rou.xml` |
 | `build_sumo_trips_from_matchable_edges.py` | 另一条路径：不要求顺序连通，只取每个 OSM edge 一个最优 SUMO 候选，按可达性裁剪后输出 `<trip>` 形式的 `matched_trips.rou.xml`（让 SUMO 自己 route） |
 
@@ -145,22 +145,7 @@ python3 analysis/simulation/run_simulations.py --days 1 2 3    # 指定跑第 1�
 python3 analysis/simulation/run_simulations.py --generate-only # 备齐数据和 sumocfg，不跑 SUMO
 ```
 
-### penetration/
-
-按渗透率对某一天的 `data/route_demand/<编号>_<种子>.rou.xml` 做随机抽样，给被抽中车染色、记录被抽中的 vin 列表，供 flow 模块作为"观测到的样本"使用。
-
-- `generate_penetration_routes.py`
-  - 入参：`-p` 渗透率 (%)、`--seed` 随机种子。
-  - 出参：`<rate>_<seed>.rou.xml`（被抽中的染红、其余染灰的整份路由）和 `<rate>_<seed>_sample.txt`（被抽中车辆的 vin 列表）。
-- 当前产物覆盖 5 / 10 / 20 / 30 / 40 / 50 几个渗透率。
-
-### output/&lt;rate&gt;/
-
-SUMO 跑完每个渗透率版本产生的输出：`fcd.csv`、`tripinfo.xml`、`vehroute.xml`、`summary.xml`、`statistics.xml`。flow 模块下游就吃 `fcd.csv`。
-
-### state/&lt;rate&gt;/
-
-`save-state.period=1` 下每秒一份的 `state_<t>.xml.gz` 快照，供 `replay.py` 在任意时刻打开 GUI 复盘。
+当前 R-only 实验不再按渗透率重跑 SUMO。观测样本来自全量 `fcd.csv.gz` 提取后的嵌套车辆 ID 抽样（`sample_vehicle_ids.py`），写出的是压缩 FCD，不是旧的按渗透率 `output/<rate>/fcd.csv`。
 
 
 ## 5. flow/
@@ -211,25 +196,11 @@ python3 analysis/graph/build_r_graph.py
 产物写到 `analysis/graph/r_graph/`。邻接矩阵约定为 `A[i, j] = 1` 当且仅当 source/from 节点 i 指向 target/to 节点 j；保存的是原始二值有向拓扑，不加自环、不对称化、不归一化。详细规则见 `analysis/graph/AGENTS.md`。
 
 
-## 8. reimplementation/stgcn/
+## 8. reimplementation/
 
-把已经聚合好的全量 / 观测 5 分钟 R 道路进入流量整理成窗口数据，并把原版 TensorFlow STGCN（`reference/STGCN_IJCAI-18`）迁到 PyTorch。默认按仿真日序号 `day_01`…`day_20` 的时间先后做完整日期划分（14/3/3），每天内部切 12 步窗口，标签是窗口最后一个时间片的全量流量（当前时刻重建，不是预测下一个 5 分钟）。观测输入按渗透率各自用训练集做全局 Z-score，全量目标共用一组训练集 scaler。
+这里放各模型的 PyTorch 复现：层、损失、训练和评测。其中包括 `s2s_gcn_lstm`（Abdelraouf et al., 2023 的 12→1 适配，不是官方代码）。窗口 NPZ、normalization、节点表和模型图不在这里生成。宣城训练数据在 `xuancheng26/training_data/`，入口配置在该目录的 `config/<model>/r_only_<model>.json`。
 
-公共训练接口在 `reimplementation/common/`，STGCN 层与图算子在 `reimplementation/stgcn/`。公开张量格式为 `[B,T,V,C]`。加权邻接矩阵直接读取已经完成的 `stgcn_weighted_adjacency.npy`，训练时再构造拉普拉斯 / Chebyshev，不再做第二次高斯核。
-
-```bash
-python3 reimplementation/stgcn/prepared_data/prepare_r_only_stgcn_data.py --dry-run
-python3 reimplementation/stgcn/prepared_data/prepare_r_only_stgcn_data.py --overwrite
-python3 -m unittest discover -s reimplementation/stgcn/tests -v
-```
-
-产物写到 `reimplementation/stgcn/prepared_data/r-only/`。输入仍来自 `analysis/simulation/data/processed/subgraph_trajectories/` 与 `analysis/graph/r_graph/`。训练入口、评估、监控和未来输出结构见 `reimplementation/stgcn/README.md`。当前没有正式 checkpoint 或实验指标。
-
-对称、按直接 SUMO connection 中心点距离加权的 STGCN 邻接矩阵由
-`reimplementation/stgcn/prepared_data/prepare_stgcn_weighted_adjacency.py`
-生成，产物目录是 `reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/`。
-只对 `A_sym` 邻居计算距离，不绕完整路网补反向。不覆盖
-`analysis/graph/r_graph/r_adjacency.npy`，不加自环，也不在这一步做拉普拉斯。
+公共张量格式为 `[B,T,V,C]`。STGCN 读入已经算好的加权邻接，训练时再构造拉普拉斯 / Chebyshev。
 
 
 ## 端到端跑一遍的顺序
@@ -237,8 +208,8 @@ python3 -m unittest discover -s reimplementation/stgcn/tests -v
 1. `road_network/download_osm.py` → `netconvert` 得到 `net_tls.net.xml`。
 2. `ocr/wrap_routes_for_screenshot.py` → `ocr/get_snapshoot.py` → `extract_routes_from_screenshots.py` → `validate_ocr_summary.py` → `refine_ocr_summary.py` → `build_routes.py`。
 3. `matching/parse_trajectories.py` → `matching/export_sumo_routes.py`。
-4. `simulation/run_simulations.py` 一条命令跑完仿真：它会自己先生成 20 天的背景随机流到 `simulation/data/random_trip/`、合成 20 份日需求到 `simulation/data/route_demand/`，再输出 `simulation/data/simulation/<编号>_<种子>/fcd.csv.gz` 等结果（需要 SUMO 环境，命令细节见下方「SUMO 命令备忘」）。
-5. `simulation/penetration/generate_penetration_routes.py -p <rate>` 抽样。
+4. `simulation/run_simulations.py` 一条命令跑完仿真：它会自己先生成 20 天的背景随机流到 `simulation_data/random_trip/`、合成 20 份日需求到 `simulation_data/route_demand/`，再输出 `simulation_data/simulation/<编号>_<种子>/fcd.csv.gz` 等结果（需要 SUMO 环境，命令细节见下方「SUMO 命令备忘」）。
+5. `extract_subgraph_trajectories.py` → `count_edge_flow.py` → `sample_vehicle_ids.py` → `count_observed_edge_flow.py`，从全量压缩 FCD 得到各渗透率观测流量。
 6. `flow/print_junction_tls.py` → `flow/count_edge_departures_by_cycle.py -p <rate>`。
 7. `flow/calculate_sample_error_metrics.py -p <rate>` 与 `flow/calculate_queue_augmented_estimates.py -p <rate>`，得到 `metrics/<rate>/...json`。
 
@@ -374,31 +345,32 @@ sumo-gui -n analysis/road_network/net_tls.net.xml \
 
 ### 输出转换与复盘
 
-把 FCD XML 转成 CSV：
+当前仿真直接写出压缩 FCD（`fcd.csv.gz`），不必再把 FCD XML 转 CSV。若手头只有 XML：
 
 ```bash
 python $SUMO_HOME/tools/xml/xml2csv.py fcd_geo.xml > fcd_geo.csv
 ```
 
-加载保存的仿真状态进行 GUI 复盘：
+GUI 检查某一天的需求（不加载逐秒 state 快照）：
 
 ```bash
-cd analysis/simulation
-
-sumo-gui -c basic2_res/run_basic2.sumocfg --load-state=basic2_res/state/state_66600.00.xml.gz --begin=66600
-```
-
-或从项目根目录使用项目里的 helper：
-
-```bash
-python analysis/simulation/replay.py 105 -p 50
+sumo-gui -n analysis/road_network/net_tls.net.xml \
+  -r /data5/tzhang174/TrafficFlow/simulation_data/route_demand/<编号>_<种子>.rou.xml
 ```
 
 
 ## 路径约定
 
-项目级 README 位于仓库根目录；各脚本里的默认路径仍基于 `__file__` 解析，并且只走"模块内部相对路径"或"`analysis/` 内的相对路径"。重新挪动目录时请同时更新：
+代码仓库与数据盘必须分开：
 
-- 各脚本顶部 `DEFAULT_*` 常量；
-- `simulation/run_simulations.py` 里的 `NET_FILE` / `TLS_SCHEDULE_FILE` / `DEMAND_DIR` / `SIMULATION_DIR`（生成的 sumocfg 里的相对路径由它们算出来，不用手改）；
-- `matching/README.md` 与本 README 中的命令示例。
+- `CODE_ROOT` = `/home/tzhang174/TrafficFlow` — 脚本、配置模板、测试、文档
+- `DATA_ROOT` = `/data5/tzhang174/TrafficFlow` — `ocr_data/`、`simulation_data/`、`training_data/`、`training_results/`
+
+Python 默认通过 `data_root.py` 解析（`TRAFFICFLOW_DATA_ROOT` 可覆盖数据盘）：
+
+- `training_data/r-only/` — 各模型共用的 NPZ、scaler、STGCN 邻接
+- `training_data/<model>/` — 仅该模型训练前需要的图/关系缓存
+- `training_results/<model>/<rate>/seed_42/` — 正式训练结果
+- R 节点表用 `training_data/r-only/node_mapping.csv`
+
+不要把脚本复制到数据盘，也不要把 checkpoint 或大型预处理文件写进 git 仓库。`run_simulations.py` 写出的 sumocfg 路径相对当天文件夹。

@@ -28,10 +28,10 @@ at runtime from the finished directed `adj_mx`.
 
 Paths below are from the repository root.
 
-- Prepared windows: `reimplementation/stgcn/prepared_data/r-only/pXX/{train,validation,test}.npz`
-- Directed weighted adjacency: `reimplementation/dcrnn/prepared_data/r-only/adjacency_matrix/dcrnn_weighted_adjacency.npy`
-- Original pickle: `.../dcrnn_adj_mx.pkl`
-- R nodes: `analysis/graph/r_graph/r_nodes.csv`
+- Prepared windows: `training_data/r-only/pXX/{train,validation,test}.npz`
+- Directed weighted adjacency: `training_data/r-only/dcrnn/dcrnn_weighted_adjacency.npy`
+- Original pickle: `training_data/r-only/dcrnn/dcrnn_adj_mx.pkl`
+- R nodes: `training_data/r-only/node_mapping.csv`
 
 Do not open trajectories, vehicle IDs, or raw FCD except to SHA256-protect
 them. Do not scale observed flow by `1/p`. Do not refit `normalization.json`.
@@ -56,10 +56,10 @@ python3 reimplementation/dcrnn/train_r_only_dcrnn.py --help
 python3 reimplementation/dcrnn/train_r_only_dcrnn.py --overwrite
 ```
 
-Default output: `reimplementation/dcrnn/experiments/r_only/`.
+- Output is `/data5/tzhang174/TrafficFlow/training_results/dcrnn/`.
 Checkpoint monitor: raw validation MAE including zeros. Test is evaluated
-once after loading the best checkpoint. Seven penetration rates train
-independent models from seed 42.
+once after loading the best checkpoint. Each official penetration trains
+an independent model from seed 42. A run may pass one rate or several.
 
 ## Safety
 

@@ -14,19 +14,20 @@
 
 ```text
 PROJECT_ROOT            = .
+DATA_ROOT               = /data5/tzhang174/TrafficFlow   # TRAFFICFLOW_DATA_ROOT
 ORIGINAL_STGCN_ROOT     = reference/STGCN_IJCAI-18
-PREPARED_DATA_ROOT      = reimplementation/stgcn/prepared_data/r-only
-WEIGHTED_ADJACENCY      = reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy
-GRAPH_METADATA          = reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_weighted_adjacency_metadata.json
-GRAPH_VALIDATION        = reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_weighted_adjacency_validation.json
-R_NODES_CSV             = analysis/graph/r_graph/r_nodes.csv
-NODE_MAPPING_CSV        = reimplementation/stgcn/prepared_data/r-only/node_mapping.csv
-NORMALIZATION_JSON      = reimplementation/stgcn/prepared_data/r-only/normalization.json
-SPLIT_MANIFEST          = reimplementation/stgcn/prepared_data/r-only/split_manifest.json
-DATASET_METADATA        = reimplementation/stgcn/prepared_data/r-only/dataset_metadata.json
-DATA_VALIDATION         = reimplementation/stgcn/prepared_data/r-only/validation_summary.json
+PREPARED_DATA_ROOT      = training_data/r-only
+WEIGHTED_ADJACENCY      = training_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy
+GRAPH_METADATA          = training_data/r-only/adjacency_matrix/stgcn_weighted_adjacency_metadata.json
+GRAPH_VALIDATION        = training_data/r-only/adjacency_matrix/stgcn_weighted_adjacency_validation.json
+R_NODES_CSV             = training_data/r-only/node_mapping.csv
+NODE_MAPPING_CSV        = training_data/r-only/node_mapping.csv
+NORMALIZATION_JSON      = training_data/r-only/normalization.json
+SPLIT_MANIFEST          = training_data/r-only/split_manifest.json
+DATASET_METADATA        = training_data/r-only/dataset_metadata.json
+DATA_VALIDATION         = training_data/r-only/validation_summary.json
 REIMPLEMENTATION_ROOT   = reimplementation
-FUTURE_OUTPUT_ROOT      = reimplementation/experiments/r_only/stgcn
+FUTURE_OUTPUT_ROOT      = /data5/tzhang174/TrafficFlow/training_results/stgcn
 ```
 
 不要移动、复制或重命名上述数据文件。训练代码读取已经完成高斯加权的 `stgcn_weighted_adjacency.npy`，不再执行 `W/10000` 或 `weight_matrix()`。
@@ -46,9 +47,9 @@ reimplementation/
 │   ├── train_r_only_stgcn.py
 │   ├── evaluate_r_only_stgcn.py
 │   ├── monitor_training.py
-│   ├── configs/r_only_stgcn.json
+│   ├── configs/                    # 正式配置在宣城 training_data/config/stgcn/
 │   ├── tests/
-│   └── prepared_data/              # 已有数据准备脚本与产物，本阶段不修改
+│                                 # 数据集不在这个目录生成
 └── experiments/                    # 未来训练输出；本次不得创建正式结果
 ```
 
@@ -67,7 +68,7 @@ reimplementation/
 | `weight_matrix()` | **跳过**；直接读最终 W |
 | `n_pred` 未来切片 | **不使用**；标签固定为窗口最后一步全量流量 |
 
-默认超参数来自原版 `main.py` / `trainer.py`：`n_his=12`，`Ks=Kt=3`，`batch_size=50`，`epochs=50`，`lr=1e-3`，RMSProp `alpha=0.9` `eps=1e-10`，每 5 个 epoch 对应的 batch 数把学习率乘 `0.7`，训练时 `keep_prob=1.0`。因任务适配而改动的项写在 `configs/r_only_stgcn.json` 的 `adaptations`。
+默认超参数来自原版 `main.py` / `trainer.py`：`n_his=12`，`Ks=Kt=3`，`batch_size=50`，`epochs=50`，`lr=1e-3`，RMSProp `alpha=0.9` `eps=1e-10`，每 5 个 epoch 对应的 batch 数把学习率乘 `0.7`，训练时 `keep_prob=1.0`。因任务适配而改动的项写在宣城配置 `training_data/config/stgcn/r_only_stgcn.json` 的 `adaptations`。
 
 不可避免的框架差异见下文「框架差异」。
 
@@ -90,13 +91,13 @@ python3 -m unittest discover -s reimplementation/stgcn/tests -v
 
 ```bash
 python3 reimplementation/stgcn/train_r_only_stgcn.py \
-  --config reimplementation/stgcn/configs/r_only_stgcn.json \
-  --data-root reimplementation/stgcn/prepared_data/r-only \
-  --weighted-adjacency reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy \
+  --config /data5/tzhang174/TrafficFlow/xuancheng26/training_data/config/stgcn/r_only_stgcn.json \
+  --data-root training_data/r-only \
+  --weighted-adjacency training_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy \
   --r-nodes analysis/graph/r_graph/r_nodes.csv \
-  --normalization reimplementation/stgcn/prepared_data/r-only/normalization.json \
-  --split-manifest reimplementation/stgcn/prepared_data/r-only/split_manifest.json \
-  --output-root reimplementation/experiments/r_only/stgcn \
+  --normalization training_data/r-only/normalization.json \
+  --split-manifest training_data/r-only/split_manifest.json \
+  --output-root training_results/stgcn \
   --rates 5 10 20 30 40 50 70 \
   --n-his 12 \
   --target-mode last-observed-step \
@@ -110,13 +111,13 @@ python3 reimplementation/stgcn/train_r_only_stgcn.py \
 
 ```bash
 python3 reimplementation/stgcn/train_r_only_stgcn.py \
-  --config reimplementation/stgcn/configs/r_only_stgcn.json \
-  --data-root reimplementation/stgcn/prepared_data/r-only \
-  --weighted-adjacency reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy \
+  --config /data5/tzhang174/TrafficFlow/xuancheng26/training_data/config/stgcn/r_only_stgcn.json \
+  --data-root training_data/r-only \
+  --weighted-adjacency training_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy \
   --r-nodes analysis/graph/r_graph/r_nodes.csv \
-  --normalization reimplementation/stgcn/prepared_data/r-only/normalization.json \
-  --split-manifest reimplementation/stgcn/prepared_data/r-only/split_manifest.json \
-  --output-root reimplementation/experiments/r_only/stgcn \
+  --normalization training_data/r-only/normalization.json \
+  --split-manifest training_data/r-only/split_manifest.json \
+  --output-root training_results/stgcn \
   --rate 5 \
   --n-his 12 \
   --target-mode last-observed-step \
@@ -131,13 +132,13 @@ python3 reimplementation/stgcn/train_r_only_stgcn.py \
 
 ```bash
 python3 reimplementation/stgcn/train_r_only_stgcn.py \
-  --config reimplementation/stgcn/configs/r_only_stgcn.json \
-  --data-root reimplementation/stgcn/prepared_data/r-only \
-  --weighted-adjacency reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy \
+  --config /data5/tzhang174/TrafficFlow/xuancheng26/training_data/config/stgcn/r_only_stgcn.json \
+  --data-root training_data/r-only \
+  --weighted-adjacency training_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy \
   --r-nodes analysis/graph/r_graph/r_nodes.csv \
-  --normalization reimplementation/stgcn/prepared_data/r-only/normalization.json \
-  --split-manifest reimplementation/stgcn/prepared_data/r-only/split_manifest.json \
-  --output-root reimplementation/experiments/r_only/stgcn \
+  --normalization training_data/r-only/normalization.json \
+  --split-manifest training_data/r-only/split_manifest.json \
+  --output-root training_results/stgcn \
   --rates 5 10 20 30 40 50 70 \
   --n-his 12 \
   --target-mode last-observed-step \
@@ -152,14 +153,14 @@ python3 reimplementation/stgcn/train_r_only_stgcn.py \
 
 ```bash
 python3 reimplementation/stgcn/evaluate_r_only_stgcn.py \
-  --config reimplementation/stgcn/configs/r_only_stgcn.json \
-  --checkpoint reimplementation/experiments/r_only/stgcn/p05/seed_42/best_checkpoint.pt \
-  --output-dir reimplementation/experiments/r_only/stgcn/p05/seed_42 \
+  --config /data5/tzhang174/TrafficFlow/xuancheng26/training_data/config/stgcn/r_only_stgcn.json \
+  --checkpoint training_results/stgcn/p05/seed_42/best_checkpoint.pt \
+  --output-dir training_results/stgcn/p05/seed_42 \
   --rate 5 \
   --overwrite
 
 python3 reimplementation/stgcn/monitor_training.py \
-  --output-root reimplementation/experiments/r_only/stgcn \
+  --output-root training_results/stgcn \
   --once
 ```
 
@@ -167,7 +168,7 @@ python3 reimplementation/stgcn/monitor_training.py \
 
 ## 未来输出
 
-正式训练时应写入 `reimplementation/experiments/r_only/stgcn/`：
+正式训练时应写入 `/data5/tzhang174/TrafficFlow/training_results/stgcn/`：
 
 ```text
 experiment_manifest.json

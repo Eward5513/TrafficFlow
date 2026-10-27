@@ -8,8 +8,9 @@ SUMO edge routes. Follow the repository-root instructions as well.
 ## Inputs, algorithm, and outputs
 
 - The main trajectory input is
-  `../../ocr/ocr_output_all/route_by_edge_split.txt`, with records shaped as
-  `vin HH:MM:SS osm_edge_id ...`.
+  `/data5/tzhang174/TrafficFlow/ocr_data/ocr_output_all/route_by_edge_split.txt`,
+  with records shaped as
+  `vin HH:MM:SS osm_edge_id ...`. OCR scripts live in `ocr/` under CODE_ROOT.
 - `build_sumo_edge_graph.py` reads `../road_network/net_tls.net.xml`, excludes
   internal or passenger-inaccessible edges, and builds an edge-to-edge directed
   graph from SUMO `<connection>` elements.

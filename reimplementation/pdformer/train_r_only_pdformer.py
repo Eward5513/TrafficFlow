@@ -16,7 +16,8 @@ from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.utils.atomic_io import atomic_write_json
 from reimplementation.common.utils.hashing import sha256_file
 from reimplementation.common.utils.structured_logging import JsonlLogger
-from reimplementation.stgcn.engine import resolve_path
+from data_root import runtime_roots, xuancheng26_model_config
+from reimplementation.stgcn.engine import resolve_path, resolve_training_output
 from reimplementation.pdformer.engine import (
     collect_data_info,
     collect_graph_info,
@@ -28,7 +29,7 @@ from reimplementation.pdformer.model.pdformer import CODE_VERSION
 
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_ROOT = SCRIPT_PATH.parents[2]
-DEFAULT_CONFIG = SCRIPT_PATH.parent / "configs" / "r_only_pdformer.json"
+DEFAULT_CONFIG = xuancheng26_model_config("pdformer")
 
 ORIGINAL_TO_MIGRATED = {
     "reference/PDFormer/libcity/model/traffic_flow_prediction/PDFormer.py::DataEmbedding": "reimplementation/pdformer/model/embedding.py::DataEmbedding",
@@ -205,13 +206,12 @@ def main() -> None:
         config["input_window"] = int(config.get("n_his", 12))
     _assert_task(config)
     data_root = resolve_path(PROJECT_ROOT, config["data_root"])
-    output_root = resolve_path(PROJECT_ROOT, config["output_root"])
+    output_root = resolve_training_output(PROJECT_ROOT, config["output_root"], model_name="pdformer")
     protected_dirs = [
         PROJECT_ROOT / "reimplementation" / "dcrnn",
         PROJECT_ROOT / "reimplementation" / "graph_wavenet",
         PROJECT_ROOT / "reimplementation" / "stsgcn",
         PROJECT_ROOT / "reimplementation" / "stfgnn",
-        PROJECT_ROOT / "reimplementation" / "stgcn" / "prepared_data",
         PROJECT_ROOT / "analysis" / "graph" / "r_graph",
     ]
     for path in protected_dirs:
@@ -240,6 +240,7 @@ def main() -> None:
     graph_info = collect_graph_info(config, allow_test_only=False, project_root=PROJECT_ROOT)
     output_root.mkdir(parents=True, exist_ok=True)
     atomic_write_json(output_root / "resolved_config.json", config)
+    atomic_write_json(output_root / "environment.json", {"code_version": CODE_VERSION, **runtime_roots()})
     atomic_write_json(output_root / "source_code_manifest.json", source_manifest(SCRIPT_PATH.parent))
     atomic_write_json(output_root / "original_hashes.json", original_hashes(PROJECT_ROOT))
     logger = JsonlLogger(output_root / "training_log.jsonl")

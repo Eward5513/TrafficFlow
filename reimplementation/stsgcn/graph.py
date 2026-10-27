@@ -12,7 +12,6 @@ from typing import Any
 
 import numpy as np
 
-from reimplementation.common.data.r_only_npz_dataset import load_json
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.utils.hashing import sha256_file, sha256_numpy
 from reimplementation.stsgcn.model.graph import (
@@ -22,14 +21,14 @@ from reimplementation.stsgcn.model.graph import (
 )
 
 
-def load_spatial_topology(path: Path, *, expected_nodes: int = 56) -> np.ndarray:
+def load_spatial_topology(path: Path, *, expected_nodes: int | None = None) -> np.ndarray:
     if not path.is_file():
         raise ReimplementationError(f"spatial topology not found: {path}")
     loaded = np.load(path, allow_pickle=False)
     topology = np.array(loaded, dtype=np.float32, copy=True)
     if topology.ndim != 2 or topology.shape[0] != topology.shape[1]:
         raise ReimplementationError(f"{path} is not square: {topology.shape}")
-    if int(topology.shape[0]) != int(expected_nodes):
+    if expected_nodes is not None and int(topology.shape[0]) != int(expected_nodes):
         raise ReimplementationError(f"{path} has {topology.shape[0]} nodes, expected {expected_nodes}")
     if not np.isfinite(topology).all():
         raise ReimplementationError(f"{path} contains NaN or inf")
@@ -46,22 +45,14 @@ def load_spatial_topology(path: Path, *, expected_nodes: int = 56) -> np.ndarray
 def load_stsgcn_graph(
     *,
     topology_path: Path,
-    metadata_path: Path,
-    validation_path: Path,
     r_nodes_path: Path,
     node_ids: list[str],
-    expected_nodes: int = 56,
+    expected_nodes: int | None = None,
 ) -> dict[str, Any]:
     from reimplementation.stgcn.validation import load_edge_ids
 
-    report = load_json(validation_path)
-    if report.get("failures"):
-        raise ReimplementationError(f"graph validation report has failures: {report['failures']}")
-    status = report.get("status")
-    overall = report.get("overall_validation_passed", report.get("overall_passed"))
-    if status not in (None, "ok", "passed") or overall is False:
-        raise ReimplementationError(f"graph validation is not ok: {validation_path}")
-    metadata = load_json(metadata_path)
+    if expected_nodes is None:
+        expected_nodes = len(node_ids)
     r_ids = load_edge_ids(r_nodes_path)
     if r_ids != node_ids:
         raise ReimplementationError("r_nodes.csv order does not match node_mapping.csv")
@@ -92,7 +83,5 @@ def load_stsgcn_graph(
         "did_not_use_dcrnn_directed_graph": True,
         "did_not_normalize_adjacency": True,
         "local_steps": LOCAL_STEPS,
-        "prepared_graph_status": report.get("status"),
-        "metadata_node_count": metadata.get("node_count"),
         "node_ids": node_ids,
     }

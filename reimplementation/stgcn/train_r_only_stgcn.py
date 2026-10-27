@@ -16,12 +16,18 @@ from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.utils.atomic_io import atomic_write_json
 from reimplementation.common.utils.hashing import sha256_file
 from reimplementation.common.utils.structured_logging import JsonlLogger
-from reimplementation.stgcn.engine import atomic_write_csv_rows, resolve_path, run_all_rates
+from data_root import runtime_roots, xuancheng26_model_config
+from reimplementation.stgcn.engine import (
+    atomic_write_csv_rows,
+    resolve_path,
+    resolve_training_output,
+    run_all_rates,
+)
 from reimplementation.stgcn.model import CODE_VERSION
 
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_ROOT = SCRIPT_PATH.parents[2]
-DEFAULT_CONFIG = SCRIPT_PATH.parent / "configs" / "r_only_stgcn.json"
+DEFAULT_CONFIG = xuancheng26_model_config("stgcn")
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -108,7 +114,7 @@ def main() -> None:
     data_root = resolve_path(PROJECT_ROOT, config["data_root"])
     adjacency = resolve_path(PROJECT_ROOT, config["weighted_adjacency"])
     r_nodes = resolve_path(PROJECT_ROOT, config["r_nodes"])
-    output_root = resolve_path(PROJECT_ROOT, config["output_root"])
+    output_root = resolve_training_output(PROJECT_ROOT, config["output_root"], model_name="stgcn")
     if output_root.exists() and any(output_root.iterdir()) and not args.overwrite and args.resume is None:
         raise ReimplementationError(f"{output_root} is not empty; pass --overwrite or --resume")
     output_root.mkdir(parents=True, exist_ok=True)
@@ -146,6 +152,7 @@ def main() -> None:
             "cuda_available": torch.cuda.is_available(),
             "device": str(config.get("device")),
             "cpu_thread_count": int(torch.get_num_threads()),
+            **runtime_roots(),
         },
     )
     atomic_write_json(output_root / "source_code_manifest.json", source_manifest(PROJECT_ROOT / "reimplementation"))

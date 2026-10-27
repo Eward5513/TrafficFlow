@@ -15,5 +15,5 @@ Original traffic config: `reference/STAEformer/model/STAEformer.yaml` PEMS04.
 python3 reimplementation/staeformer/tests/run_and_report.py
 python3 reimplementation/staeformer/train_r_only_staeformer.py --smoke-test-only
 # later, official 7-rate training (do not run during this migration):
-python3 reimplementation/staeformer/train_r_only_staeformer.py --config reimplementation/staeformer/configs/r_only_staeformer.json
+python3 reimplementation/staeformer/train_r_only_staeformer.py --config /data5/tzhang174/TrafficFlow/xuancheng26/training_data/config/staeformer/r_only_staeformer.json
 ```

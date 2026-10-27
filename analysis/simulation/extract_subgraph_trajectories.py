@@ -29,10 +29,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+from _paths import simulation_data_dir
+
 BASE_DIR = Path(__file__).resolve().parent
 ANALYSIS_DIR = BASE_DIR.parent
 DEFAULT_NET_FILE = ANALYSIS_DIR / "road_network" / "net_tls.net.xml"
-DEFAULT_DATA_DIR = BASE_DIR / "data"
+DEFAULT_DATA_DIR = simulation_data_dir()
 DEFAULT_SUBGRAPH_FILE = DEFAULT_DATA_DIR / "subgraph.txt"
 DEFAULT_FCD_DIR = DEFAULT_DATA_DIR / "simulation"
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / "processed" / "subgraph_trajectories"

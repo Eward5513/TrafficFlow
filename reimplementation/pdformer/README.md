@@ -17,6 +17,11 @@ Default hyperparameters follow `PeMS04.json` overlaying
 - `seed=42`
 - `add_day_in_week=false` until a real calendar mapping exists
 
+Official training writes `best_checkpoint.pt` from validation MAE, then
+reloads it and saves raw-scale `test_metrics.json` / `test_predictions.npz`
+via `reimplementation.common.evaluation`. Config `patience: 50` is unused;
+runs complete all 200 epochs.
+
 ```bash
 python3 reimplementation/pdformer/tests/run_and_report.py
 python3 reimplementation/pdformer/train_r_only_pdformer.py --smoke-test-only

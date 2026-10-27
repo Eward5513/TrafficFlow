@@ -29,11 +29,13 @@ out = P ⊙ sigmoid(Q)
 
 ```text
 ORIGINAL_STSGCN_ROOT  = reference/STSGCN
-PREPARED_DATA_ROOT    = reimplementation/stgcn/prepared_data/r-only
-SPATIAL_TOPOLOGY      = reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_undirected_topology.npy
+PREPARED_DATA_ROOT    = /data5/tzhang174/TrafficFlow/training_data/r-only
+SPATIAL_TOPOLOGY      = /data5/tzhang174/TrafficFlow/training_data/r-only/adjacency_matrix/stgcn_undirected_topology.npy
 TRAIN_SCRIPT          = reimplementation/stsgcn/train_r_only_stsgcn.py
-OUTPUT_ROOT           = reimplementation/stsgcn/experiments/r_only
+OUTPUT_ROOT           = /data5/tzhang174/TrafficFlow/training_results/stsgcn
 ```
+
+正式训练在 `OUTPUT_ROOT` 写入 `overall_summary.json`（7 个 penetration 汇总），以及各 `pXX/seed_42/` 的 checkpoint 与 test 指标。`--smoke-test-only` 不写该文件。
 
 不得写入 DCRNN / GWN / STGCN 实验目录，也不得修改 prepared data、图文件或原版 STSGCN。
 

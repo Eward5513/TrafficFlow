@@ -14,20 +14,22 @@ import torch
 
 from reimplementation.common.data.r_only_npz_dataset import rate_tag
 from reimplementation.common.errors import ReimplementationError
+from reimplementation.common.evaluation import upsert_overall_summary
 from reimplementation.common.utils.atomic_io import atomic_write_json
 from reimplementation.common.utils.hashing import sha256_file
 from reimplementation.common.utils.structured_logging import JsonlLogger
-from reimplementation.stgcn.engine import resolve_path
+from data_root import runtime_roots, xuancheng26_model_config
+from reimplementation.stgcn.engine import resolve_path, resolve_training_output
 from reimplementation.stfgnn.engine import collect_data_info, run_all_rates, run_p70_smoke, test_only_temporal_adjacency
 from reimplementation.stfgnn.model.stfgnn import CODE_VERSION
 from reimplementation.stfgnn.validation import load_node_ids, validate_stfgnn_graph
 
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_ROOT = SCRIPT_PATH.parents[2]
-DEFAULT_CONFIG = SCRIPT_PATH.parent / "configs" / "r_only_stfgnn.json"
+DEFAULT_CONFIG = xuancheng26_model_config("stfgnn")
 
 ORIGINAL_TO_MIGRATED = {
-    "reference/STFGNN/data/Temporal_Graph_gen.py": "reimplementation/stfgnn/prepare_temporal_graph.py and model/dtw.py",
+    "reference/STFGNN/data/Temporal_Graph_gen.py": "reimplementation/stfgnn/model/dtw.py; the temporal adjacency file is an input",
     "reference/STFGNN/utils_4n0_3layer_12T_res.py::construct_adj_fusion": "reimplementation/stfgnn/model/fusion_graph.py::construct_adj_fusion",
     "reference/STFGNN/utils_4n0_3layer_12T_res.py::get_adjacency_matrix type_=connectivity": "stgcn_undirected_topology.npy as 0/1 undirected A_SG",
     "reference/STFGNN/models/stsgcn_4n_res.py::gcn_operation": "reimplementation/stfgnn/model/graph_layers.py::STFGNNGraphConv",
@@ -53,8 +55,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=Path, default=None)
     parser.add_argument("--spatial-adjacency", dest="spatial_adjacency", type=Path, default=None)
     parser.add_argument("--temporal-adjacency", dest="temporal_adjacency", type=Path, default=None)
-    parser.add_argument("--graph-metadata", dest="graph_metadata", type=Path, default=None)
-    parser.add_argument("--graph-validation", dest="graph_validation", type=Path, default=None)
     parser.add_argument("--r-nodes", dest="r_nodes", type=Path, default=None)
     parser.add_argument("--normalization", type=Path, default=None)
     parser.add_argument("--split-manifest", dest="split_manifest", type=Path, default=None)
@@ -97,8 +97,6 @@ def overlay(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         "data_root": args.data_root,
         "spatial_adjacency": args.spatial_adjacency,
         "temporal_adjacency": args.temporal_adjacency,
-        "graph_metadata": args.graph_metadata,
-        "graph_validation": args.graph_validation,
         "r_nodes": args.r_nodes,
         "normalization": args.normalization,
         "split_manifest": args.split_manifest,
@@ -189,10 +187,8 @@ def main() -> None:
     _assert_task(config)
     data_root = resolve_path(PROJECT_ROOT, config["data_root"])
     topology = resolve_path(PROJECT_ROOT, config["spatial_adjacency"])
-    metadata_path = resolve_path(PROJECT_ROOT, config["graph_metadata"])
-    graph_validation = resolve_path(PROJECT_ROOT, config["graph_validation"])
     r_nodes = resolve_path(PROJECT_ROOT, config["r_nodes"])
-    output_root = resolve_path(PROJECT_ROOT, config["output_root"])
+    output_root = resolve_training_output(PROJECT_ROOT, config["output_root"], model_name="stfgnn")
     temporal_value = config.get("temporal_adjacency")
     temporal_path = None if not temporal_value else resolve_path(PROJECT_ROOT, temporal_value)
     protected_dirs = [
@@ -206,8 +202,6 @@ def main() -> None:
         raise ReimplementationError("STFGNN output_root must not be a DCRNN/GWN/STSGCN/STGCN/original directory")
     protected = [
         topology,
-        metadata_path,
-        graph_validation,
         r_nodes,
         data_root / "normalization.json",
         PROJECT_ROOT / "reimplementation" / "dcrnn" / "train_r_only_dcrnn.py",
@@ -220,8 +214,6 @@ def main() -> None:
         node_ids = load_node_ids(data_root / "node_mapping.csv")
         graph_info = validate_stfgnn_graph(
             topology_path=topology,
-            metadata_path=metadata_path,
-            validation_path=graph_validation,
             r_nodes_path=r_nodes,
             node_ids=node_ids,
             expected_nodes=int(config["num_nodes"]),
@@ -244,7 +236,6 @@ def main() -> None:
         after = {str(path): sha256_file(path) for path in protected if path.is_file()}
         if before != after:
             raise ReimplementationError("protected input files changed during STFGNN smoke")
-        atomic_write_json(SCRIPT_PATH.parent / "smoke_test.json", smoke)
         print("[stfgnn] stage=smoke_testing discarded_model=yes did_not_write_experiments=yes", flush=True)
         return
 
@@ -291,6 +282,7 @@ def main() -> None:
             "device": str(config.get("device")),
             "command": sys.argv,
             "original_stfgnn_sha256": original_hashes(PROJECT_ROOT),
+            **runtime_roots(),
         },
     )
     atomic_write_json(output_root / "source_code_manifest.json", source_manifest(PROJECT_ROOT / "reimplementation" / "stfgnn"))
@@ -307,8 +299,6 @@ def main() -> None:
             data_root=data_root,
             output_root=output_root,
             topology_path=topology,
-            metadata_path=metadata_path,
-            graph_validation_path=graph_validation,
             r_nodes_path=r_nodes,
             temporal_path=temporal_path,
             logger=logger,
@@ -320,6 +310,7 @@ def main() -> None:
             raise ReimplementationError("protected input files changed during STFGNN run")
         atomic_write_json(output_root / "data_runtime_validation.json", result["data_info"])
         atomic_write_json(output_root / "graph_runtime_validation.json", result["graph_info"])
+        upsert_overall_summary(output_root / "overall_summary.json", result["rates"])
         logger.log({"stage": "completed", "model_name": "stfgnn", "status": "ok"})
         print("[stfgnn] stage=completed status=ok", flush=True)
     except Exception as exc:

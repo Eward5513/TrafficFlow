@@ -37,10 +37,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+from _paths import simulation_data_dir
+
 BASE_DIR = Path(__file__).resolve().parent
 ANALYSIS_DIR = BASE_DIR.parent
 NET_FILE = ANALYSIS_DIR / "road_network" / "net_tls.net.xml"
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = simulation_data_dir()
 RANDOM_DIR = DATA_DIR / "random_trip"
 LOG_DIR = RANDOM_DIR / "logs"
 

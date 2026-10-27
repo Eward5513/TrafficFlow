@@ -14,5 +14,5 @@ Original traffic config: `reference/STID/stid/PEMS04.py`.
 python3 reimplementation/stid/tests/run_and_report.py
 python3 reimplementation/stid/train_r_only_stid.py --smoke-test-only
 # later, official 7-rate training (do not run during this migration):
-python3 reimplementation/stid/train_r_only_stid.py --config reimplementation/stid/configs/r_only_stid.json
+python3 reimplementation/stid/train_r_only_stid.py --config /data5/tzhang174/TrafficFlow/xuancheng26/training_data/config/stid/r_only_stid.json
 ```

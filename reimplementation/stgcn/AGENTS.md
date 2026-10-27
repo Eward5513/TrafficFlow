@@ -15,15 +15,14 @@ scripts are entry points for a later run.
 
 ## Inputs
 
-Paths below are from the repository root.
+Paths below are from the data disk unless noted (`data_root.py`).
 
-- Daily full flow: `analysis/simulation/data/processed/subgraph_trajectories/day_*/edge_flow_5min.csv`
-- Daily observed flow: `analysis/simulation/data/processed/subgraph_trajectories/day_*/observed_edge_flow_5min/edge_flow_5min_pXX.csv`
-- R nodes: `analysis/graph/r_graph/r_nodes.csv` (`node_index` 0..55, `edge_id` as strings)
-- R adjacency: `analysis/graph/r_graph/r_adjacency.npy` (read-only; do not add `I`,
-  symmetrize, or normalize here)
-- Prepared tensors: `reimplementation/stgcn/prepared_data/r-only/pXX/{train,validation,test}.npz`
-- Finished weighted adjacency: `reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy`
+- Daily full flow: `simulation_data/processed/subgraph_trajectories/day_*/edge_flow_5min.csv`
+- Daily observed flow: `simulation_data/processed/subgraph_trajectories/day_*/observed_edge_flow_5min/edge_flow_5min_pXX.csv`
+- R nodes: `training_data/r-only/node_mapping.csv` (`node_index` 0..55, `edge_id` as strings)
+- R adjacency: `analysis/graph/r_graph/r_adjacency.npy` (rebuild with `build_r_graph.py` if missing)
+- Prepared tensors: `training_data/r-only/pXX/{train,validation,test}.npz`
+- Finished weighted adjacency: `training_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy`
 
 Do not open `trajectories.csv`, vehicle-ID files, or raw FCD except to
 SHA256-protect them. Do not scale observed flow by `1/p`. Do not refit
@@ -56,41 +55,17 @@ target scaler for full flow. Inverse transform predictions with
 
 ## Outputs
 
-Default prepared-data root: `reimplementation/stgcn/prepared_data/r-only/`.
+Default prepared-data root: `training_data/r-only/` on the data disk.
 NPZ files are generated artifacts. Python, JSON configs, tests, README, and
 this `AGENTS.md` are source.
 
-Default future training root: `reimplementation/experiments/r_only/stgcn/`.
+Default future training root: `training_results/stgcn/` on the data disk.
 Do not create official experiment outputs unless the user asks to train.
 
-```bash
-python3 reimplementation/stgcn/prepared_data/prepare_r_only_stgcn_data.py --dry-run
-python3 reimplementation/stgcn/prepared_data/prepare_r_only_stgcn_data.py --overwrite
-python3 -m unittest discover -s reimplementation/stgcn/tests -v
-```
-
 Training / eval / monitor commands are in `reimplementation/stgcn/README.md`.
-
-## STGCN weighted adjacency
-
-`prepared_data/prepare_stgcn_weighted_adjacency.py` builds a symmetric,
-metre-scale Gaussian adjacency from the directed R graph and
-`analysis/road_network/net_tls.net.xml`. Distances are direct SUMO
-`<connection>` center-to-center lengths on `A_sym` neighbours only
-(`0.5 * source_lane + via internals + 0.5 * target_lane`). Missing reverse
-directions stay empty; do not fill them with a full-network shortest path.
-Default `--sigma-mode` is `median` of those neighbour distances; `--sigma`
-overrides it. `--epsilon` defaults to `0.0`. It must not overwrite
-`r_adjacency.npy`. Outputs go to `prepared_data/r-only/adjacency_matrix/`.
-Do not add self-loops, normalize, or form a Laplacian here.
-
-The PyTorch port reads `stgcn_weighted_adjacency.npy` as the finished W and
-then builds the scaled Laplacian and Chebyshev kernel. It must not apply a
-second Gaussian kernel.
-
-```bash
-python3 reimplementation/stgcn/prepared_data/prepare_stgcn_weighted_adjacency.py --overwrite
-```
+Window NPZ and the weighted adjacency are dataset inputs. This package reads
+`stgcn_weighted_adjacency.npy` as finished W and builds the scaled Laplacian
+and Chebyshev kernel at runtime. It must not apply a second Gaussian kernel.
 
 ## PyTorch port rules
 

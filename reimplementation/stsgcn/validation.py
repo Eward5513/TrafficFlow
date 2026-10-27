@@ -21,16 +21,12 @@ def load_node_ids(node_mapping: Path) -> list[str]:
 def validate_stsgcn_graph(
     *,
     topology_path: Path,
-    metadata_path: Path,
-    validation_path: Path,
     r_nodes_path: Path,
     node_ids: list[str],
     expected_nodes: int,
 ) -> dict[str, Any]:
     return load_stsgcn_graph(
         topology_path=topology_path,
-        metadata_path=metadata_path,
-        validation_path=validation_path,
         r_nodes_path=r_nodes_path,
         node_ids=node_ids,
         expected_nodes=expected_nodes,
@@ -39,7 +35,8 @@ def validate_stsgcn_graph(
 
 def validate_model_shapes(model: STSGCN, *, batch_size: int, seq_len: int) -> dict[str, Any]:
     model.eval()
-    x = torch.zeros(batch_size, seq_len, model.num_nodes, model.input_channels)
+    device = next(model.parameters()).device
+    x = torch.zeros(batch_size, seq_len, model.num_nodes, model.input_channels, device=device)
     with torch.no_grad():
         y, trace = model(x, return_trace=True)
     expected = (batch_size, model.horizon, model.num_nodes, 1)

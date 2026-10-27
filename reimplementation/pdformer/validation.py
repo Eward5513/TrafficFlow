@@ -43,10 +43,11 @@ def validate_pdformer_graph(
 
 def validate_model_shapes(model: PDFormer, *, batch_size: int, seq_len: int) -> dict[str, Any]:
     model.eval()
+    device = next(model.parameters()).device
     channels = model.enc_embed_layer.expected_input_channels()
-    x = torch.zeros(batch_size, seq_len, model.num_nodes, channels)
+    x = torch.zeros(batch_size, seq_len, model.num_nodes, channels, device=device)
     if model.add_time_in_day:
-        slots = torch.arange(seq_len).float() / 288.0
+        slots = torch.arange(seq_len, device=device).float() / 288.0
         x[..., 1] = slots.view(1, seq_len, 1)
     with torch.no_grad():
         y, trace = model(x, return_trace=True)

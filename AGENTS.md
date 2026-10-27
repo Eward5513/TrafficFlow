@@ -25,17 +25,32 @@ ocr -> analysis/road_network + analysis/matching
  \-> reimplementation/pdformer
  \-> reimplementation/stid
  \-> reimplementation/staeformer
+ \-> reimplementation/s2s_gcn_lstm
 ```
 
 Read `README.md` for the conceptual workflow, but treat the current scripts and
 their constants as authoritative when documentation and code disagree.
 
+Keep the git checkout and the data disk separate:
+
+- `CODE_ROOT` = `/home/tzhang174/TrafficFlow` — scripts, JSON configs, tests, docs
+- `DATA_ROOT` = `/data5/tzhang174/TrafficFlow` — `ocr_data/`, `simulation_data/`,
+  `training_data/`, `training_results/` (`data_root.py`, override with
+  `TRAFFICFLOW_DATA_ROOT`)
+
+Do not copy scripts onto the data disk. Do not write checkpoints, NPZ windows,
+or training logs into the git tree. SUMO `sumocfg` paths stay relative to each
+config file.
+
 ## Repository-wide working rules
 
 - Preserve existing user changes. The repository commonly contains modified
   configs, generated networks, simulation results, and experiment outputs.
-- Resolve data paths with `pathlib.Path` relative to `__file__` unless an
-  existing script deliberately uses another convention.
+- Resolve data paths through `data_root.py`. Xuancheng26 prepared windows
+  stay at `xuancheng26/training_data/window_data/`.
+  `reimplementation/` does not generate datasets. Xuancheng26 training writes
+  `xuancheng26/training_results/<model>/<rate>/seed_<seed>/`. Never write those
+  artifacts under `CODE_ROOT`.
 - Keep ID-like values such as VINs, OSM IDs, SUMO edge IDs, junction IDs, and
   lane IDs as strings. Do not coerce them to integers.
 - Preserve deterministic seeds and stable output ordering. The default seed is
@@ -45,8 +60,9 @@ their constants as authoritative when documentation and code disagree.
   concrete reason.
 - Keep text, JSON, and XML output UTF-8. Preserve existing field names and XML
   structures because downstream scripts consume them directly.
-- Do not introduce machine-specific absolute paths. SUMO config paths are
-  intentionally relative to the config file or the script working directory.
+- Keep SUMO config paths relative to the config file. Python/JSON defaults for
+  generated data use `data_root.py` (`CODE_ROOT` vs `DATA_ROOT`); do not hard-code
+  extra machine paths in model code.
 - Update the relevant README or `AGENTS.md` when changing pipeline stages,
   default inputs, output locations, or experiment semantics.
 

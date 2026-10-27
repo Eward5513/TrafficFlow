@@ -35,13 +35,13 @@ not override it), attention `mask=False`, Huber loss, Adam `lr=0.001`,
 
 ## Isolation
 
-- Output is `reimplementation/staeformer/experiments/r_only/`.
+- Output is `/data5/tzhang174/TrafficFlow/training_results/staeformer/`.
 - Never write into DCRNN, Graph WaveNet, STSGCN, STFGNN, PDFormer, STID,
   or STGCN experiment / prepared-data directories.
 - Prepared NPZ and R graphs are read-only. STAEformer does not load
   adjacency.
 - Unit tests and `--smoke-test-only` must not create official checkpoints.
-- Prefer CPU while other models may be using the machine.
+- Default device is `cuda`. `--smoke-test-only` still forces CPU.
 
 ## Task definition
 
@@ -69,3 +69,9 @@ python3 reimplementation/staeformer/train_r_only_staeformer.py
 
 `--smoke-test-only` runs one p70 training batch on CPU and discards the
 model. Do not pass graph flags; the CLI does not accept them.
+
+Official `run_single_rate` keeps PeMS04 early stopping (`early_stop=20`).
+When training or early stopping ends, it reloads `best_checkpoint.pt`
+and writes `test_metrics.json` plus `test_predictions.npz` through
+`reimplementation.common.evaluation`. Test is never used for checkpoint
+selection or early stopping.

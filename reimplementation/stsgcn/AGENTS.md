@@ -31,7 +31,8 @@ blocks with filters `[64,64,64]`, Adam `lr=1e-3`, `batch_size=32`,
 
 ## Isolation
 
-- Output is `reimplementation/stsgcn/experiments/r_only/`.
+- Output is `/data5/tzhang174/TrafficFlow/training_results/stsgcn/`.
+- Official training writes `overall_summary.json` at that model root (same as STGCN/STID), plus per-rate `pXX/seed_42/`.
 - Never write into DCRNN, Graph WaveNet, or STGCN experiment directories.
 - Never modify DCRNN or Graph WaveNet source while those runs are in progress.
 - Prepared NPZ and adjacency files are read-only.
@@ -39,7 +40,7 @@ blocks with filters `[64,64,64]`, Adam `lr=1e-3`, `batch_size=32`,
 
 ## Inputs
 
-- Prepared windows: `reimplementation/stgcn/prepared_data/r-only/pXX/{train,validation,test}.npz`
+- Prepared windows: `training_data/r-only/pXX/{train,validation,test}.npz`
 - Spatial graph: `.../adjacency_matrix/stgcn_undirected_topology.npy` (0/1 undirected connectivity)
 - R nodes: `analysis/graph/r_graph/r_nodes.csv`
 

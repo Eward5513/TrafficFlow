@@ -37,6 +37,7 @@ from count_edge_flow import (
     window_index_for,
     window_label,
 )
+from _paths import node_table, subgraph_file, subgraph_trajectories_dir
 
 
 SCRIPT_VERSION = "1.0.0"
@@ -49,11 +50,9 @@ DEFAULT_TRAJECTORIES_NAME = "trajectories.csv"
 PROGRESS_EVERY = 500_000
 EXAMPLE_LIMIT = 8
 
-BASE_DIR = Path(__file__).resolve().parent
-ANALYSIS_DIR = BASE_DIR.parent
-DEFAULT_DATA_ROOT = BASE_DIR / "data" / "processed" / "subgraph_trajectories"
-DEFAULT_R_NODES = ANALYSIS_DIR / "graph" / "r_graph" / "r_nodes.csv"
-DEFAULT_SUBGRAPH = BASE_DIR / "data" / "subgraph.txt"
+DEFAULT_DATA_ROOT = subgraph_trajectories_dir()
+DEFAULT_R_NODES = node_table()
+DEFAULT_SUBGRAPH = subgraph_file()
 
 
 class ObservedFlowError(Exception):

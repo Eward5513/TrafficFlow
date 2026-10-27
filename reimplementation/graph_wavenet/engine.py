@@ -20,10 +20,21 @@ from reimplementation.common.data.r_only_npz_dataset import (
     SPLITS,
     build_dataloader,
     invert_target,
-    load_json,
     rate_tag,
 )
+from reimplementation.common.evaluation import reload_best_checkpoint
 from reimplementation.common.errors import ReimplementationError
+from reimplementation.common.experiment_protocol import (
+    ExperimentClock,
+    assert_official_rates,
+    attach_prediction_aliases,
+    build_run_metadata,
+    finalize_completed_rate,
+    mark_rate_failed,
+    reset_peak_memory,
+    trainable_parameter_count,
+    write_prediction_npz,
+)
 from reimplementation.common.metrics.traffic_metrics import traffic_metrics
 from reimplementation.common.utils.atomic_io import atomic_write_bytes, atomic_write_json, atomic_write_npz
 from reimplementation.common.utils.checkpoint import (
@@ -33,7 +44,7 @@ from reimplementation.common.utils.checkpoint import (
 )
 from reimplementation.common.utils.reproducibility import seed_everything
 from reimplementation.common.utils.structured_logging import JsonlLogger
-from reimplementation.graph_wavenet.losses import MaskedMAERawLoss, mae_raw_all, mae_raw_nonzero
+from reimplementation.graph_wavenet.losses import UnmaskedMAERawLoss, mae_raw_all, mae_raw_nonzero
 from reimplementation.graph_wavenet.model.graph_wavenet import CODE_VERSION, GraphWaveNet
 from reimplementation.graph_wavenet.validation import (
     validate_gwn_graph,
@@ -162,7 +173,7 @@ def train_one_epoch(
     model: GraphWaveNet,
     loader,
     optimizer: Adam,
-    criterion: MaskedMAERawLoss,
+    criterion: UnmaskedMAERawLoss,
     device: torch.device,
     *,
     gradient_clip: float,
@@ -221,7 +232,7 @@ def train_one_epoch(
 def evaluate_one_epoch(
     model: GraphWaveNet,
     loader,
-    criterion: MaskedMAERawLoss,
+    criterion: UnmaskedMAERawLoss,
     device: torch.device,
     mean_y: float,
     std_y: float,
@@ -266,7 +277,7 @@ def evaluate_one_epoch(
         "sample_index": np.concatenate(sample_index, axis=0),
     }
     order = np.argsort(packed["sample_index"], kind="stable")
-    packed = {key: value[order] for key, value in packed.items()}
+    packed = attach_prediction_aliases({key: value[order] for key, value in packed.items()})
     metrics = traffic_metrics(packed["y_pred_raw"], packed["y_true_raw"], clip_negative=False)
     metrics.update(_prediction_stats(packed["y_pred_raw"]))
     pred_t = torch.from_numpy(packed["y_pred_raw"])
@@ -287,16 +298,10 @@ def _write_split_outputs(
     node_ids: list[str],
 ) -> None:
     atomic_write_json(output_dir / f"{split}_metrics.json", dict(result["metrics"]))
-    atomic_write_npz(
+    write_prediction_npz(
         output_dir / f"{split}_predictions.npz",
-        y_pred_normalized=result["y_pred_normalized"],
-        y_pred_raw=result["y_pred_raw"],
-        y_true_normalized=result["y_true_normalized"],
-        y_true_raw=result["y_true_raw"],
-        day_index=result["day_index"],
-        window_start_slot=result["window_start_slot"],
-        target_slot=result["target_slot"],
-        sample_index=result["sample_index"],
+        result,
+        expected_count=int(result["y_pred_raw"].shape[0]),
     )
     if not write_tables:
         return
@@ -359,7 +364,7 @@ def run_p70_smoke(
         model, batch_size=min(2, int(config["batch_size"])), seq_len=int(config["seq_len"])
     )
     optimizer = build_optimizer(model, config)
-    criterion = MaskedMAERawLoss(float(data_info["mean_y_full"]), float(data_info["std_y_full"]))
+    criterion = UnmaskedMAERawLoss(float(data_info["mean_y_full"]), float(data_info["std_y_full"]))
     batch = _move_batch(next(iter(loaders_pack["loaders"]["train"])), device)
     x = batch["x"]
     y = batch["y"]
@@ -482,6 +487,7 @@ def run_single_rate(
     device = resolve_device(str(config.get("device", "auto")))
     rate_dir = output_root / tag / f"seed_{seed}"
     rate_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(rate_dir / "resolved_config.json", dict(config))
     loaders_pack = build_dataloaders(data_root, tag, config, data_info["sample_counts"])
     model = build_model(config, graph_info["supports"]).to(device)
     init_hash = parameter_sha256(model)
@@ -489,13 +495,15 @@ def run_single_rate(
         model, batch_size=min(2, int(config["batch_size"])), seq_len=int(config["seq_len"])
     )
     optimizer = build_optimizer(model, config)
-    criterion = MaskedMAERawLoss(float(data_info["mean_y_full"]), float(data_info["std_y_full"]))
+    criterion = UnmaskedMAERawLoss(float(data_info["mean_y_full"]), float(data_info["std_y_full"]))
     mean_y = float(data_info["mean_y_full"])
     std_y = float(data_info["std_y_full"])
     train_hash = data_info["file_hashes"][f"{tag}/train.npz"]
     start_epoch = 0
     best_metric = float("inf")
     best_epoch = -1
+    clock = ExperimentClock()
+    clock.mark_experiment_start()
     if resume_path is not None:
         payload = load_checkpoint(resume_path, map_location=device)
         assert_checkpoint_compatible(
@@ -534,13 +542,16 @@ def run_single_rate(
 
     history_rows: list[dict[str, Any]] = []
     epochs = int(config["epochs"])
+    param_count = trainable_parameter_count(model)
     print(
         (
-            f"[gwn] stage=building_model rate={tag} params={model.parameter_count()} "
+            f"[gwn] stage=building_model rate={tag} params={param_count} "
             f"init={init_hash[:16]} device={device} rf={model.receptive_field}"
         ),
         flush=True,
     )
+    reset_peak_memory(device)
+    clock.mark_train_start()
     for epoch in range(start_epoch, epochs):
         lr = float(config["learning_rate"])
         for group in optimizer.param_groups:
@@ -620,16 +631,14 @@ def run_single_rate(
             flush=True,
         )
 
+    clock.mark_train_end()
     atomic_write_csv_rows(
         rate_dir / "training_history.csv",
         list(history_rows[0].keys()) if history_rows else ["epoch"],
         history_rows,
     )
     atomic_write_json(rate_dir / "training_history.json", history_rows)
-    best_path = rate_dir / "best_checkpoint.pt"
-    if best_path.is_file():
-        payload = load_checkpoint(best_path, map_location=device)
-        model.load_state_dict(payload["model_state_dict"])
+    reload_best_checkpoint(model, rate_dir / "best_checkpoint.pt", device)
     adp = model.adaptive_adjacency().detach().cpu().numpy().astype(np.float32)
     atomic_write_npy(rate_dir / "learned_adaptive_adjacency.npy", adp)
     logger.log({"stage": "validating", "model_name": "graph_wavenet", "penetration_rate": tag, "status": "ok"})
@@ -648,46 +657,71 @@ def run_single_rate(
     if np.max(np.abs(np.asarray(recovered) - test_best["y_pred_raw"])) > 1e-4:
         raise ReimplementationError("test denormalization does not recover y_pred_raw")
     _write_split_outputs(rate_dir, "test", test_best, write_tables=True, node_ids=list(data_info["node_ids"]))
-    atomic_write_json(
-        rate_dir / "run_metadata.json",
-        {
-            "penetration_rate": tag,
-            "seed": seed,
-            "best_epoch": best_epoch,
-            "best_metric": best_metric,
-            "parameter_count": model.parameter_count(),
+    clock.mark_experiment_end()
+    metadata = build_run_metadata(
+        model="graph_wavenet",
+        penetration=tag,
+        seed=seed,
+        device=device,
+        parameter_count=param_count,
+        training_loss="unmasked_raw_mae",
+        optimizer="Adam",
+        initial_lr=float(config["learning_rate"]),
+        scheduler=None,
+        max_epochs=epochs,
+        epochs_executed=len(history_rows),
+        best_epoch=best_epoch,
+        best_metric=best_metric,
+        early_stopping=False,
+        early_stopping_patience=None,
+        selection_metric="validation_mae_raw_including_zero",
+        clock=clock,
+        extra={
             "init_parameter_sha256": init_hash,
             "code_version": CODE_VERSION,
             "graph_sha256": graph_info["graph_sha256"],
             "data_file_sha256": train_hash,
-            "target_mode": "last-observed-step",
-            "did_not_use_test_for_selection": True,
-            "checkpoint_monitor": config.get("checkpoint_monitor", "validation_mae_raw_all"),
+            "checkpoint_monitor": "validation_mae_raw_all",
             "adjtype": config.get("adjtype"),
             "gcn_bool": True,
             "addaptadj": True,
             "randomadj": bool(config.get("randomadj", True)),
             "horizon": config.get("horizon"),
             "receptive_field": model.receptive_field,
-            "device": str(device),
+            "early_stopped": False,
+            "max_grad_norm": float(config.get("max_grad_norm", 5.0)),
+            "weight_decay": float(config.get("weight_decay", 1e-4)),
         },
+    )
+    output_check = finalize_completed_rate(
+        rate_dir,
+        metadata=metadata,
+        history=history_rows,
+        expected_test_count=int(data_info["sample_counts"]["test"]),
+        expected_val_count=int(data_info["sample_counts"]["validation"]),
+        n_his=int(config["seq_len"]),
+        history_metric_key="validation_mae_raw_all",
+        history_rule="lt",
     )
     atomic_write_json(
         rate_dir / "run_validation.json",
         {
             "status": "ok",
             "shape_trace": shape_info["trace"],
-            "parameter_count": model.parameter_count(),
+            "parameter_count": param_count,
             "receptive_field": model.receptive_field,
             "adaptive_adjacency_path": (rate_dir / "learned_adaptive_adjacency.npy").as_posix(),
         },
     )
     logger.log({"stage": "validating_outputs", "model_name": "graph_wavenet", "penetration_rate": tag, "status": "ok"})
     return {
-        "status": "trained",
+        "status": "completed",
+        "rate": tag,
         "best_epoch": best_epoch,
         "best_metric": best_metric,
-        "parameter_count": model.parameter_count(),
+        "early_stopped": False,
+        "epochs_executed": len(history_rows),
+        "parameter_count": param_count,
         "init_parameter_sha256": init_hash,
         "validation_mae_raw": float(val_best["metrics"]["mae"]),
         "validation_rmse_raw": float(val_best["metrics"]["rmse"]),
@@ -705,6 +739,9 @@ def run_single_rate(
         "test_negative_prediction_fraction": float(test_best["metrics"]["negative_prediction_fraction"]),
         "test_minimum_prediction": float(test_best["metrics"]["minimum_prediction"]),
         "test_maximum_prediction": float(test_best["metrics"]["maximum_prediction"]),
+        "train_wall_time_sec": metadata["train_wall_time_sec"],
+        "average_epoch_time_sec": metadata["average_epoch_time_sec"],
+        "output_check": output_check,
         "output_dir": rate_dir,
     }
 
@@ -718,27 +755,15 @@ def run_all_rates(
     output_root: Path,
     adjacency_path: Path,
     pickle_path: Path,
-    metadata_path: Path,
-    graph_validation_path: Path,
     r_nodes_path: Path,
     logger: JsonlLogger,
     smoke_only: bool = False,
     resume: Path | None = None,
 ) -> dict[str, Any]:
-    rate_list = [rate_tag(item) for item in rates]
+    del project_root
+    rate_list = assert_official_rates(rates)
     if resume is not None and len(rate_list) > 1:
         raise ReimplementationError("use --resume together with --rate; do not share checkpoints across penetrations")
-    stgcn_manifest = project_root / "reimplementation" / "stgcn" / "experiments" / "r_only" / "experiment_manifest.json"
-    if stgcn_manifest.is_file():
-        stgcn_rates = [rate_tag(item) for item in load_json(stgcn_manifest).get("rates", [])]
-        if not smoke_only and resume is None and rate_list != stgcn_rates:
-            raise ReimplementationError(
-                f"GWN rates {rate_list} must match STGCN R-only rates {stgcn_rates}"
-            )
-    if not smoke_only and resume is None and rate_list != list(RATE_TAGS):
-        raise ReimplementationError(
-            f"official R-only training requires the 7 STGCN rates {list(RATE_TAGS)}, got {rate_list}"
-        )
     logger.log({"stage": "scanning", "model_name": "graph_wavenet", "status": "ok"})
     data_info = validate_prepared_data(
         data_root,
@@ -750,8 +775,6 @@ def run_all_rates(
     graph_info = validate_gwn_graph(
         adjacency_path=adjacency_path,
         pickle_path=pickle_path,
-        metadata_path=metadata_path,
-        validation_path=graph_validation_path,
         r_nodes_path=r_nodes_path,
         node_ids=list(data_info["node_ids"]),
         expected_nodes=int(config["num_nodes"]),
@@ -804,16 +827,25 @@ def run_all_rates(
     init_hashes = []
     for rate in rate_list:
         print(f"[gwn] stage=training_start rate={rate_tag(rate)} seed={config['seed']}", flush=True)
-        result = run_single_rate(
-            config,
-            rate=rate,
-            data_root=data_root,
-            output_root=output_root,
-            graph_info=graph_info,
-            data_info=data_info,
-            logger=logger,
-            resume_path=resume,
-        )
+        try:
+            result = run_single_rate(
+                config,
+                rate=rate,
+                data_root=data_root,
+                output_root=output_root,
+                graph_info=graph_info,
+                data_info=data_info,
+                logger=logger,
+                resume_path=resume,
+            )
+            if str(result.get("status")) != "completed":
+                raise ReimplementationError(f"{rate_tag(rate)} did not reach status=completed")
+        except Exception as exc:
+            mark_rate_failed(
+                output_root / rate_tag(rate) / f"seed_{int(config['seed'])}",
+                reason=str(exc),
+            )
+            raise
         init_hashes.append(result.get("init_parameter_sha256"))
         summaries.append({"rate": rate_tag(rate), **{k: v for k, v in result.items() if k != "output_dir"}})
         print(

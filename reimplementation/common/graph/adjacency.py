@@ -1,11 +1,6 @@
 """Load and validate a finished symmetric weighted adjacency matrix.
 
-The R-only STGCN matrix at
-``reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_weighted_adjacency.npy``
-is already:
-
-    direct-connection center distance -> Gaussian kernel -> topology mask -> symmetric W
-
+The matrix is already a Gaussian kernel on direct-connection distances.
 This module must not run ``W/10000``, ``exp(-W^2/sigma^2)``, epsilon thresholding,
 binarization, or any other second kernel. Original STGCN ``weight_matrix()`` is
 intentionally skipped.
@@ -34,9 +29,9 @@ def load_final_weighted_adjacency(path: Path) -> np.ndarray:
 def validate_weighted_adjacency(
     weights: np.ndarray,
     *,
-    expected_nodes: int | None = 56,
-    expected_undirected_neighbors: int | None = 137,
-    expected_nonzero_offdiag: int | None = 274,
+    expected_nodes: int | None = None,
+    expected_undirected_neighbors: int | None = None,
+    expected_nonzero_offdiag: int | None = None,
     atol: float = WEIGHT_ATOL,
 ) -> dict[str, int]:
     if weights.ndim != 2 or weights.shape[0] != weights.shape[1]:

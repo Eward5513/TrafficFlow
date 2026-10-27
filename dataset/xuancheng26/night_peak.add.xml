@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<additional>
+
+    <!--
+        晚高峰统一切换方案
+
+        约定：
+        1. 普通配时 programID = "0"
+        2. 晚高峰配时 programID = "1"
+        3. 58000 s 切换到晚高峰方案
+        4. 76000 s 切回普通方案
+
+        对于每个需要晚高峰单独配时的路口：
+        - 在 NetEdit 中复制 program 0
+        - 将复制后的 programID 改为 1
+        - 修改晚高峰 phase duration
+        - 在本文件底部增加对应的 wautJunction
+    -->
+
+    <WAUT id="night_peak"
+          refTime="0"
+          startProg="0">
+
+        <wautSwitch time="55000" to="1"/>
+        <wautSwitch time="75000" to="0"/>
+
+    </WAUT>
+
+
+    <!--
+        在下面添加需要切换晚高峰配时的 TLS。
+
+        示例：
+
+        <wautJunction
+            wautID="night_peak"
+            junctionID="34180200000195"/>
+
+        后续增加其它路口时继续追加：
+
+        <wautJunction
+            wautID="night_peak"
+            junctionID="YOUR_TLS_ID"/>
+    -->
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000195"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000239"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000173"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000025"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200008565"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000003"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000001"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000505"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000215"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000190"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000057"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200007880"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000466"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000490"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000496"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000516"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000494"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000551"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200007014"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200008566"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000221"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200006536"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000417"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000304"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000232"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200006185"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000350"/>
+
+    <wautJunction
+        wautID="night_peak"
+        junctionID="34180200000161"/>
+
+</additional>

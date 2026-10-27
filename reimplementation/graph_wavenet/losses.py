@@ -1,14 +1,11 @@
-"""Original Graph WaveNet training loss: inverse-transform then masked MAE.
+"""Graph WaveNet training loss: inverse-transform then unmasked MAE.
 
-``reference/Graph-WaveNet/util.py`` ``masked_mae`` / ``engine.trainer.train``:
+Official R-only semantics: ``flow = 0`` is a real empty 5-minute window, not a
+PeMS missing detector. Training therefore uses
 
-1. ``predict = scaler.inverse_transform(output)``
-2. mask positions where the *raw* label equals ``null_val`` (0.0)
-3. rescale the mask by ``1 / mean(mask)``
-4. replace NaNs with 0
-5. mean absolute error
+    mean(abs(pred_raw - y_raw))
 
-Normalized ``y == 0`` is not a raw-flow zero, so this loss uses ``y_raw``.
+after inverse-transform. Zero targets participate in the loss and gradient.
 """
 
 from __future__ import annotations
@@ -17,12 +14,12 @@ import torch
 import torch.nn as nn
 
 
-class MaskedMAERawLoss(nn.Module):
-    def __init__(self, mean: float, std: float, null_val: float = 0.0) -> None:
+class UnmaskedMAERawLoss(nn.Module):
+    def __init__(self, mean: float, std: float, null_val: float | None = None) -> None:
         super().__init__()
         self.mean = float(mean)
         self.std = float(std)
-        self.null_val = float(null_val)
+        self.null_val = null_val
 
     def denormalize(self, normalized: torch.Tensor) -> torch.Tensor:
         return normalized * self.std + self.mean
@@ -34,18 +31,11 @@ class MaskedMAERawLoss(nn.Module):
                 f"target {tuple(target_raw.shape)}"
             )
         preds = self.denormalize(prediction_normalized)
-        labels = target_raw
-        if self.null_val != self.null_val:
-            mask = ~torch.isnan(labels)
-        else:
-            mask = labels != self.null_val
-        mask = mask.to(dtype=preds.dtype)
-        denom = torch.mean(mask)
-        mask = torch.where(denom > 0, mask / denom, torch.zeros_like(mask))
-        mask = torch.nan_to_num(mask, nan=0.0)
-        loss = torch.abs(preds - labels) * mask
-        loss = torch.nan_to_num(loss, nan=0.0)
-        return torch.mean(loss)
+        return torch.mean(torch.abs(preds - target_raw))
+
+
+# Historical name kept so existing imports continue to resolve to the unmasked loss.
+MaskedMAERawLoss = UnmaskedMAERawLoss
 
 
 def mae_raw_all(prediction_raw: torch.Tensor, target_raw: torch.Tensor) -> torch.Tensor:

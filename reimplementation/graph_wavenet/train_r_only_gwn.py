@@ -16,12 +16,14 @@ from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.utils.atomic_io import atomic_write_json
 from reimplementation.common.utils.hashing import sha256_file
 from reimplementation.common.utils.structured_logging import JsonlLogger
+from data_root import runtime_roots, xuancheng26_model_config
 from reimplementation.graph_wavenet.engine import atomic_write_csv_rows, resolve_path, run_all_rates
+from reimplementation.stgcn.engine import resolve_training_output
 from reimplementation.graph_wavenet.model.graph_wavenet import CODE_VERSION
 
 SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_ROOT = SCRIPT_PATH.parents[2]
-DEFAULT_CONFIG = SCRIPT_PATH.parent / "configs" / "r_only_gwn.json"
+DEFAULT_CONFIG = xuancheng26_model_config("gwn")
 
 ORIGINAL_TO_MIGRATED = {
     "reference/Graph-WaveNet/model.py::nconv": "reimplementation/graph_wavenet/model/graph_wavenet.py::NConv",
@@ -50,8 +52,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=Path, default=None)
     parser.add_argument("--adjacency", type=Path, default=None)
     parser.add_argument("--adjacency-pickle", type=Path, default=None)
-    parser.add_argument("--graph-metadata", type=Path, default=None)
-    parser.add_argument("--graph-validation", type=Path, default=None)
     parser.add_argument("--r-nodes", type=Path, default=None)
     parser.add_argument("--normalization", type=Path, default=None)
     parser.add_argument("--split-manifest", type=Path, default=None)
@@ -89,8 +89,6 @@ def overlay(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         "data_root": args.data_root,
         "adjacency": args.adjacency,
         "adjacency_pickle": args.adjacency_pickle,
-        "graph_metadata": args.graph_metadata,
-        "graph_validation": args.graph_validation,
         "r_nodes": args.r_nodes,
         "normalization": args.normalization,
         "split_manifest": args.split_manifest,
@@ -176,10 +174,8 @@ def main() -> None:
     data_root = resolve_path(PROJECT_ROOT, config["data_root"])
     adjacency = resolve_path(PROJECT_ROOT, config["adjacency"])
     pickle_path = resolve_path(PROJECT_ROOT, config["adjacency_pickle"])
-    metadata_path = resolve_path(PROJECT_ROOT, config["graph_metadata"])
-    graph_validation = resolve_path(PROJECT_ROOT, config["graph_validation"])
     r_nodes = resolve_path(PROJECT_ROOT, config["r_nodes"])
-    output_root = resolve_path(PROJECT_ROOT, config["output_root"])
+    output_root = resolve_training_output(PROJECT_ROOT, config["output_root"], model_name="graph_wavenet")
     dcrnn_output = PROJECT_ROOT / "reimplementation" / "dcrnn" / "experiments" / "r_only"
     if output_root.resolve() == dcrnn_output.resolve():
         raise ReimplementationError("GWN output_root must not be the DCRNN experiment directory")
@@ -189,8 +185,6 @@ def main() -> None:
     protected = [
         adjacency,
         pickle_path,
-        metadata_path,
-        graph_validation,
         r_nodes,
         data_root / "normalization.json",
         PROJECT_ROOT / "reference" / "Graph-WaveNet" / "model.py",
@@ -236,6 +230,7 @@ def main() -> None:
             "cpu_thread_count": int(torch.get_num_threads()),
             "command": sys.argv,
             "original_gwn_sha256": original_hashes(PROJECT_ROOT),
+            **runtime_roots(),
         },
     )
     atomic_write_json(output_root / "source_code_manifest.json", source_manifest(PROJECT_ROOT / "reimplementation"))
@@ -253,8 +248,6 @@ def main() -> None:
             output_root=output_root,
             adjacency_path=adjacency,
             pickle_path=pickle_path,
-            metadata_path=metadata_path,
-            graph_validation_path=graph_validation,
             r_nodes_path=r_nodes,
             logger=logger,
             smoke_only=args.smoke_test_only,

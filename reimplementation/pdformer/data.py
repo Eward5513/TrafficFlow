@@ -23,8 +23,14 @@ MINUTES_PER_DAY = 1440
 MINUTES_PER_SLOT = 5
 
 
+def _as_int64_vector(value: np.ndarray | torch.Tensor) -> np.ndarray:
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy().astype(np.int64, copy=False).reshape(-1)
+    return np.asarray(value, dtype=np.int64).reshape(-1)
+
+
 def slot_series(window_start_slot: np.ndarray | torch.Tensor, n_his: int) -> np.ndarray:
-    starts = np.asarray(window_start_slot, dtype=np.int64).reshape(-1)
+    starts = _as_int64_vector(window_start_slot)
     offsets = np.arange(int(n_his), dtype=np.int64)
     return starts[:, None] + offsets[None, :]
 
@@ -90,7 +96,7 @@ def weekday_ids_from_mapping(
     mapping: Mapping[str, int],
     all_days: Sequence[str],
 ) -> np.ndarray:
-    indices = np.asarray(day_index, dtype=np.int64).reshape(-1)
+    indices = _as_int64_vector(day_index)
     names = [str(item) for item in all_days]
     weekdays = np.empty(indices.shape, dtype=np.int64)
     for position, index in enumerate(indices.tolist()):

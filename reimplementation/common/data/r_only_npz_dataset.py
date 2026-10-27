@@ -67,7 +67,7 @@ class ROnlyNPZDataset(Dataset):
         npz_path: Path,
         *,
         n_his: int = 12,
-        num_nodes: int = 56,
+        num_nodes: int | None = None,
         input_channels: int = 1,
         output_channels: int = 1,
         output_steps: int = 1,
@@ -82,6 +82,8 @@ class ROnlyNPZDataset(Dataset):
         self.day_index = arrays["day_index"]
         self.window_start_slot = arrays["window_start_slot"]
         self.target_slot = arrays["target_slot"]
+        if num_nodes is None:
+            num_nodes = int(self.x.shape[2])
         self._validate_shapes(
             n_his=n_his,
             num_nodes=num_nodes,

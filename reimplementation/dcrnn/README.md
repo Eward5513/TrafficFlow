@@ -11,10 +11,10 @@
 
 ```text
 ORIGINAL_DCRNN_ROOT   = reference/dcrnn
-PREPARED_DATA_ROOT    = reimplementation/stgcn/prepared_data/r-only
-DCRNN_ADJACENCY_ROOT  = reimplementation/dcrnn/prepared_data/r-only/adjacency_matrix
+PREPARED_DATA_ROOT    = training_data/r-only
+DCRNN_ADJACENCY_ROOT  = training_data/r-only/dcrnn
 TRAIN_SCRIPT          = reimplementation/dcrnn/train_r_only_dcrnn.py
-OUTPUT_ROOT           = reimplementation/dcrnn/experiments/r_only
+OUTPUT_ROOT           = /data5/tzhang174/TrafficFlow/training_results/dcrnn
 ```
 
 ## 训练
@@ -24,4 +24,4 @@ python3 reimplementation/dcrnn/train_r_only_dcrnn.py --help
 python3 reimplementation/dcrnn/train_r_only_dcrnn.py
 ```
 
-七种渗透率独立训练，共享同一张有向图。超参数来自原版 METR-LA yaml（Adam / `dual_random_walk` / 100 epoch），仅将 `horizon` 改为 1、`input_dim` 改为 1、节点数改为 56。
+每个官方渗透率独立训练，一次运行可以只传一个渗透率。共享同一张有向图。超参数来自原版 METR-LA yaml（Adam / `dual_random_walk` / 100 epoch），仅将 `horizon` 改为 1、`input_dim` 改为 1、节点数改为 56。

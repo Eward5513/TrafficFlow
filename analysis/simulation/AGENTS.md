@@ -3,7 +3,9 @@
 ## Scope
 
 This directory builds the daily traffic demand, runs SUMO on it, and stores the
-large route and simulation artifacts under `data/`. Follow the repository-root
+large route and simulation artifacts under the data-disk `simulation_data/`
+directory (`data_root.simulation_data_dir()`, default
+`/data5/tzhang174/TrafficFlow/simulation_data`). Follow the repository-root
 instructions as well.
 
 ## Demand and experiment model

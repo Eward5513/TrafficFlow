@@ -6,7 +6,7 @@ Reads already written edge_flow_<window>.csv. Does not open trajectories or FCD.
 Usage:
 
     python3 analysis/simulation/rank_edge_flow.py \\
-        --root analysis/simulation/data/processed/subgraph_trajectories \\
+        --root simulation_data/processed/subgraph_trajectories \\
         --window-minutes 5
 """
 
@@ -16,6 +16,8 @@ import argparse
 import csv
 from dataclasses import dataclass
 from pathlib import Path
+
+from _paths import subgraph_trajectories_dir
 
 SECONDS_PER_DAY = 24 * 3600
 DEFAULT_WINDOW_MINUTES = 5
@@ -428,7 +430,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=None,
+        default=subgraph_trajectories_dir(),
         help="Directory of day_* folders. Processes every day that has a flow CSV.",
     )
     parser.add_argument("--flow-csv", type=Path, default=None, help="One day's edge_flow CSV.")
@@ -460,59 +462,59 @@ def resolve_window_seconds(window_minutes: int, window_seconds: int | None) -> i
 def main() -> None:
     args = parse_args()
     window_seconds = resolve_window_seconds(args.window_minutes, args.window_seconds)
-    if args.root is not None:
-        root = args.root.expanduser().resolve()
-        day_dirs = sorted(path for path in root.glob("day_*") if path.is_dir())
-        if not day_dirs:
-            raise SystemExit(f"no day_* directories in {root}")
-        by_day: dict[str, list[EdgeRank]] = {}
-        for day_dir in day_dirs:
-            flow_path = day_dir / flow_csv_name(window_seconds)
-            if not flow_path.is_file():
-                print(f"skip {day_dir.name}: missing {flow_path.name}", flush=True)
-                continue
-            ranked = process_day(
-                day_dir,
-                window_seconds=window_seconds,
-                day_label=day_dir.name,
-                dpi=args.dpi,
-            )
-            by_day[day_dir.name] = ranked
-            print(
-                f"{day_dir.name}: {len(ranked)} edges "
-                f"top={ranked[0].edge_id} mean={ranked[0].mean_per_window:.2f} "
-                f"bottom={ranked[-1].edge_id} mean={ranked[-1].mean_per_window:.2f}",
-                flush=True,
-            )
-        write_summary(root, by_day, window_seconds=window_seconds, dpi=args.dpi)
-        print(f"ranked {len(by_day)} days", flush=True)
+    if args.flow_csv is not None:
+        if args.output_dir is None or args.day_label is None:
+            raise SystemExit("single-day mode needs --flow-csv --output-dir --day-label")
+        output_dir = args.output_dir.expanduser().resolve()
+        counts, _detected = load_flow_csv(args.flow_csv.expanduser().resolve())
+        ranked = rank_edges(counts, window_seconds)
+        write_rank_csv(output_dir / rank_csv_name(window_seconds), ranked)
+        plot_compare(
+            output_dir / compare_plot_name(window_seconds),
+            ranked,
+            day_label=args.day_label,
+            window_seconds=window_seconds,
+            dpi=args.dpi,
+        )
+        plot_mean_flow(
+            output_dir / mean_plot_name(window_seconds),
+            ranked,
+            day_label=args.day_label,
+            window_seconds=window_seconds,
+            dpi=args.dpi,
+        )
+        print(
+            f"Wrote rank CSV, compare plot, and mean-flow plot for {args.day_label} "
+            f"({len(ranked)} edges)",
+            flush=True,
+        )
         return
 
-    if args.flow_csv is None or args.output_dir is None or args.day_label is None:
-        raise SystemExit("single-day mode needs --flow-csv --output-dir --day-label")
-    output_dir = args.output_dir.expanduser().resolve()
-    counts, _detected = load_flow_csv(args.flow_csv.expanduser().resolve())
-    ranked = rank_edges(counts, window_seconds)
-    write_rank_csv(output_dir / rank_csv_name(window_seconds), ranked)
-    plot_compare(
-        output_dir / compare_plot_name(window_seconds),
-        ranked,
-        day_label=args.day_label,
-        window_seconds=window_seconds,
-        dpi=args.dpi,
-    )
-    plot_mean_flow(
-        output_dir / mean_plot_name(window_seconds),
-        ranked,
-        day_label=args.day_label,
-        window_seconds=window_seconds,
-        dpi=args.dpi,
-    )
-    print(
-        f"Wrote rank CSV, compare plot, and mean-flow plot for {args.day_label} "
-        f"({len(ranked)} edges)",
-        flush=True,
-    )
+    root = args.root.expanduser().resolve()
+    day_dirs = sorted(path for path in root.glob("day_*") if path.is_dir())
+    if not day_dirs:
+        raise SystemExit(f"no day_* directories in {root}")
+    by_day: dict[str, list[EdgeRank]] = {}
+    for day_dir in day_dirs:
+        flow_path = day_dir / flow_csv_name(window_seconds)
+        if not flow_path.is_file():
+            print(f"skip {day_dir.name}: missing {flow_path.name}", flush=True)
+            continue
+        ranked = process_day(
+            day_dir,
+            window_seconds=window_seconds,
+            day_label=day_dir.name,
+            dpi=args.dpi,
+        )
+        by_day[day_dir.name] = ranked
+        print(
+            f"{day_dir.name}: {len(ranked)} edges "
+            f"top={ranked[0].edge_id} mean={ranked[0].mean_per_window:.2f} "
+            f"bottom={ranked[-1].edge_id} mean={ranked[-1].mean_per_window:.2f}",
+            flush=True,
+        )
+    write_summary(root, by_day, window_seconds=window_seconds, dpi=args.dpi)
+    print(f"ranked {len(by_day)} days", flush=True)
 
 
 if __name__ == "__main__":

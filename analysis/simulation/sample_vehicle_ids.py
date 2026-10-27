@@ -21,8 +21,9 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_ROOT = BASE_DIR / "data" / "processed" / "subgraph_trajectories"
+from _paths import subgraph_trajectories_dir
+
+DEFAULT_ROOT = subgraph_trajectories_dir()
 DEFAULT_IDS_NAME = "vehicle_ids.txt"
 DEFAULT_OUTPUT_SUBDIR = "sampled_vehicle_ids"
 DEFAULT_SEED = 42

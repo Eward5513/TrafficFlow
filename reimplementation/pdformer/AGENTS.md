@@ -32,16 +32,17 @@ Target overlay is PeMS04/08, not NYC grid: `type_ln=pre`, `far_mask_delta=7`,
 
 ## Isolation
 
-- Output is `reimplementation/pdformer/experiments/r_only/`.
+- Output is `/data5/tzhang174/TrafficFlow/training_results/pdformer/`.
+- Relation preprocessing writes `/data5/tzhang174/TrafficFlow/training_data/pdformer/`.
 - Never write into DCRNN, Graph WaveNet, STSGCN, STFGNN, or STGCN experiment directories.
 - Prepared NPZ, R graphs, and STGCN adjacency files are read-only.
 - Unit tests and `--smoke-test-only` must not create official checkpoints
   or official 56-node hop/DTW/Laplacian files.
-- Prefer CPU while DCRNN may be using the machine.
+- Default device is `cuda`. `--smoke-test-only` still forces CPU.
 
 ## Inputs
 
-- Prepared windows: `reimplementation/stgcn/prepared_data/r-only/pXX/{train,validation,test}.npz`
+- Prepared windows: `training_data/r-only/pXX/{train,validation,test}.npz`
 - Hop / Laplacian topology: `.../adjacency_matrix/stgcn_undirected_topology.npy`
 - R nodes: `analysis/graph/r_graph/r_nodes.csv`
 
@@ -66,9 +67,17 @@ simulation days have no calendar dates. Do not use `day_index % 7`.
 ```bash
 python3 reimplementation/pdformer/train_r_only_pdformer.py --help
 python3 reimplementation/pdformer/train_r_only_pdformer.py --smoke-test-only
-python3 reimplementation/pdformer/prepare_pdformer_relations.py --allow-official-r-graph --overwrite
-python3 reimplementation/pdformer/train_r_only_pdformer.py --relations-dir reimplementation/pdformer/prepared_data/r-only/relations
+PDFormer relation files (hop, DTW, Laplacian, pattern keys) are dataset inputs, not produced in this package.
+python3 reimplementation/pdformer/train_r_only_pdformer.py --relations-dir training_data/pdformer
 ```
 
 `--smoke-test-only` uses in-memory `test_only` relations. Official training
 cannot default to those matrices.
+
+Official `run_single_rate` trains the configured 200 epochs (the PeMS
+`patience: 50` field is present in config but is not implemented; do not
+add early stopping without an explicit protocol change). It selects
+`best_checkpoint.pt` by validation raw MAE, then reloads that checkpoint
+and writes `test_metrics.json` plus `test_predictions.npz` through
+`reimplementation.common.evaluation`. Test is never used for checkpoint
+selection.

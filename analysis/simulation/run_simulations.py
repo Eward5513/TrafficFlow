@@ -81,6 +81,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+from _paths import simulation_data_dir
+
 BASE_DIR = Path(__file__).resolve().parent
 ANALYSIS_DIR = BASE_DIR.parent
 
@@ -88,7 +90,7 @@ ANALYSIS_DIR = BASE_DIR.parent
 NET_FILE = ANALYSIS_DIR / "road_network" / "net_tls.net.xml"
 # 分时信号方案 + WAUT 切换表；不挂它就只有路网里的 programID="0"
 TLS_SCHEDULE_FILE = ANALYSIS_DIR / "road_network" / "tls_schedule.add.xml"
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = simulation_data_dir()
 # 背景随机流目录，同时也是编号与种子的唯一来源
 RANDOM_DIR = DATA_DIR / "random_trip"
 # 日需求目录，仿真真正加载的 route 文件

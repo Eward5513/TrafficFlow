@@ -1,14 +1,14 @@
 """Training engine for R-only STID.
 
-Official 7-rate epoch training is implemented for a later run. This session
-only uses ``run_p70_smoke`` (one training batch on CPU) and never writes
-``experiments/r_only``.
+Each penetration trains, selects the best validation checkpoint, then runs
+official raw-scale test evaluation through ``reimplementation.common.evaluation``.
 """
 
 from __future__ import annotations
 
 import hashlib
 import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -27,7 +27,22 @@ from reimplementation.common.data.r_only_npz_dataset import (
     rate_tag,
     read_target_scaler,
 )
+from reimplementation.common.evaluation import (
+    assert_official_rate_outputs,
+    evaluate_loader,
+    reload_best_checkpoint,
+    upsert_overall_summary,
+)
 from reimplementation.common.errors import ReimplementationError
+from reimplementation.common.experiment_protocol import (
+    ExperimentClock,
+    assert_official_rates,
+    build_run_metadata,
+    finalize_completed_rate,
+    mark_rate_failed,
+    reset_peak_memory,
+    trainable_parameter_count,
+)
 from reimplementation.common.utils.atomic_io import atomic_write_json
 from reimplementation.common.utils.checkpoint import (
     assert_checkpoint_compatible,
@@ -459,13 +474,14 @@ def run_single_rate(
     logger: JsonlLogger,
     resume_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Official one-rate training. Not called by this migration session."""
+    """Train one penetration, then evaluate the best validation checkpoint."""
     tag = rate_tag(rate)
     seed = int(config["seed"])
     seed_everything(seed)
     device = resolve_device(str(config.get("device", "cpu")))
     rate_dir = output_root / tag / f"seed_{seed}"
     rate_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(rate_dir / "resolved_config.json", dict(config))
     loaders_pack = build_dataloaders(data_root, tag, config, data_info["sample_counts"])
     model = build_model(config).to(device)
     optimizer = build_optimizer(model, config)
@@ -475,6 +491,8 @@ def run_single_rate(
     best_mae = float("inf")
     train_hash = data_info["file_hashes"][f"{tag}/train.npz"]
     day = _day_args(config, data_root)
+    clock = ExperimentClock()
+    clock.mark_experiment_start()
     if resume_path is not None:
         payload = load_checkpoint(resume_path, map_location="cpu")
         assert_checkpoint_compatible(
@@ -512,6 +530,11 @@ def run_single_rate(
 
     history: list[dict[str, Any]] = []
     epochs = int(config.get("epochs", 100))
+    best_epoch = -1
+    init_hash = parameter_sha256(model)
+    param_count = trainable_parameter_count(model)
+    reset_peak_memory(device)
+    clock.mark_train_start()
     for epoch in range(start_epoch, epochs):
         model.train()
         train_losses = []
@@ -546,6 +569,7 @@ def run_single_rate(
         save_checkpoint(rate_dir / "last_checkpoint.pt", checkpoint_payload(epoch, best_mae))
         if val_mae < best_mae:
             best_mae = val_mae
+            best_epoch = epoch
             save_checkpoint(rate_dir / "best_checkpoint.pt", checkpoint_payload(epoch, best_mae))
         logger.log(
             {
@@ -557,8 +581,142 @@ def run_single_rate(
                 "validation_mae_raw_all": val_mae,
             }
         )
+    clock.mark_train_end()
     atomic_write_json(rate_dir / "training_history.json", history)
-    return {"rate": tag, "best_mae": best_mae, "epochs": epochs, "init_reset_seed": seed}
+    if not history:
+        raise ReimplementationError("STID training produced no epochs")
+    hist_best = min(history, key=lambda row: float(row["val_mae"]))
+    ckpt = reload_best_checkpoint(model, rate_dir / "best_checkpoint.pt", device)
+    if int(ckpt["epoch"]) != int(hist_best["epoch"]):
+        raise ReimplementationError(
+            f"best checkpoint epoch {ckpt['epoch']} != history min-val epoch {hist_best['epoch']}"
+        )
+    best_epoch = int(ckpt["epoch"])
+    mean_y = float(data_info["mean_y_full"])
+    std_y = float(data_info["std_y_full"])
+    n_his = int(config.get("input_len", config.get("n_his", 12)))
+    counts = data_info["sample_counts"]
+    model.eval()
+
+    def _predict(batch: Mapping[str, torch.Tensor]) -> torch.Tensor:
+        history_data = assemble_batch_history(batch, config, **day).to(device)
+        return model(history_data, **identity_kwargs(batch, config, day))
+
+    logger.log({"stage": "validating", "model_name": "stid", "penetration_rate": tag, "status": "ok"})
+    val_eval = evaluate_loader(
+        loaders_pack["loaders"]["validation"],
+        _predict,
+        mean_y=mean_y,
+        std_y=std_y,
+        device=device,
+        output_dir=rate_dir,
+        split="validation",
+        expected_count=int(counts["validation"]),
+        n_his=n_his,
+    )
+    logger.log({"stage": "testing", "model_name": "stid", "penetration_rate": tag, "status": "ok"})
+    test_eval = evaluate_loader(
+        loaders_pack["loaders"]["test"],
+        _predict,
+        mean_y=mean_y,
+        std_y=std_y,
+        device=device,
+        output_dir=rate_dir,
+        split="test",
+        expected_count=int(counts["test"]),
+        n_his=n_his,
+    )
+    output_check = assert_official_rate_outputs(
+        rate_dir,
+        expected_test_count=int(counts["test"]),
+        expected_val_count=int(counts["validation"]),
+        n_his=n_his,
+    )
+    clock.mark_experiment_end()
+    metadata = build_run_metadata(
+        model="stid",
+        penetration=tag,
+        seed=seed,
+        device=device,
+        parameter_count=param_count,
+        training_loss="unmasked_raw_mae",
+        optimizer="Adam",
+        initial_lr=float(config["learning_rate"]),
+        scheduler="MultiStepLR_[1,50,80]_gamma_0.5",
+        max_epochs=epochs,
+        epochs_executed=len(history),
+        best_epoch=best_epoch,
+        best_metric=float(best_mae),
+        early_stopping=False,
+        early_stopping_patience=None,
+        selection_metric="validation_mae_raw_including_zero",
+        clock=clock,
+        extra={
+            "init_parameter_sha256": init_hash,
+            "code_version": CODE_VERSION,
+            "data_file_sha256": train_hash,
+            "normalization_sha256": data_info["normalization_sha256"],
+            "checkpoint_monitor": "validation_mae_raw_all",
+            "early_stopped": False,
+            "weight_decay": float(config.get("weight_decay", 1e-4)),
+            "max_grad_norm": float(config.get("max_grad_norm", 5.0)),
+        },
+    )
+    output_check = finalize_completed_rate(
+        rate_dir,
+        metadata=metadata,
+        history=history,
+        expected_test_count=int(counts["test"]),
+        expected_val_count=int(counts["validation"]),
+        n_his=n_his,
+        history_metric_key="val_mae",
+        history_rule="lt",
+    )
+    result = {
+        "status": "completed",
+        "rate": tag,
+        "best_epoch": best_epoch,
+        "best_metric": float(best_mae),
+        "early_stopped": False,
+        "epochs": epochs,
+        "total_epochs": len(history),
+        "epochs_executed": len(history),
+        "parameter_count": param_count,
+        "init_parameter_sha256": init_hash,
+        "init_reset_seed": seed,
+        "validation_mae_raw": float(val_eval["metrics"]["mae"]),
+        "validation_rmse_raw": float(val_eval["metrics"]["rmse"]),
+        "validation_mape_nonzero": float(val_eval["metrics"]["mape_nonzero"]),
+        "validation_wape": float(val_eval["metrics"]["wape"]),
+        "test_mae_raw": float(test_eval["metrics"]["mae"]),
+        "test_rmse_raw": float(test_eval["metrics"]["rmse"]),
+        "test_mape_nonzero": float(test_eval["metrics"]["mape_nonzero"]),
+        "test_wape": float(test_eval["metrics"]["wape"]),
+        "did_not_use_test_for_selection": True,
+        "checkpoint_monitor": "validation_mae_raw_all",
+        "target_mode": "last-observed-step",
+        "train_wall_time_sec": metadata["train_wall_time_sec"],
+        "average_epoch_time_sec": metadata["average_epoch_time_sec"],
+        "output_check": output_check,
+    }
+    logger.log(
+        {
+            "stage": "completed",
+            "model_name": "stid",
+            "penetration_rate": tag,
+            "status": "ok",
+            "best_epoch": best_epoch,
+            "test_mae_raw": result["test_mae_raw"],
+        }
+    )
+    print(
+        (
+            f"[stid] stage=rate_completed rate={tag} best_epoch={best_epoch} "
+            f"val_mae={result['validation_mae_raw']:.6f} test_mae={result['test_mae_raw']:.6f}"
+        ),
+        flush=True,
+    )
+    return result
 
 
 def run_all_rates(
@@ -571,9 +729,10 @@ def run_all_rates(
     resume_path: Path | None = None,
 ) -> dict[str, Any]:
     summaries = []
-    for rate in config["rates"]:
-        summaries.append(
-            run_single_rate(
+    rates = assert_official_rates(config["rates"])
+    for rate in rates:
+        try:
+            summary = run_single_rate(
                 config,
                 rate=rate,
                 data_root=data_root,
@@ -582,5 +741,14 @@ def run_all_rates(
                 logger=logger,
                 resume_path=resume_path,
             )
-        )
+            if str(summary.get("status")) != "completed":
+                raise ReimplementationError(f"{summary.get('rate')} did not complete official test evaluation")
+        except Exception as exc:
+            mark_rate_failed(
+                output_root / rate_tag(rate) / f"seed_{int(config['seed'])}",
+                reason=str(exc),
+            )
+            raise
+        summaries.append(summary)
+        upsert_overall_summary(output_root / "overall_summary.json", summaries)
     return {"rates": summaries}

@@ -274,7 +274,6 @@ def semantic_mask(
     dtw_matrix: np.ndarray,
     *,
     dtw_delta: int,
-    include_self: bool = True,
 ) -> np.ndarray:
     """Per-row top-``dtw_delta`` neighbors are allowed (mask False).
 
@@ -285,7 +284,8 @@ def semantic_mask(
 
     ``dtw_delta`` is a count, not a distance threshold. Ties break by
     ``(distance, node_index)`` (deterministic; original ``argsort`` is unstable).
-    The mask is **not** symmetrized.
+    Whether ``i`` is among those ``k`` entries follows that order. The original
+    mask does not force the diagonal to stay unmasked. The mask is not symmetrized.
     """
     distances = _as_square(np.asarray(dtw_matrix, dtype=np.float64), name="dtw_matrix")
     node_count = int(distances.shape[0])
@@ -299,10 +299,6 @@ def semantic_mask(
         order = np.lexsort((np.arange(node_count), distances[i]))
         chosen = order[:k]
         mask[i, chosen] = False
-        if include_self and mask[i, i]:
-            raise ReimplementationError(
-                f"node {i} does not keep itself among the {k} nearest DTW neighbors"
-            )
     allowed = (~mask).sum(axis=1)
     if np.any(allowed <= 0):
         raise ReimplementationError("semantic mask fully blocks at least one row")

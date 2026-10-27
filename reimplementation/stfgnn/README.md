@@ -36,12 +36,14 @@ sigmoid(Conv) ⊙ tanh(Conv)
 
 ```text
 ORIGINAL_STFGNN_ROOT  = reference/STFGNN
-PREPARED_DATA_ROOT    = reimplementation/stgcn/prepared_data/r-only
-SPATIAL_TOPOLOGY      = reimplementation/stgcn/prepared_data/r-only/adjacency_matrix/stgcn_undirected_topology.npy
-TEMPORAL_GRAPH_SCRIPT = reimplementation/stfgnn/prepare_temporal_graph.py
+PREPARED_DATA_ROOT    = /data5/tzhang174/TrafficFlow/training_data/r-only
+SPATIAL_TOPOLOGY      = /data5/tzhang174/TrafficFlow/training_data/r-only/adjacency_matrix/stgcn_undirected_topology.npy
+TEMPORAL_ADJACENCY   = graph/stfgnn/temporal_adjacency.npy under the Xuancheng26 training data
 TRAIN_SCRIPT          = reimplementation/stfgnn/train_r_only_stfgnn.py
-OUTPUT_ROOT           = reimplementation/stfgnn/experiments/r_only
+OUTPUT_ROOT           = /data5/tzhang174/TrafficFlow/training_results/stfgnn
 ```
+
+正式训练在 `OUTPUT_ROOT` 写入 `overall_summary.json`（7 个 penetration 汇总），以及各 `pXX/seed_42/` 的 checkpoint 与 test 指标。`--smoke-test-only` 不写该文件。
 
 不得写入 DCRNN / GWN / STSGCN / STGCN 实验目录，也不得修改 prepared data、空间图或原版 STFGNN。
 

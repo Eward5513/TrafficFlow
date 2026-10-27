@@ -11,7 +11,8 @@ Follow the repository-root instructions as well.
 
 ## Inputs
 
-- Subgraph edge list: `../simulation/data/subgraph.txt`. One SUMO edge ID per
+- Subgraph edge list: `data_root.subgraph_file()`
+  (`simulation_data/subgraph.txt` on the data disk). One SUMO edge ID per
   line. This file is the only authority for the R-node set. IDs are strings;
   keep `-`, `#`, `_`, and `:` unchanged. First occurrence wins; later duplicates
   are reported, not reordered.
