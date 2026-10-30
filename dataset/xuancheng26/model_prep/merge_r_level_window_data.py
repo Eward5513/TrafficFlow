@@ -7,6 +7,7 @@ windows, refit normalization, shuffle, or write model graphs.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -21,12 +22,10 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import numpy as np
 
-WINDOW_ROOT = Path(
-    "/data5/tzhang174/TrafficFlow/xuancheng26/training_data/window_data"
-)
-GRAPH_PATH = Path(
-    "/data5/tzhang174/TrafficFlow/xuancheng26/training_data/graph/r_graph.npz"
-)
+import prep_paths
+
+WINDOW_ROOT = prep_paths.DEFAULT_TRAINING_ROOT / "window_data"
+GRAPH_PATH = prep_paths.DEFAULT_TRAINING_ROOT / "graph" / "r_graph.npz"
 RATES = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
 SPLITS = ("train", "validation", "test")
 NPZ_KEYS = (
@@ -403,7 +402,17 @@ def count_daily_npz() -> int:
                if (WINDOW_ROOT / rate / split / f"{_day}.npz").is_file())
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Merge Xuancheng26 daily windows into split NPZ")
+    prep_paths.add_path_arguments(parser)
+    args = parser.parse_args(argv)
+    root = prep_paths.resolved(args.training_root)
+    prep_paths.bind(
+        sys.modules[__name__],
+        WINDOW_ROOT=root / "window_data",
+        GRAPH_PATH=root / "graph" / "r_graph.npz",
+    )
+    log(f"training_root={root}")
     log("merge Xuancheng26 daily windows into split NPZ")
     node_count = check_graph_node_axis()
     days = load_manifest()

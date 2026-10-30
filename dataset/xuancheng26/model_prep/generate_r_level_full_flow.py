@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
-"""Build 5-minute road-level entry and exit counts from Xuancheng26 FCD.
+"""Build four 5-minute road-level states from Xuancheng26 FCD.
 
-The FCD files are streamed. Nothing is loaded as a table, and the original
-simulation files are only opened for reading.
+Each date directory receives ``inflow.csv``, ``outflow.csv``,
+``accumulation_start.csv`` and ``accumulation_end.csv``. Inflow and outflow
+keep the audited edge-event counts. Accumulation is the running stock of
+those counts, starting from an empty network before t=0:
+
+    N_end[t] = N_start[t] + inflow[t] - outflow[t]
+    N_start[0] = 0
+    N_start[t+1] = N_end[t]
+
+``--migrate-legacy`` copies already audited ``entry_flow.csv`` /
+``exit_flow.csv`` into the new names and does not reread FCD. ``--remove-legacy``
+deletes those old names after the four new files have been validated.
 """
 
 from __future__ import annotations
@@ -26,17 +36,25 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import numpy as np
 
-FCD_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/simulation_data/fcd_data")
-NET_FILE = Path("/home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_rebuilt.net.xml")
-OUT_ROOT = Path(
-    "/data5/tzhang174/TrafficFlow/xuancheng26/training_data/full_flow/r-level"
-)
+import prep_paths
+
+FCD_ROOT = prep_paths.DEFAULT_FCD_ROOT
+NET_FILE = prep_paths.DEFAULT_NET_FILE
+OUT_ROOT = prep_paths.DEFAULT_TRAINING_ROOT / "full_flow" / "r-level"
 SUMMARY_PATH = OUT_ROOT / "generation_summary.csv"
 N_BINS = 288
 BIN_SECONDS = 300
 DAY_SECONDS = 86400
 # One read buffer per day. Twenty-nine workers keep about 350 GiB in flight.
 READ_BYTES = 12 << 30
+
+STATE_FILES = (
+    "inflow.csv",
+    "outflow.csv",
+    "accumulation_start.csv",
+    "accumulation_end.csv",
+)
+LEGACY_FULL = {"inflow.csv": "entry_flow.csv", "outflow.csv": "exit_flow.csv"}
 
 SUMMARY_FIELDS = [
     "date",
@@ -251,6 +269,134 @@ def impute_final_exits(
         state.exited = True
 
 
+def read_flow_csv(path: Path, edges: list[str]) -> np.ndarray:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        header = next(csv.reader(handle))
+    if header != ["time_bin", "start_time", *edges]:
+        raise RuntimeError(f"column mismatch in {path}")
+    matrix = np.loadtxt(path, delimiter=",", skiprows=1, dtype=np.int64)
+    if matrix.shape != (N_BINS, len(edges) + 2):
+        raise RuntimeError(f"{path} shape {matrix.shape}")
+    if not np.array_equal(matrix[:, 0], np.arange(N_BINS)):
+        raise RuntimeError(f"{path} time_bin is not 0..287")
+    if not np.array_equal(matrix[:, 1], np.arange(N_BINS) * BIN_SECONDS):
+        raise RuntimeError(f"{path} start_time is not 300-second bins")
+    values = matrix[:, 2:]
+    if int(values.min()) < 0:
+        raise RuntimeError(f"negative value in {path}")
+    return values
+
+
+def accumulate_states(
+    inflow: np.ndarray,
+    outflow: np.ndarray,
+    edges: list[str],
+    label: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stock before t=0 is zero. Each window then conserves vehicles."""
+    if inflow.shape != outflow.shape:
+        raise RuntimeError(f"{label} inflow shape {inflow.shape} != outflow {outflow.shape}")
+    if inflow.ndim != 2 or inflow.shape[1] != len(edges) or inflow.shape[0] < 1:
+        raise RuntimeError(f"{label} unexpected shape {inflow.shape}")
+    delta = inflow.astype(np.int64) - outflow.astype(np.int64)
+    end = np.cumsum(delta, axis=0)
+    start = np.zeros_like(end)
+    start[1:] = end[:-1]
+    for name, matrix in (("accumulation_start", start), ("accumulation_end", end)):
+        negative = np.argwhere(matrix < 0)
+        if len(negative):
+            row, column = (int(negative[0, 0]), int(negative[0, 1]))
+            raise RuntimeError(
+                f"{label} {name} negative at time_bin={row} start_time={row * BIN_SECONDS} "
+                f"edge={edges[column]} value={int(matrix[row, column])} "
+                f"inflow={int(inflow[row, column])} outflow={int(outflow[row, column])}"
+            )
+    if not np.array_equal(end, start + delta):
+        raise RuntimeError(f"{label} window conservation failed")
+    if not np.array_equal(start[1:], end[:-1]):
+        raise RuntimeError(f"{label} adjacent-window stock is not continuous")
+    if int(start[0].min()) != 0 or int(start[0].max()) != 0:
+        raise RuntimeError(f"{label} accumulation_start at t=0 is not zero")
+    return start, end
+
+
+def write_state_matrices(
+    out_dir: Path,
+    inflow: np.ndarray,
+    outflow: np.ndarray,
+    edges: list[str],
+    label: str,
+    *,
+    rewrite_inflow: bool = True,
+) -> None:
+    start, end = accumulate_states(inflow, outflow, edges, label)
+    written = {
+        "inflow.csv": inflow,
+        "outflow.csv": outflow,
+        "accumulation_start.csv": start,
+        "accumulation_end.csv": end,
+    }
+    for name, matrix in written.items():
+        path = out_dir / name
+        if name == "inflow.csv" and not rewrite_inflow:
+            if not path.is_file():
+                raise RuntimeError(f"{label} missing {path}")
+        else:
+            write_matrix(path, matrix, edges)
+        validate_csv(path, edges)
+        reread = read_flow_csv(path, edges)
+        if not np.array_equal(reread, matrix):
+            raise RuntimeError(f"{label} {path} does not match the counted matrix")
+
+
+def states_match(
+    out_dir: Path,
+    inflow: np.ndarray,
+    outflow: np.ndarray,
+    edges: list[str],
+    label: str,
+) -> bool:
+    paths = [out_dir / name for name in STATE_FILES]
+    if not all(path.is_file() and path.stat().st_size > 0 for path in paths):
+        return False
+    got_in = read_flow_csv(out_dir / "inflow.csv", edges)
+    got_out = read_flow_csv(out_dir / "outflow.csv", edges)
+    got_start = read_flow_csv(out_dir / "accumulation_start.csv", edges)
+    got_end = read_flow_csv(out_dir / "accumulation_end.csv", edges)
+    if not np.array_equal(got_in, inflow) or not np.array_equal(got_out, outflow):
+        return False
+    start, end = accumulate_states(inflow, outflow, edges, label)
+    return np.array_equal(got_start, start) and np.array_equal(got_end, end)
+
+
+def remove_legacy_full(out_dir: Path) -> None:
+    for name in LEGACY_FULL.values():
+        path = out_dir / name
+        if path.is_file():
+            path.unlink()
+
+
+def confirm_fcd_starts_at_zero(fcd_root: Path, dates: list[str]) -> None:
+    """The day begins at t=0. No FCD sample exists before that instant."""
+    for date_label in dates:
+        path = prefer_xml(fcd_root / date_label, f"fcd_{date_label}")
+        opener = gzip.open if path.name.endswith(".gz") else open
+        found = False
+        with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+            for index, line in enumerate(handle):
+                if "<timestep" not in line:
+                    if index > 80:
+                        break
+                    continue
+                if 'time="0"' not in line and 'time="0.0"' not in line and 'time="0.00"' not in line:
+                    raise RuntimeError(f"{date_label} first timestep is not 0: {line.strip()[:160]}")
+                found = True
+                break
+        if not found:
+            raise RuntimeError(f"{date_label} FCD has no leading timestep in {path}")
+    log(f"confirmed {len(dates)} FCD files start at t=0")
+
+
 def write_matrix(path: Path, matrix: np.ndarray, edges: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -370,31 +516,54 @@ def summary_row(date_label: str, entry: np.ndarray, exit_flow: np.ndarray, vehic
     }
 
 
+def load_legacy_or_state(out_dir: Path, edges: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    inflow_path = out_dir / "inflow.csv"
+    outflow_path = out_dir / "outflow.csv"
+    if not inflow_path.is_file():
+        inflow_path = out_dir / "entry_flow.csv"
+    if not outflow_path.is_file():
+        outflow_path = out_dir / "exit_flow.csv"
+    return read_flow_csv(inflow_path, edges), read_flow_csv(outflow_path, edges)
+
+
 def process_day(task: tuple) -> dict[str, object]:
-    date_label, edges, lane_to_edge, internal_lanes = task
+    date_label, edges, lane_to_edge, internal_lanes, migrate_legacy, skip_complete, remove_legacy = task
     day_dir = FCD_ROOT / date_label
     out_dir = OUT_ROOT / date_label
     try:
-        log(f"[{date_label}] start")
-        fcd_path = prefer_xml(day_dir, f"fcd_{date_label}")
-        trip_path = prefer_xml(day_dir, f"tripinfo_{date_label}")
-        arrivals = load_arrivals(trip_path)
-        entry, exit_flow, counts, vehicles = stream_fcd(
-            fcd_path, edges, lane_to_edge, internal_lanes, arrivals, date_label
-        )
+        log(f"[{date_label}] start fcd={day_dir} out={out_dir} migrate={migrate_legacy}")
+        if migrate_legacy:
+            entry, exit_flow = load_legacy_or_state(out_dir, edges)
+            counts = {
+                "final_exit": "",
+                "unresolved": "",
+                "unknown": "",
+            }
+            vehicles = ""
+            audited_in = read_flow_csv(out_dir / "entry_flow.csv", edges)
+            audited_out = read_flow_csv(out_dir / "exit_flow.csv", edges)
+            if not np.array_equal(entry, audited_in) or not np.array_equal(exit_flow, audited_out):
+                raise RuntimeError(f"{date_label} migrated inflow/outflow differs from audited entry/exit")
+        else:
+            fcd_path = prefer_xml(day_dir, f"fcd_{date_label}")
+            trip_path = prefer_xml(day_dir, f"tripinfo_{date_label}")
+            arrivals = load_arrivals(trip_path)
+            entry, exit_flow, counts, vehicles = stream_fcd(
+                fcd_path, edges, lane_to_edge, internal_lanes, arrivals, date_label
+            )
         if int(entry.min()) < 0 or int(exit_flow.min()) < 0:
             raise RuntimeError("negative flow")
         if entry.shape != (N_BINS, len(edges)) or exit_flow.shape != entry.shape:
             raise RuntimeError(f"unexpected matrix shape {entry.shape}")
         if int(entry.sum()) <= 0:
             raise RuntimeError("entry flow is empty")
-        entry_path = out_dir / "entry_flow.csv"
-        exit_path = out_dir / "exit_flow.csv"
-        write_matrix(entry_path, entry, edges)
-        write_matrix(exit_path, exit_flow, edges)
-        validate_csv(entry_path, edges)
-        validate_csv(exit_path, edges)
-        row = summary_row(date_label, entry, exit_flow, vehicles)
+        if skip_complete and states_match(out_dir, entry, exit_flow, edges, date_label):
+            log(f"[{date_label}] SKIP verified four-state files")
+        else:
+            write_state_matrices(out_dir, entry, exit_flow, edges, date_label)
+        if remove_legacy:
+            remove_legacy_full(out_dir)
+        row = summary_row(date_label, entry, exit_flow, vehicles if vehicles != "" else 0)
         row["entry_sums"] = entry.sum(axis=0).astype(np.int64)
         row["exit_sums"] = exit_flow.sum(axis=0).astype(np.int64)
         log(
@@ -497,6 +666,13 @@ def self_test() -> None:
         raise RuntimeError(f"final-exit self-test failed: {counts}")
     if bin_index(86400) != 287 or bin_index(86399) != 287 or bin_index(300) != 1:
         raise RuntimeError("bin self-test failed")
+    sample_in = np.array([[1, 0], [1, 2], [0, 1]], dtype=np.int64)
+    sample_out = np.array([[0, 0], [1, 1], [0, 0]], dtype=np.int64)
+    sample_start, sample_end = accumulate_states(sample_in, sample_out, ["A", "B"], "self-test")
+    if not np.array_equal(sample_start, np.array([[0, 0], [1, 0], [1, 1]])) or not np.array_equal(
+        sample_end, np.array([[1, 0], [1, 1], [1, 2]])
+    ):
+        raise RuntimeError(f"accumulation self-test failed: {sample_start.tolist()} {sample_end.tolist()}")
 
 
 def discover_dates() -> list[str]:
@@ -509,24 +685,50 @@ def discover_dates() -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate 5-minute R-level entry and exit flow")
+    prep_paths.add_path_arguments(parser, fcd=True, net=True)
     parser.add_argument("--workers", type=int, default=29)
     parser.add_argument("--dates", nargs="*", default=None)
+    parser.add_argument("--migrate-legacy", action="store_true")
+    parser.add_argument("--skip-complete", action="store_true")
+    parser.add_argument("--remove-legacy", action="store_true")
     args = parser.parse_args(argv)
+    out_root = prep_paths.resolved(args.training_root) / "full_flow" / "r-level"
+    prep_paths.bind(
+        sys.modules[__name__],
+        FCD_ROOT=prep_paths.resolved(args.fcd_root),
+        NET_FILE=prep_paths.resolved(args.net_file),
+        OUT_ROOT=out_root,
+        SUMMARY_PATH=(
+            out_root / "state_migration_summary.csv" if args.migrate_legacy else out_root / "generation_summary.csv"
+        ),
+    )
+    log(f"fcd_root={FCD_ROOT}")
+    log(f"net_file={NET_FILE}")
+    log(f"output_root={OUT_ROOT}")
+    prep_paths.publish_runtime(fcd_root=FCD_ROOT, net_file=NET_FILE, training_root=prep_paths.resolved(args.training_root))
     self_test()
     dates = args.dates or discover_dates()
     if not dates:
         log("no date directories")
         return 1
+    confirm_fcd_starts_at_zero(prep_paths.resolved(args.fcd_root), dates)
     edges, lane_to_edge, internal_lanes = load_network(NET_FILE)
     log(
         f"edges={len(edges)} real_lanes={len(lane_to_edge)} "
         f"internal_lanes={len(internal_lanes)} dates={len(dates)} "
         f"workers={min(args.workers, len(dates))} read_buffer_GiB={READ_BYTES / 1024**3:.0f}"
     )
-    tasks = [(date_label, edges, lane_to_edge, internal_lanes) for date_label in dates]
+    tasks = [
+        (date_label, edges, lane_to_edge, internal_lanes, args.migrate_legacy, args.skip_complete, args.remove_legacy)
+        for date_label in dates
+    ]
     rows: list[dict[str, object]] = []
     workers = max(1, min(args.workers, len(dates)))
-    with ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=1) as pool:
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        max_tasks_per_child=1,
+        initializer=prep_paths.init_full_flow_worker,
+    ) as pool:
         futures = {pool.submit(process_day, task): task[0] for task in tasks}
         for future in as_completed(futures):
             date_label = futures[future]

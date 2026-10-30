@@ -54,7 +54,19 @@ def assemble_history_features(
     if int(time) != int(n_his):
         raise ReimplementationError(f"x time {time} != n_his {n_his}")
     if int(channels) != 1:
-        raise ReimplementationError("R-only traffic channel count must be 1")
+        return _history_from_traffic_channels(
+            traffic,
+            window_start_slot=window_start_slot,
+            day_index=day_index,
+            n_his=n_his,
+            if_time_in_day=if_time_in_day,
+            if_day_in_week=if_day_in_week,
+            input_dim=input_dim,
+            day_of_week_source=day_of_week_source,
+            weekday_mapping=weekday_mapping,
+            all_days=all_days,
+            target_slot=target_slot,
+        )
     slots = assert_same_day_window(window_start_slot, n_his)
     if slots.shape[0] != batch:
         raise ReimplementationError("window_start_slot batch does not match x")
@@ -93,6 +105,54 @@ def assemble_history_features(
         if dow.shape[0] != batch:
             raise ReimplementationError("day_index batch does not match x")
         history[..., 2] = dow[:, None, None].astype(np.float32)
+    last_slots = slots[:, -1]
+    if np.any(last_slots < 0) or np.any(last_slots >= SLOTS_PER_DAY):
+        raise ReimplementationError("last history slot is outside [0, 288)")
+    return torch.from_numpy(np.ascontiguousarray(history))
+
+
+def _history_from_traffic_channels(
+    traffic: np.ndarray,
+    *,
+    window_start_slot: np.ndarray | torch.Tensor,
+    day_index: np.ndarray | torch.Tensor,
+    n_his: int,
+    if_time_in_day: bool,
+    if_day_in_week: bool,
+    input_dim: int,
+    day_of_week_source: str,
+    weekday_mapping: Mapping[str, int] | None,
+    all_days: Sequence[str] | None,
+    target_slot: np.ndarray | torch.Tensor | None,
+) -> torch.Tensor:
+    """Keep every traffic channel, then append time-of-day and weekday."""
+    batch, time, nodes, channels = traffic.shape
+    slots = assert_same_day_window(window_start_slot, n_his)
+    if slots.shape[0] != batch:
+        raise ReimplementationError("window_start_slot batch does not match x")
+    if target_slot is not None:
+        assert_target_is_last_history(window_start_slot, target_slot, n_his)
+    extras = int(bool(if_time_in_day)) + int(bool(if_day_in_week))
+    width = int(channels) + extras
+    if int(input_dim) != width:
+        raise ReimplementationError(
+            f"input_dim {input_dim} != {channels} traffic channels + {extras} time channels"
+        )
+    history = np.zeros((batch, time, nodes, width), dtype=np.float32)
+    history[..., :channels] = traffic.astype(np.float32, copy=False)
+    cursor = int(channels)
+    if if_time_in_day:
+        fractions = time_of_day_fraction(slots)
+        history[..., cursor] = np.repeat(fractions[:, :, None], nodes, axis=2).astype(np.float32)
+        cursor += 1
+    if if_day_in_week:
+        dow = day_of_week_fraction(
+            day_index,
+            source=day_of_week_source,
+            weekday_mapping=weekday_mapping,
+            all_days=all_days,
+        )
+        history[..., cursor] = dow[:, None, None].astype(np.float32)
     last_slots = slots[:, -1]
     if np.any(last_slots < 0) or np.any(last_slots >= SLOTS_PER_DAY):
         raise ReimplementationError("last history slot is outside [0, 288)")

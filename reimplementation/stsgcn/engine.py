@@ -24,10 +24,12 @@ from reimplementation.common.data.r_only_npz_dataset import (
     build_dataloader,
     expected_split_counts,
     invert_target,
+    loss_scale,
     load_json,
     rate_tag,
     read_target_scaler,
 )
+from reimplementation.common.data.state_windows import finalize_state_scaler, open_split_dataset
 from reimplementation.common.evaluation import reload_best_checkpoint, upsert_overall_summary
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.experiment_protocol import (
@@ -154,6 +156,7 @@ def build_model(config: Mapping[str, Any], spatial_adj: np.ndarray) -> STSGCN:
         temporal_emb=bool(config.get("temporal_emb", config.get("use_temporal_embedding", True))),
         spatial_emb=bool(config.get("spatial_emb", config.get("use_spatial_embedding", True))),
         horizon=int(config.get("horizon", 1)),
+        output_channels=int(config.get("output_channels", 1)),
         output_hidden=int(config.get("output_hidden", 128)),
         xavier_magnitude=float(config.get("xavier_magnitude", 0.0003)),
     )
@@ -194,10 +197,12 @@ def build_train_dataloader(
     split_counts: Mapping[str, int],
 ):
     tag = rate_tag(rate)
-    dataset = ROnlyNPZDataset(
-        data_root / tag / "train.npz",
+    dataset = open_split_dataset(
+        data_root,
+        tag,
+        "train",
+        config,
         n_his=int(config["seq_len"]),
-        num_nodes=int(config["num_nodes"]),
         expected_count=int(split_counts["train"]),
     )
     loader = build_dataloader(
@@ -219,10 +224,12 @@ def build_dataloaders(
     loaders = {}
     datasets = {}
     for split in SPLITS:
-        dataset = ROnlyNPZDataset(
-            data_root / rate_tag(rate) / f"{split}.npz",
+        dataset = open_split_dataset(
+            data_root,
+            rate,
+            split,
+            config,
             n_his=int(config["seq_len"]),
-            num_nodes=int(config["num_nodes"]),
             expected_count=int(split_counts[split]),
         )
         datasets[split] = dataset
@@ -408,7 +415,7 @@ def run_p70_smoke(
         model, batch_size=min(2, int(config["batch_size"])), seq_len=int(config["seq_len"])
     )
     optimizer = build_optimizer(model, config)
-    criterion = HuberRawLoss(float(data_info["mean_y_full"]), float(data_info["std_y_full"]))
+    criterion = HuberRawLoss(loss_scale(data_info["mean_y_full"]), loss_scale(data_info["std_y_full"]))
     batch = _move_batch(next(iter(train_pack["loader"])), device)
     x = batch["x"]
     y = batch["y"]
@@ -542,6 +549,7 @@ def run_single_rate(
     logger: JsonlLogger,
     resume_path: Path | None = None,
 ) -> dict[str, Any]:
+    data_info = finalize_state_scaler(data_info, config, data_root)
     tag = rate_tag(rate)
     seed = int(config["seed"])
     seed_everything(seed)
@@ -555,9 +563,9 @@ def run_single_rate(
     optimizer = build_optimizer(model, config)
     steps_per_epoch = max(len(loaders_pack["loaders"]["train"]), 1)
     scheduler = build_scheduler(optimizer, config, steps_per_epoch=steps_per_epoch)
-    criterion = HuberRawLoss(float(data_info["mean_y_full"]), float(data_info["std_y_full"]))
-    mean_y = float(data_info["mean_y_full"])
-    std_y = float(data_info["std_y_full"])
+    criterion = HuberRawLoss(loss_scale(data_info["mean_y_full"]), loss_scale(data_info["std_y_full"]))
+    mean_y = loss_scale(data_info["mean_y_full"])
+    std_y = loss_scale(data_info["std_y_full"])
     train_hash = data_info["file_hashes"][f"{tag}/train.npz"]
     start_epoch = 0
     best_metric = float("inf")

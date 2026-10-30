@@ -42,6 +42,7 @@ class STFGNN(nn.Module):
         output_hidden: int = 128,
         xavier_magnitude: float = 0.0003,
         temporal_graph_is_test_only: bool = False,
+        output_channels: int = 1,
     ) -> None:
         super().__init__()
         if filters is None:
@@ -59,6 +60,7 @@ class STFGNN(nn.Module):
         self.temporal_emb = bool(temporal_emb)
         self.spatial_emb = bool(spatial_emb)
         self.horizon = int(horizon)
+        self.output_channels = int(output_channels)
         self.output_hidden = int(output_hidden)
         self.temporal_graph_is_test_only = bool(temporal_graph_is_test_only)
         self.n_stfgcl = len(self.filter_list)
@@ -113,6 +115,7 @@ class STFGNN(nn.Module):
                     channels,
                     hidden_channels=output_hidden,
                     predict_length=1,
+                    output_channels=self.output_channels,
                 )
                 for _ in range(self.horizon)
             ]
@@ -146,7 +149,10 @@ class STFGNN(nn.Module):
             current = layer(adj, current)
             time_lengths.append(int(current.size(1)))
         heads = [head(current) for head in self.output_heads]
-        pred = torch.cat(heads, dim=1).unsqueeze(-1)
+        if self.output_channels == 1:
+            pred = torch.cat(heads, dim=1).unsqueeze(-1)
+        else:
+            pred = torch.cat(heads, dim=1)
         if not return_trace:
             return pred
         trace = {

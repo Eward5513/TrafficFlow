@@ -20,6 +20,7 @@ import torch
 
 from data_root import runtime_roots, xuancheng26_model_config
 from reimplementation.common.data.r_only_npz_dataset import rate_tag
+from reimplementation.common.data.state_windows import add_state_type_arguments, apply_state_types
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.utils.atomic_io import atomic_write_json
 from reimplementation.common.utils.hashing import sha256_file
@@ -76,6 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--smoke-test-only", action="store_true")
+    add_state_type_arguments(parser)
     return parser.parse_args()
 
 
@@ -136,6 +138,7 @@ def source_manifest(root: Path) -> dict[str, str]:
 def main() -> None:
     args = parse_args()
     config = overlay(load_config(args.config), args)
+    config = apply_state_types(config, args, model_name="s2s_gcn_lstm")
     config.setdefault("n_his", 12)
     config.setdefault("input_window", int(config["n_his"]))
     config.setdefault("output_steps", 1)

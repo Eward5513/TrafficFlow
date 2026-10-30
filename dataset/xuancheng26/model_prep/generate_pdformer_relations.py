@@ -10,9 +10,11 @@ Geographic and semantic masks are not written. The model builds them at init.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,9 +44,9 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from tslearn.clustering import KShape
 
-TRAINING_ROOT = Path(
-    "/data5/tzhang174/TrafficFlow/xuancheng26/training_data"
-)
+import prep_paths
+
+TRAINING_ROOT = prep_paths.DEFAULT_TRAINING_ROOT
 WINDOW_ROOT = TRAINING_ROOT / "window_data"
 FULL_ROOT = TRAINING_ROOT / "full_flow" / "r-level"
 GRAPH_DIR = TRAINING_ROOT / "graph"
@@ -127,7 +129,7 @@ def load_training_flow(edge_ids: list[str], days: list[str]) -> tuple[np.ndarray
     cube = np.empty((len(days), STEPS_PER_DAY, len(edge_ids)), dtype=np.float64)
     hashes: dict[str, str] = {}
     for day_index, day_name in enumerate(days):
-        path = FULL_ROOT / day_name / "entry_flow.csv"
+        path = FULL_ROOT / day_name / "inflow.csv"
         if not path.is_file():
             raise RelationError(f"missing training full inflow {path}")
         with path.open(encoding="utf-8") as handle:
@@ -193,7 +195,25 @@ def component_stats(topology: np.ndarray) -> dict[str, int]:
     }
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build Xuancheng26 PDFormer relations")
+    prep_paths.add_path_arguments(parser)
+    args = parser.parse_args(argv)
+    root = prep_paths.resolved(args.training_root)
+    output_dir = root / "config" / "pdformer"
+    prep_paths.bind(
+        sys.modules[__name__],
+        TRAINING_ROOT=root,
+        WINDOW_ROOT=root / "window_data",
+        FULL_ROOT=root / "full_flow" / "r-level",
+        GRAPH_DIR=root / "graph",
+        R_GRAPH=root / "graph" / "r_graph.npz",
+        TOPOLOGY=root / "graph" / "stsgcn_undirected_topology.npy",
+        OUTPUT_DIR=output_dir,
+        CONFIG_PATH=output_dir / "r_only_pdformer.json",
+    )
+    print(f"training_root={root}", flush=True)
+    print(f"output_dir={OUTPUT_DIR}", flush=True)
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     expected = {
         "lape_dim": LAPE_DIM,
@@ -324,7 +344,7 @@ def main() -> int:
         "undirected_topology_sha256": sha256_file(TOPOLOGY),
         "r_graph_sha256": sha256_file(R_GRAPH),
         "training_day_count": len(days),
-        "full_flow_source": (FULL_ROOT / "<date>" / "entry_flow.csv").as_posix(),
+        "full_flow_source": (FULL_ROOT / "<date>" / "inflow.csv").as_posix(),
         "full_flow_sha256": flow_hashes,
         "bidir": BIDIR,
         "type_short_path": "hop",

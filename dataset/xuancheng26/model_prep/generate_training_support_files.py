@@ -8,6 +8,7 @@ graph, flow tables, window NPZ, split manifest, or normalization.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import hashlib
 import json
@@ -24,12 +25,12 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import numpy as np
 
+import prep_paths
+
 CODE_ROOT = Path("/home/tzhang174/TrafficFlow")
 SUMO_TOOLS = Path("/usr/share/sumo/tools")
-NET_FILE = CODE_ROOT / "dataset/xuancheng26/xuancheng_tls_rebuilt.net.xml"
-TRAINING_ROOT = Path(
-    "/data5/tzhang174/TrafficFlow/xuancheng26/training_data"
-)
+NET_FILE = prep_paths.DEFAULT_NET_FILE
+TRAINING_ROOT = prep_paths.DEFAULT_TRAINING_ROOT
 WINDOW_ROOT = TRAINING_ROOT / "window_data"
 GRAPH_DIR = TRAINING_ROOT / "graph"
 GRAPH_PATH = GRAPH_DIR / "r_graph.npz"
@@ -404,7 +405,7 @@ def prove_tensor_edge_order(edge_ids: list[str], days: dict[str, list[str]], rat
     checked_days = 0
     for split, split_days in days.items():
         for day_name in split_days:
-            full = read_flow_matrix(FULL_FLOW_ROOT / day_name / "entry_flow.csv", edge_ids)
+            full = read_flow_matrix(FULL_FLOW_ROOT / day_name / "inflow.csv", edge_ids)
             for rate in rates:
                 daily_path = WINDOW_ROOT / rate / split / f"{day_name}.npz"
                 require_file(daily_path, "daily window npz")
@@ -431,7 +432,7 @@ def prove_tensor_edge_order(edge_ids: list[str], days: dict[str, list[str]], rat
         "alignment": "flow CSV columns are reindexed to r_graph edge_ids before windowing",
         "days_checked": checked_days,
         "rates_checked": list(rates),
-        "comparison": "exact float32 equality of x_raw/y_raw against aligned inflow/entry_flow",
+        "comparison": "exact float32 equality of x_raw/y_raw against aligned partial inflow and full inflow",
         "tensor_edge_ids": edge_ids,
     }
 
@@ -628,6 +629,11 @@ def graph_file_plan() -> dict[str, dict[str, str]]:
         "pdformer": {
             "undirected_topology": stsgcn_topology.as_posix(),
             "relations_dir": (TRAINING_ROOT / "config" / "pdformer").as_posix(),
+        },
+        "s2s_gcn_lstm": {
+            "spatial_adjacency": stsgcn_topology.as_posix(),
+            "r_graph": (GRAPH_DIR / "r_graph.npz").as_posix(),
+            "distance_matrix": stgcn_weight.as_posix(),
         },
     }
 
@@ -974,7 +980,7 @@ def build_dataset_metadata(
         "output_file_sha256": output_hashes,
         "warnings": warnings,
         "full_flow_consumer_note": (
-            "input_file_sha256.full_flow points at wide entry_flow.csv. "
+            "input_file_sha256.full_flow points at wide inflow.csv. "
             "Existing DTW/PDFormer readers expect day/edge_flow_5min.csv "
             "with columns window_index, edge_id, vehicle_count; that long table is not part of Xuancheng26."
         ),
@@ -988,7 +994,7 @@ def flow_fingerprints(days: dict[str, list[str]], rates: list[str]) -> dict[str,
     observed: dict[str, dict[str, dict[str, str]]] = {}
     for split_days in days.values():
         for day_name in split_days:
-            path = FULL_FLOW_ROOT / day_name / "entry_flow.csv"
+            path = FULL_FLOW_ROOT / day_name / "inflow.csv"
             full[day_name] = {
                 "path": path.as_posix(),
                 "sha256": sha256_file(path),
@@ -1101,7 +1107,34 @@ def dry_run_models(
     return report
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build Xuancheng26 training support files")
+    prep_paths.add_path_arguments(parser, net=True)
+    args = parser.parse_args(argv)
+    root = prep_paths.resolved(args.training_root)
+    graph_path = root / "graph" / "r_graph.npz"
+    prep_paths.bind(
+        sys.modules[__name__],
+        NET_FILE=prep_paths.resolved(args.net_file),
+        TRAINING_ROOT=root,
+        WINDOW_ROOT=root / "window_data",
+        GRAPH_DIR=root / "graph",
+        GRAPH_PATH=graph_path,
+        CONFIG_ROOT=root / "config",
+        FULL_FLOW_ROOT=root / "full_flow" / "r-level",
+        PARTIAL_FLOW_ROOT=root / "partial_flow",
+    )
+    import generate_r_level_windows as windows
+
+    prep_paths.bind(
+        windows,
+        PARTIAL_ROOT=root / "partial_flow",
+        FULL_ROOT=root / "full_flow" / "r-level",
+        GRAPH_PATH=graph_path,
+        OUT_ROOT=root / "window_data",
+    )
+    log(f"net_file={NET_FILE}")
+    log(f"training_root={TRAINING_ROOT}")
     log("Xuancheng26 training support files")
     graph = load_r_graph()
     validate_r_graph(graph)
@@ -1140,7 +1173,7 @@ def main() -> int:
         ),
         (
             "DTW and PDFormer relation readers still expect long edge_flow_5min.csv tables. "
-            "Xuancheng26 fingerprints the wide entry_flow.csv. Every hash was computed from these files."
+            "Xuancheng26 fingerprints the wide inflow.csv. Every hash was computed from these files."
         ),
     ]
     summary = build_validation_summary(

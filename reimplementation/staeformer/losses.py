@@ -19,7 +19,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from reimplementation.common.data.r_only_npz_dataset import invert_target
+from reimplementation.common.data.r_only_npz_dataset import invert_target, loss_scale
 from reimplementation.common.errors import ReimplementationError
 
 OFFICIAL_HUBER_DELTA = 1.0
@@ -41,8 +41,8 @@ def huber_loss(preds: torch.Tensor, labels: torch.Tensor, delta: float = OFFICIA
 class HuberRawLoss(nn.Module):
     def __init__(self, mean: float, std: float, delta: float = OFFICIAL_HUBER_DELTA) -> None:
         super().__init__()
-        self.mean = float(mean)
-        self.std = float(std)
+        self.mean = loss_scale(mean)
+        self.std = loss_scale(std)
         self.delta = float(delta)
 
     def denormalize(self, normalized: torch.Tensor) -> torch.Tensor:

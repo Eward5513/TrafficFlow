@@ -7,6 +7,7 @@ when the net file contains at least one real edge-to-edge connection.
 
 from __future__ import annotations
 
+import argparse
 import sys
 import traceback
 from pathlib import Path
@@ -15,12 +16,11 @@ from xml.parsers import expat
 import numpy as np
 
 import generate_r_level_full_flow as full
+import prep_paths
 
 NET_FILE = full.NET_FILE
 FLOW_ROOT = full.OUT_ROOT
-OUT_PATH = Path(
-    "/data5/tzhang174/TrafficFlow/xuancheng26/training_data/graph/r_graph.npz"
-)
+OUT_PATH = prep_paths.DEFAULT_TRAINING_ROOT / "graph" / "r_graph.npz"
 
 
 def log(message: str) -> None:
@@ -117,7 +117,7 @@ def check_flow_columns(edge_ids: list[str]) -> tuple[int, list[str]]:
     graph_ids = set(edge_ids)
     missing: list[str] = []
     checked = 0
-    for path in sorted(FLOW_ROOT.glob("2023_04_*/entry_flow.csv")):
+    for path in sorted(FLOW_ROOT.glob("2023_04_*/inflow.csv")):
         checked += 1
         with path.open(encoding="utf-8") as handle:
             header = handle.readline().rstrip("\n").split(",")[2:]
@@ -264,7 +264,22 @@ def summarize(edge_ids: list[str], adjacency: np.ndarray, lane_connections: int,
     log("R-level directed road graph generated successfully.")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build the Xuancheng26 directed R-level road graph")
+    prep_paths.add_path_arguments(parser, net=True)
+    args = parser.parse_args(argv)
+    root = prep_paths.resolved(args.training_root)
+    net_file = prep_paths.resolved(args.net_file)
+    flow_root = root / "full_flow" / "r-level"
+    prep_paths.bind(
+        sys.modules[__name__],
+        NET_FILE=net_file,
+        FLOW_ROOT=flow_root,
+        OUT_PATH=root / "graph" / "r_graph.npz",
+    )
+    prep_paths.bind(full, NET_FILE=net_file, OUT_ROOT=flow_root)
+    log(f"net_file={NET_FILE}")
+    log(f"output_path={OUT_PATH}")
     built = build_graph()
     edge_ids = built["edge_ids"]
     adjacency = built["adjacency"]

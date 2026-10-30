@@ -50,9 +50,37 @@ def load_npz(path: Path) -> dict[str, np.ndarray]:
         return {key: np.array(handle[key]) for key in handle.files}
 
 
-def invert_target(normalized: np.ndarray | torch.Tensor, mean: float, std: float) -> np.ndarray | torch.Tensor:
-    """Invert the shared full-flow target scaler. Never use the input scaler."""
-    return normalized * std + mean
+def _scale_is_scalar(value: Any) -> bool:
+    if isinstance(value, (int, float)):
+        return True
+    if torch.is_tensor(value):
+        return value.ndim == 0 or int(value.numel()) == 1
+    array = np.asarray(value)
+    return array.ndim == 0 or array.size == 1
+
+
+def loss_scale(value: Any) -> float | np.ndarray:
+    """Keep a one-number scaler as float. A channel vector stays shape ``(C,)``."""
+    if _scale_is_scalar(value):
+        if torch.is_tensor(value):
+            return float(value.detach().cpu().reshape(-1)[0])
+        return float(np.asarray(value, dtype=np.float64).reshape(-1)[0])
+    return np.asarray(value, dtype=np.float64).reshape(-1)
+
+
+def _broadcast_scale(value: Any, reference: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
+    array = np.asarray(value, dtype=np.float64).reshape(-1)
+    shape = (1,) * (int(reference.ndim) - 1) + (int(array.shape[0]),)
+    if torch.is_tensor(reference):
+        return torch.as_tensor(array, dtype=reference.dtype, device=reference.device).reshape(shape)
+    return array.reshape(shape)
+
+
+def invert_target(normalized: np.ndarray | torch.Tensor, mean: Any, std: Any) -> np.ndarray | torch.Tensor:
+    """Invert the target scaler. A scalar applies to every element; a vector is per channel."""
+    if _scale_is_scalar(mean) and _scale_is_scalar(std):
+        return normalized * std + mean
+    return normalized * _broadcast_scale(std, normalized) + _broadcast_scale(mean, normalized)
 
 
 class ROnlyNPZDataset(Dataset):

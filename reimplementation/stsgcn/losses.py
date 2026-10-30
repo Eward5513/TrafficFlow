@@ -21,14 +21,14 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from reimplementation.common.data.r_only_npz_dataset import invert_target
+from reimplementation.common.data.r_only_npz_dataset import invert_target, loss_scale
 
 
 class HuberRawLoss(nn.Module):
     def __init__(self, mean: float, std: float, rho: float = 1.0) -> None:
         super().__init__()
-        self.mean = float(mean)
-        self.std = float(std)
+        self.mean = loss_scale(mean)
+        self.std = loss_scale(std)
         self.rho = float(rho)
 
     def denormalize(self, normalized: torch.Tensor) -> torch.Tensor:

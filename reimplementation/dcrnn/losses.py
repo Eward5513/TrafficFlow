@@ -13,16 +13,18 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from reimplementation.common.data.r_only_npz_dataset import invert_target, loss_scale
+
 
 class UnmaskedMAERawLoss(nn.Module):
     def __init__(self, mean: float, std: float, null_val: float | None = None) -> None:
         super().__init__()
-        self.mean = float(mean)
-        self.std = float(std)
+        self.mean = loss_scale(mean)
+        self.std = loss_scale(std)
         self.null_val = null_val
 
     def denormalize(self, normalized: torch.Tensor) -> torch.Tensor:
-        return normalized * self.std + self.mean
+        return invert_target(normalized, self.mean, self.std)
 
     def forward(self, prediction_normalized: torch.Tensor, target_raw: torch.Tensor) -> torch.Tensor:
         if prediction_normalized.shape != target_raw.shape:

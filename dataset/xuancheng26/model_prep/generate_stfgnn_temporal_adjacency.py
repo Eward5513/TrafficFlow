@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Build the Xuancheng26 STFGNN temporal adjacency from training-day full inflow.
+"""Build Xuancheng26 STFGNN temporal adjacencies from the four full states.
+
+The historical ``temporal_adjacency.npy`` is left untouched. Each state writes
+``temporal_adjacency_<state>.npy`` beside it.
 
 DTW compares 24-hour daily profiles (288 five-minute slots), not a concatenated
 multi-day series. A road-day enters that profile only when its daily entry
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import shutil
@@ -39,7 +43,9 @@ if str(CODE_ROOT) not in sys.path:
 
 from reimplementation.stfgnn.model.dtw import constrained_dtw_distance
 
-TRAINING_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data")
+import prep_paths
+
+TRAINING_ROOT = prep_paths.DEFAULT_TRAINING_ROOT
 WINDOW_ROOT = TRAINING_ROOT / "window_data"
 FULL_ROOT = TRAINING_ROOT / "full_flow" / "r-level"
 R_GRAPH = TRAINING_ROOT / "graph" / "r_graph.npz"
@@ -61,6 +67,8 @@ EXPECTED_NODES = 1406
 MIN_DAILY_FLOW = 200
 MIN_VALID_DAYS = 10
 MIN_COMMON_VALID_DAYS = 10
+STATES = ("inflow", "outflow", "accumulation_start", "accumulation_end")
+LEGACY_OUTPUT_NAME = "temporal_adjacency.npy"
 
 _STATE: dict[str, object] = {}
 
@@ -97,12 +105,12 @@ def training_days() -> list[str]:
     return days
 
 
-def load_training_flow(edge_ids: list[str], days: list[str]) -> np.ndarray:
+def load_training_flow(edge_ids: list[str], days: list[str], csv_name: str) -> np.ndarray:
     cube = np.empty((len(days), STEPS_PER_DAY, len(edge_ids)), dtype=np.float64)
     for day_index, day_name in enumerate(days):
-        path = FULL_ROOT / day_name / "entry_flow.csv"
+        path = FULL_ROOT / day_name / csv_name
         if not path.is_file():
-            raise GraphError(f"missing training full inflow {path}")
+            raise GraphError(f"missing training full state {path}")
         with path.open(encoding="utf-8") as handle:
             header = handle.readline().rstrip("\n").split(",")
         if header[:2] != ["time_bin", "start_time"]:
@@ -120,7 +128,7 @@ def load_training_flow(edge_ids: list[str], days: list[str]) -> np.ndarray:
             raise GraphError(f"{path} start_time is not {BIN_SECONDS}-second bins")
         cube[day_index] = table[:, 2:][:, order]
     if not np.isfinite(cube).all():
-        raise GraphError("training entry flow contains NaN or inf")
+        raise GraphError(f"training {csv_name} contains NaN or inf")
     return cube
 
 
@@ -397,51 +405,60 @@ def atomic_save_npy(path: Path, array: np.ndarray) -> None:
     os.replace(temporary, path)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the Xuancheng26 STFGNN temporal adjacency.")
+    prep_paths.add_path_arguments(parser)
     parser.add_argument("--min-daily-flow", type=float, default=MIN_DAILY_FLOW)
     parser.add_argument("--min-valid-days", type=int, default=MIN_VALID_DAYS)
     parser.add_argument("--min-common-valid-days", type=int, default=MIN_COMMON_VALID_DAYS)
     parser.add_argument("--sparsity", type=float, default=SPARSITY)
-    parser.add_argument("--workers", type=int, default=0)
-    return parser.parse_args()
+    parser.add_argument("--workers", type=int, default=29)
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    _self_check()
-    args = parse_args()
-    started = time.perf_counter()
-    started_at = utc_now()
-    print(f"start_time={started_at}", flush=True)
-    backup_existing(OUTPUT)
-    edge_ids = load_edge_ids()
-    days = training_days()
-    manifest = json.loads((WINDOW_ROOT / "split_manifest.json").read_text(encoding="utf-8"))
-    print(
-        f"training_days={len(days)} validation_days_used=0 test_days_used=0 "
-        f"validation_days_in_manifest={len(manifest.get('validation_days', []))} "
-        f"test_days_in_manifest={len(manifest.get('test_days', []))}",
-        flush=True,
-    )
-    cube = load_training_flow(edge_ids, days)
+def state_output_path(directory: Path, state: str) -> Path:
+    if state not in STATES:
+        raise GraphError(f"unknown state {state}")
+    path = directory / f"temporal_adjacency_{state}.npy"
+    if path.name == LEGACY_OUTPUT_NAME:
+        raise GraphError("refusing to write the legacy temporal_adjacency.npy")
+    return path
+
+
+def file_sha256(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_state_adjacency(
+    cube: np.ndarray,
+    *,
+    min_daily_flow: float,
+    min_valid_days: int,
+    min_common_valid_days: int,
+    sparsity: float,
+    workers: int,
+) -> tuple[np.ndarray, dict[str, object]]:
     daily = daily_total_flow(cube)
     distribution = distribution_payload(daily)
     print_distribution(distribution)
-    DISTRIBUTION_JSON.parent.mkdir(parents=True, exist_ok=True)
-    DISTRIBUTION_JSON.write_text(json.dumps(distribution, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {DISTRIBUTION_JSON}", flush=True)
     day_valid, road_valid = activity_masks(
         daily,
-        min_daily_flow=float(args.min_daily_flow),
-        min_valid_days=int(args.min_valid_days),
+        min_daily_flow=min_daily_flow,
+        min_valid_days=min_valid_days,
     )
-    n_nodes = len(edge_ids)
+    n_nodes = int(cube.shape[2])
     n_valid = int(road_valid.sum())
     n_invalid = n_nodes - n_valid
     all_zero = daily.sum(axis=0) == 0
     print(
-        f"MIN_DAILY_FLOW={args.min_daily_flow} MIN_VALID_DAYS={args.min_valid_days} "
-        f"MIN_COMMON_VALID_DAYS={args.min_common_valid_days}",
+        f"MIN_DAILY_FLOW={min_daily_flow} MIN_VALID_DAYS={min_valid_days} "
+        f"MIN_COMMON_VALID_DAYS={min_common_valid_days}",
         flush=True,
     )
     print(
@@ -455,11 +472,7 @@ def main() -> int:
     total_pairs = n_nodes * (n_nodes - 1) // 2
     valid_pairs = n_valid * (n_valid - 1) // 2
     skipped_invalid = total_pairs - valid_pairs
-    workers = int(args.workers)
-    if workers <= 0:
-        affinity = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
-        workers = max(1, min(affinity, 32))
-    k = int(n_nodes * float(args.sparsity))
+    k = int(n_nodes * float(sparsity))
     print(
         f"workers={workers} k={k} total_pairs={total_pairs} "
         f"skipped_invalid_road_pairs={skipped_invalid} valid_candidate_pairs={valid_pairs}",
@@ -469,7 +482,7 @@ def main() -> int:
         z_cube,
         day_valid,
         road_valid,
-        min_common=int(args.min_common_valid_days),
+        min_common=min_common_valid_days,
         workers=workers,
     )
     upper = distances[np.triu_indices(n_nodes, k=1)]
@@ -478,7 +491,8 @@ def main() -> int:
         raise GraphError(
             f"DTW pair count {computed} != valid pairs {valid_pairs} - skipped common {skipped_common}"
         )
-    if not np.isfinite(distances[np.isfinite(distances)]).all():
+    finite = distances[np.isfinite(distances)]
+    if finite.size and not np.isfinite(finite).all():
         raise GraphError("distance matrix has NaN")
     directed = select_directed(distances, road_valid, k)
     adjacency = symmetrize(directed)
@@ -494,43 +508,16 @@ def main() -> int:
     degree = adjacency.sum(axis=1) - 1.0
     if np.any(degree[~road_valid] != 0):
         raise GraphError("a temporal-invalid road has an off-diagonal neighbor")
-    outgoing = directed.sum(axis=1)
-    incoming = directed.sum(axis=0)
     chosen = directed > 0
     if np.any(~np.isfinite(distances[chosen])):
         raise GraphError("a non-finite distance was selected")
     if np.any(directed[np.arange(n_nodes), np.arange(n_nodes)] != 0):
         raise GraphError("self occupied a directed top-k slot")
-    atomic_save_npy(OUTPUT, adjacency)
-    write_road_csv(
-        ROAD_CSV,
-        edge_ids,
-        daily,
-        road_valid,
-        outgoing,
-        incoming,
-        degree,
-        min_daily_flow=float(args.min_daily_flow),
-    )
-    ended_at = utc_now()
-    elapsed = time.perf_counter() - started
-    report = {
-        "start_time": started_at,
-        "end_time": ended_at,
-        "runtime_sec": elapsed,
-        "training_days": days,
-        "validation_days_used": 0,
-        "test_days_used": 0,
-        "min_daily_flow": float(args.min_daily_flow),
-        "min_valid_days": int(args.min_valid_days),
-        "min_common_valid_days": int(args.min_common_valid_days),
-        "k": k,
-        "sparsity": float(args.sparsity),
-        "dtw_order": DTW_ORDER,
-        "dtw_window": DTW_WINDOW,
+    summary = {
         "valid_roads": n_valid,
         "invalid_roads": n_invalid,
         "all_zero_roads": int(all_zero.sum()),
+        "k": k,
         "total_possible_pairs": total_pairs,
         "pairs_skipped_invalid_road": skipped_invalid,
         "pairs_skipped_insufficient_common_days": skipped_common,
@@ -538,29 +525,77 @@ def main() -> int:
         "degree_min": float(degree.min()),
         "degree_mean": float(degree.mean()),
         "degree_median": float(np.median(degree)),
-        "degree_p90": float(np.quantile(degree, 0.90)),
-        "degree_p95": float(np.quantile(degree, 0.95)),
-        "degree_p99": float(np.quantile(degree, 0.99)),
         "degree_max": float(degree.max()),
         "distribution": distribution,
-        "output": OUTPUT.as_posix(),
-        "backup": BACKUP.as_posix(),
-        "road_csv": ROAD_CSV.as_posix(),
     }
-    REPORT_JSON.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return adjacency, summary
+
+
+def main(argv: list[str] | None = None) -> int:
+    _self_check()
+    args = parse_args(argv)
+    root = prep_paths.resolved(args.training_root)
+    output = root / "config" / "stfgnn" / "temporal_adjacency.npy"
+    prep_paths.bind(
+        sys.modules[__name__],
+        TRAINING_ROOT=root,
+        WINDOW_ROOT=root / "window_data",
+        FULL_ROOT=root / "full_flow" / "r-level",
+        R_GRAPH=root / "graph" / "r_graph.npz",
+        OUTPUT=output,
+        BACKUP=output.with_name("temporal_adjacency.before_activity_filter.npy"),
+        DISTRIBUTION_JSON=output.with_name("temporal_activity_distribution.json"),
+        ROAD_CSV=output.with_name("temporal_activity_per_road.csv"),
+        REPORT_JSON=output.with_name("temporal_activity_generation_report.json"),
+    )
+    out_dir = root / "config" / "stfgnn"
+    legacy = out_dir / LEGACY_OUTPUT_NAME
+    legacy_hash = file_sha256(legacy)
+    workers = max(1, int(args.workers))
+    print(f"training_root={root}", flush=True)
+    print(f"legacy_output={legacy} untouched_sha256={legacy_hash}", flush=True)
+    started = time.perf_counter()
+    started_at = utc_now()
+    print(f"start_time={started_at} workers={workers}", flush=True)
+    edge_ids = load_edge_ids()
+    days = training_days()
+    manifest = json.loads((WINDOW_ROOT / "split_manifest.json").read_text(encoding="utf-8"))
     print(
-        f"end_time={ended_at} runtime_sec={elapsed:.1f} "
-        f"dtw_pairs={computed} skipped_invalid={skipped_invalid} skipped_common={skipped_common}",
+        f"training_days={len(days)} validation_days_used=0 test_days_used=0 "
+        f"validation_days_in_manifest={len(manifest.get('validation_days', []))} "
+        f"test_days_in_manifest={len(manifest.get('test_days', []))}",
         flush=True,
     )
+    written: list[str] = []
+    for state in STATES:
+        print(f"state={state} source={state}.csv", flush=True)
+        state_started = time.perf_counter()
+        cube = load_training_flow(edge_ids, days, f"{state}.csv")
+        adjacency, summary = build_state_adjacency(
+            cube,
+            min_daily_flow=float(args.min_daily_flow),
+            min_valid_days=int(args.min_valid_days),
+            min_common_valid_days=int(args.min_common_valid_days),
+            sparsity=float(args.sparsity),
+            workers=workers,
+        )
+        output = state_output_path(out_dir, state)
+        atomic_save_npy(output, adjacency)
+        written.append(output.as_posix())
+        print(
+            f"wrote {output} runtime_sec={time.perf_counter() - state_started:.1f} "
+            f"valid_roads={summary['valid_roads']} dtw_pairs={summary['dtw_pairs_computed']} "
+            f"degree_mean={summary['degree_mean']:.4f}",
+            flush=True,
+        )
+        del cube, adjacency
+    if file_sha256(legacy) != legacy_hash:
+        raise GraphError(f"{legacy} changed during state adjacency generation")
     print(
-        "degree "
-        f"min={degree.min():.0f} mean={degree.mean():.4f} median={np.median(degree):.0f} "
-        f"p90={np.quantile(degree, 0.90):.4f} p95={np.quantile(degree, 0.95):.4f} "
-        f"p99={np.quantile(degree, 0.99):.4f} max={degree.max():.0f}",
+        f"end_time={utc_now()} runtime_sec={time.perf_counter() - started:.1f} "
+        f"files={len(written)} legacy_unchanged=1",
         flush=True,
     )
-    print(f"wrote {OUTPUT}", flush=True)
     return 0
 
 

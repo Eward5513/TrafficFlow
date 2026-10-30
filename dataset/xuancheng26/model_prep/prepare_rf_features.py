@@ -193,7 +193,7 @@ def load_canonical_edges() -> tuple[list[str], list[int], list[str]]:
         graph_ids = [str(item) for item in payload["edge_ids"].tolist()]
     if graph_ids != edges:
         raise FeatureError("r_graph.npz edge_ids differ from r_nodes.csv order")
-    sample = FULL_ROOT / "2023_04_01" / "entry_flow.csv"
+    sample = FULL_ROOT / "2023_04_01" / "inflow.csv"
     with sample.open(encoding="utf-8") as handle:
         header = handle.readline().rstrip("\n").split(",")
     if header[:2] != ["time_bin", "start_time"] or header[2:] != edges:
@@ -1001,7 +1001,7 @@ def require_inputs(days: list[tuple[str, str]], rates: list[str]) -> None:
         plain, compressed = fcd_candidates(day_name)
         if not ((plain.is_file() and plain.stat().st_size > 0) or (compressed.is_file() and compressed.stat().st_size > 0)):
             raise FeatureError(f"missing FCD for {day_name}")
-        entry = FULL_ROOT / day_name / "entry_flow.csv"
+        entry = FULL_ROOT / day_name / "inflow.csv"
         if not entry.is_file():
             raise FeatureError(f"missing full flow {entry}")
         for rate in rates:
@@ -1366,8 +1366,15 @@ def main(argv: list[str] | None = None) -> int:
             "  python prepare_rf_features.py --penetrations p05\n"
             "  python prepare_rf_features.py --validate-only\n"
             "  python prepare_rf_features.py --force\n"
+            "  python prepare_rf_features.py \\\n"
+            "    --fcd-root /data5/tzhang174/TrafficFlow/xuancheng26/simulation_data/fcd_data_3s \\\n"
+            "    --training-root /data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s \\\n"
+            "    --net-file /home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_3s.net.xml\n"
         ),
     )
+    parser.add_argument("--fcd-root", type=Path, default=None, help="Day directories with fcd_YYYY_MM_DD.xml[.gz]")
+    parser.add_argument("--training-root", type=Path, default=None, help="Flow, graph, windows, and sampled-vehicle root")
+    parser.add_argument("--net-file", type=Path, default=None, help="SUMO network used for lane speed and length")
     parser.add_argument("--workers", type=int, default=29)
     parser.add_argument("--penetrations", nargs="*", default=None)
     parser.add_argument("--dates", nargs="*", default=None)
@@ -1376,18 +1383,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--spot-check", action="store_true")
     parser.add_argument("--spot-bins", default="0,1")
     parser.add_argument("--fcd-format", choices=("auto", "xml", "gz"), default="auto")
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--output-root", type=Path, default=None, help="Default: <training-root>/config/RF")
     parser.add_argument("--until-time", type=float, default=None)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be >= 1")
+    global FCD_ROOT, TRAIN_ROOT, PARTIAL_ROOT, FULL_ROOT, SAMPLED_ROOT
+    global GRAPH_PATH, NODES_PATH, MANIFEST_PATH, NET_FILE, DEFAULT_OUT
+    if args.fcd_root is not None:
+        FCD_ROOT = args.fcd_root.expanduser().resolve()
+    if args.training_root is not None:
+        TRAIN_ROOT = args.training_root.expanduser().resolve()
+        PARTIAL_ROOT = TRAIN_ROOT / "partial_flow"
+        FULL_ROOT = TRAIN_ROOT / "full_flow" / "r-level"
+        SAMPLED_ROOT = TRAIN_ROOT / "sampled_vehicle"
+        GRAPH_PATH = TRAIN_ROOT / "graph" / "r_graph.npz"
+        NODES_PATH = TRAIN_ROOT / "graph" / "r_nodes.csv"
+        MANIFEST_PATH = TRAIN_ROOT / "window_data" / "split_manifest.json"
+        DEFAULT_OUT = TRAIN_ROOT / "config" / "RF"
+    if args.net_file is not None:
+        NET_FILE = args.net_file.expanduser().resolve()
+    log(f"fcd_root={FCD_ROOT}")
+    log(f"training_root={TRAIN_ROOT}")
+    log(f"net_file={NET_FILE}")
     self_test()
     if args.self_test:
         return 0
 
-    output_root = args.output_root
+    output_root = args.output_root.expanduser().resolve() if args.output_root is not None else DEFAULT_OUT
     assert_under_rf_root(output_root, DEFAULT_OUT)
+    log(f"output_root={output_root}")
     if args.until_time is not None and output_root.resolve() == DEFAULT_OUT.resolve():
         raise FeatureError("--until-time cannot write incomplete days into the production RF directory")
 

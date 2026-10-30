@@ -16,13 +16,17 @@ distance is stored. The diagonal stays 0. Node order is ``r_graph.npz``.
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
 
+import generate_stgcn_weighted_adjacency as stgcn
+import prep_paths
 from generate_stgcn_weighted_adjacency import (
     DISTANCE_ATOL,
     GRAPH_DIR,
@@ -197,7 +201,39 @@ def reload_and_check(matrix: np.ndarray) -> None:
         raise GraphError("metadata node count does not match the matrix")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build the Xuancheng26 undirected centre-distance matrix")
+    prep_paths.add_path_arguments(parser, net=True)
+    args = parser.parse_args(argv)
+    graph_dir = prep_paths.resolved(args.training_root) / "graph"
+    net_file = prep_paths.resolved(args.net_file)
+    prep_paths.bind(
+        stgcn,
+        NET_FILE=net_file,
+        GRAPH_DIR=graph_dir,
+        R_GRAPH=graph_dir / "r_graph.npz",
+        NODE_MAPPING=graph_dir / "node_mapping.csv",
+        R_NODES=graph_dir / "r_nodes.csv",
+        OUTPUT=graph_dir / "stgcn_weighted_adjacency.npy",
+    )
+    prep_paths.bind(
+        sys.modules[__name__],
+        NET_FILE=net_file,
+        GRAPH_DIR=graph_dir,
+        OUTPUT=graph_dir / "undirected_center_distance.npy",
+        METADATA=graph_dir / "undirected_center_distance_metadata.json",
+        STGCN_GAUSSIAN=graph_dir / "stgcn_weighted_adjacency.npy",
+        STSGCN_TOPOLOGY=graph_dir / "stsgcn_undirected_topology.npy",
+        PROTECTED=(
+            graph_dir / "stgcn_weighted_adjacency.npy",
+            graph_dir / "dcrnn_weighted_adjacency.npy",
+            graph_dir / "dcrnn_adj_mx.pkl",
+            graph_dir / "stsgcn_undirected_topology.npy",
+            graph_dir / "r_graph.npz",
+        ),
+    )
+    print(f"net_file={NET_FILE}")
+    print(f"output={OUTPUT}")
     edge_ids, directed = load_r_graph()
     validate_node_order(edge_ids)
     edges, connections = parse_sumo_net(NET_FILE)

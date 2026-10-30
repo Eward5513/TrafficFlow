@@ -242,20 +242,25 @@ class OutputLayer(nn.Module):
         *,
         hidden_channels: int = 128,
         predict_length: int = 1,
+        output_channels: int = 1,
     ) -> None:
         super().__init__()
         self.time_length = int(time_length)
         self.num_nodes = int(num_nodes)
         self.in_channels = int(in_channels)
         self.predict_length = int(predict_length)
+        self.output_channels = int(output_channels)
         self.fc1 = nn.Linear(self.time_length * self.in_channels, int(hidden_channels))
-        self.fc2 = nn.Linear(int(hidden_channels), self.predict_length)
+        self.fc2 = nn.Linear(int(hidden_channels), self.predict_length * self.output_channels)
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
-        # data: (B, T, N, C) -> (B, predict_length, N)
+        # data: (B, T, N, C) -> (B, predict_length, N) or (B, predict_length, N, C_out)
         swapped = data.transpose(1, 2)
         batch, n_nodes, time_length, channels = swapped.shape
         flat = swapped.reshape(batch, n_nodes, time_length * channels)
         hidden = F.relu(self.fc1(flat))
         pred = self.fc2(hidden)
-        return pred.transpose(1, 2)
+        if self.output_channels == 1:
+            return pred.transpose(1, 2)
+        pred = pred.reshape(batch, n_nodes, self.predict_length, self.output_channels)
+        return pred.permute(0, 2, 1, 3).contiguous()

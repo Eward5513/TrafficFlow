@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 
 DATA_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26")
-TRAIN_ROOT = DATA_ROOT / "training_data"
+TRAIN_ROOT = Path(
+    os.environ.get("XUANCHENG_RF_TRAINING_ROOT", str(DATA_ROOT / "training_data"))
+).expanduser().resolve()
 RF_ROOT = TRAIN_ROOT / "config" / "RF"
 PARTIAL_ROOT = TRAIN_ROOT / "partial_flow"
 FULL_ROOT = TRAIN_ROOT / "full_flow" / "r-level"
@@ -163,7 +166,7 @@ class XuanchengRFData:
     def day_cube(self, penetration: str, day_name: str) -> tuple[np.ndarray, np.ndarray]:
         """Return X[277, 1406, 7] and y[277, 1406] for supervised bins 11..287."""
         inflow_path = PARTIAL_ROOT / penetration / day_name / "inflow.csv"
-        label_path = FULL_ROOT / day_name / "entry_flow.csv"
+        label_path = FULL_ROOT / day_name / "inflow.csv"
         speed_path = RF_ROOT / penetration / f"{day_name}.npz"
         for path in (inflow_path, label_path, speed_path):
             if not path.is_file():

@@ -21,11 +21,13 @@ from reimplementation.common.data.r_only_npz_dataset import (
     build_dataloader,
     expected_split_counts,
     invert_target,
+    loss_scale,
     load_json,
     load_npz,
     rate_tag,
     read_target_scaler,
 )
+from reimplementation.common.data.state_windows import finalize_state_scaler, open_split_dataset
 from reimplementation.common.evaluation import evaluate_loader, reload_best_checkpoint, upsert_overall_summary
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.experiment_protocol import (
@@ -107,13 +109,12 @@ def build_dataloaders(
     n_his = int(config.get("n_his", 12))
     tag = rate_tag(rate)
     for split in SPLITS:
-        dataset = ROnlyNPZDataset(
-            data_root / tag / f"{split}.npz",
+        dataset = open_split_dataset(
+            data_root,
+            tag,
+            split,
+            config,
             n_his=n_his,
-            num_nodes=int(config["num_nodes"]),
-            input_channels=int(config["input_channels"]),
-            output_channels=int(config["output_channels"]),
-            output_steps=int(config["output_steps"]),
             expected_count=int(split_counts[split]),
         )
         datasets[split] = dataset
@@ -264,7 +265,7 @@ def run_p70_smoke(
     model = build_model(config, data_info["adjacency"]).to(device)
     shape_info = validate_model_shapes(model, batch_size=2)
     optimizer = build_optimizer(model, config)
-    criterion = MAERawLoss(float(data_info["mean_y_full"]), float(data_info["std_y_full"]))
+    criterion = MAERawLoss(loss_scale(data_info["mean_y_full"]), loss_scale(data_info["std_y_full"]))
     probe = _move_batch(next(iter(loader)), device)
     model.train()
     prediction, trace = model(probe["x"], return_trace=True)
@@ -362,6 +363,7 @@ def run_single_rate(
     logger: JsonlLogger,
     resume_path: Path | None = None,
 ) -> dict[str, Any]:
+    data_info = finalize_state_scaler(data_info, config, data_root)
     tag = rate_tag(rate)
     seed = int(config["seed"])
     seed_everything(seed)
@@ -373,7 +375,7 @@ def run_single_rate(
     model = build_model(config, data_info["adjacency"]).to(device)
     optimizer = build_optimizer(model, config)
     scheduler = build_scheduler(optimizer, config)
-    criterion = MAERawLoss(float(data_info["mean_y_full"]), float(data_info["std_y_full"]))
+    criterion = MAERawLoss(loss_scale(data_info["mean_y_full"]), loss_scale(data_info["std_y_full"]))
     start_epoch = 0
     best_mae = float("inf")
     best_epoch = -1
@@ -462,8 +464,8 @@ def run_single_rate(
         val_mae = _validation_mae(
             model,
             loaders["loaders"]["validation"],
-            mean_y=float(data_info["mean_y_full"]),
-            std_y=float(data_info["std_y_full"]),
+            mean_y=loss_scale(data_info["mean_y_full"]),
+            std_y=loss_scale(data_info["std_y_full"]),
             device=device,
         )
         scheduler.step(val_mae)
@@ -506,8 +508,8 @@ def run_single_rate(
     ckpt = reload_best_checkpoint(model, rate_dir / "best_checkpoint.pt", device)
     if int(ckpt["epoch"]) != int(best_epoch):
         raise ReimplementationError(f"best checkpoint epoch {ckpt['epoch']} != selected epoch {best_epoch}")
-    mean_y = float(data_info["mean_y_full"])
-    std_y = float(data_info["std_y_full"])
+    mean_y = loss_scale(data_info["mean_y_full"])
+    std_y = loss_scale(data_info["std_y_full"])
     n_his = int(config.get("n_his", 12))
     counts = data_info["sample_counts"]
     model.eval()

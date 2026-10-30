@@ -56,6 +56,7 @@ class STID(nn.Module):
         input_dim: int,
         embed_dim: int,
         output_len: int,
+        output_dim: int = 1,
         num_layer: int,
         if_node: bool,
         node_dim: int,
@@ -84,6 +85,9 @@ class STID(nn.Module):
         self.input_dim = int(input_dim)
         self.embed_dim = int(embed_dim)
         self.output_len = int(output_len)
+        self.output_dim = int(output_dim)
+        if self.output_dim < 1:
+            raise ReimplementationError("output_dim must be positive")
         self.num_layer = int(num_layer)
         self.temp_dim_tid = int(temp_dim_tid)
         self.temp_dim_diw = int(temp_dim_diw)
@@ -131,7 +135,7 @@ class STID(nn.Module):
         )
         self.regression_layer = nn.Conv2d(
             in_channels=self.hidden_dim,
-            out_channels=self.output_len,
+            out_channels=self.output_len * self.output_dim,
             kernel_size=(1, 1),
             bias=True,
         )
@@ -147,6 +151,7 @@ class STID(nn.Module):
             input_dim=int(config.get("input_dim", 3)),
             embed_dim=int(config.get("embed_dim", config.get("time_series_emb_dim", 32))),
             output_len=int(config.get("output_len", config.get("output_window", 1))),
+            output_dim=int(config.get("output_dim", config.get("output_channels", 1))),
             num_layer=int(config.get("num_layer", config.get("num_block", 3))),
             if_node=if_node,
             node_dim=int(config.get("node_dim", 32)),
@@ -186,7 +191,8 @@ class STID(nn.Module):
         count += ts_in * self.embed_dim + self.embed_dim
         mlp = 2 * (self.hidden_dim * self.hidden_dim + self.hidden_dim)
         count += self.num_layer * mlp
-        count += self.hidden_dim * self.output_len + self.output_len
+        out_features = self.output_len * self.output_dim
+        count += self.hidden_dim * out_features + out_features
         return int(count)
 
     def _expand_table_index(
@@ -268,6 +274,10 @@ class STID(nn.Module):
             raise ReimplementationError(
                 f"history channels {channels} < required {needed}"
             )
+        if int(channels) > self.input_dim:
+            raise ReimplementationError(
+                f"history channels {channels} > input_dim {self.input_dim}; refusing to drop channels"
+            )
         if not torch.isfinite(history_data).all():
             raise ReimplementationError("history_data contains NaN or inf")
 
@@ -322,7 +332,10 @@ class STID(nn.Module):
             raise ReimplementationError(f"hidden spatial layout {tuple(hidden.shape)} is not [B,D,N,1]")
         encoded = self.encoder(hidden)
         prediction = self.regression_layer(encoded)
-        expected = (batch, self.output_len, self.num_nodes, 1)
+        if self.output_dim != 1:
+            prediction = prediction.reshape(batch, self.output_len, self.output_dim, self.num_nodes)
+            prediction = prediction.permute(0, 1, 3, 2).contiguous()
+        expected = (batch, self.output_len, self.num_nodes, self.output_dim)
         if tuple(prediction.shape) != expected:
             raise ReimplementationError(f"prediction {tuple(prediction.shape)} != {expected}")
         if not torch.isfinite(prediction).all():

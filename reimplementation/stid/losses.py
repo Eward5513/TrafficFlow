@@ -14,7 +14,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from reimplementation.common.data.r_only_npz_dataset import invert_target
+from reimplementation.common.data.r_only_npz_dataset import invert_target, loss_scale
 from reimplementation.common.errors import ReimplementationError
 
 
@@ -33,8 +33,8 @@ def mae_all(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 class MAERawLoss(nn.Module):
     def __init__(self, mean: float, std: float) -> None:
         super().__init__()
-        self.mean = float(mean)
-        self.std = float(std)
+        self.mean = loss_scale(mean)
+        self.std = loss_scale(std)
 
     def denormalize(self, normalized: torch.Tensor) -> torch.Tensor:
         return invert_target(normalized, self.mean, self.std)

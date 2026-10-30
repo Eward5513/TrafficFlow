@@ -42,8 +42,10 @@ class STGCN(nn.Module):
         output_steps: int = 1,
     ) -> None:
         super().__init__()
-        if output_steps != 1 or output_channels != 1:
-            raise ReimplementationError("this STGCN port emits a single one-channel time step")
+        if output_steps != 1:
+            raise ReimplementationError("this STGCN port emits a single time step")
+        if int(output_channels) < 1:
+            raise ReimplementationError("output_channels must be positive")
         if not blocks:
             raise ReimplementationError("blocks must be non-empty")
         if blocks[0][0] != input_channels:
@@ -74,7 +76,9 @@ class STGCN(nn.Module):
         self.st_blocks = conv_blocks
         self.remaining_time = remaining
         last_channels = int(blocks[-1][2])
-        self.output_layer = OutputLayer(remaining, last_channels, n_nodes)
+        self.output_layer = OutputLayer(
+            remaining, last_channels, n_nodes, out_channels=int(output_channels)
+        )
         kernel = torch.as_tensor(cheb_kernel, dtype=torch.float32)
         if tuple(kernel.shape) != (n_nodes, ks * n_nodes):
             raise ReimplementationError(

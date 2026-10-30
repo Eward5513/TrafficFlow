@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import multiprocessing as mp
+import os
 import sys
 import time
 import traceback
@@ -18,6 +19,7 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 RESULTS_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_results/RF")
+DEFAULT_TRAINING_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data")
 DEFAULT_RATES = ["p05", "p10", "p20", "p30", "p40", "p50", "p70"]
 
 
@@ -138,10 +140,13 @@ def _summarize(run_dir: Path, rates: list[str], elapsed: float, workers: int) ->
 
 
 def main(argv: list[str] | None = None) -> int:
+    global RESULTS_ROOT
     parser = argparse.ArgumentParser(
         description="Train and evaluate the Xuancheng26 RF baseline.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--training-root", type=Path, default=DEFAULT_TRAINING_ROOT)
+    parser.add_argument("--results-root", type=Path, default=RESULTS_ROOT)
     parser.add_argument("--penetrations", nargs="*", default=None)
     parser.add_argument("--parallel-models", type=int, default=7)
     parser.add_argument("--n-jobs-per-model", type=int, default=8)
@@ -154,6 +159,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kmeans-n-init", type=int, default=10)
     parser.add_argument("--n-clusters", type=int, default=50)
     args = parser.parse_args(argv)
+    RESULTS_ROOT = args.results_root.expanduser().resolve()
+    training_root = args.training_root.expanduser().resolve()
+    os.environ["XUANCHENG_RF_TRAINING_ROOT"] = str(training_root)
+    os.environ["XUANCHENG_RF_RESULTS_ROOT"] = str(RESULTS_ROOT)
     if args.self_test:
         from reimplementation.RF.model import self_test
 
@@ -204,11 +213,14 @@ def main(argv: list[str] | None = None) -> int:
         "force": args.force,
         "evaluate_only": args.evaluate_only,
         "run_dir": str(run_dir),
+        "training_root": str(training_root),
+        "results_root": str(RESULTS_ROOT),
     }
     _write_json(run_dir / "experiment_config.json", experiment)
     workers = min(args.parallel_models, len(rates))
     _log(
-        f"run_dir={run_dir} rates={rates} clusters={args.n_clusters} "
+        f"run_dir={run_dir} training_root={training_root} results_root={RESULTS_ROOT} "
+        f"rates={rates} clusters={args.n_clusters} "
         f"parallel={workers} n_jobs={args.n_jobs_per_model}"
     )
     started = time.perf_counter()

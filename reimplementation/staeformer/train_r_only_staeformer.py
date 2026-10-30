@@ -15,6 +15,7 @@ from typing import Any
 import torch
 
 from reimplementation.common.data.r_only_npz_dataset import rate_tag
+from reimplementation.common.data.state_windows import add_state_type_arguments, apply_state_types
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.evaluation import upsert_overall_summary
 from reimplementation.common.utils.atomic_io import atomic_write_json
@@ -91,6 +92,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="original_pems_npz_sequential_index_mod_7 (default, matches PeMS04 npz) or calendar",
     )
+    add_state_type_arguments(parser)
     return parser.parse_args()
 
 
@@ -196,6 +198,7 @@ def original_hashes(project_root: Path) -> dict[str, str]:
 def main() -> None:
     args = parse_args()
     config = overlay(load_config(args.config), args)
+    config = apply_state_types(config, args, model_name="staeformer")
     if "in_steps" not in config:
         config["in_steps"] = int(config.get("n_his", 12))
     if "out_steps" not in config:

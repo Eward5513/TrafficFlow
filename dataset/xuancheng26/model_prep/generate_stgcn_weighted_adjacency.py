@@ -8,9 +8,11 @@ Laplacian and Chebyshev stay in the trainer.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import math
 import os
+import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -18,10 +20,10 @@ from pathlib import Path
 
 import numpy as np
 
-NET_FILE = Path("/home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_rebuilt.net.xml")
-GRAPH_DIR = Path(
-    "/data5/tzhang174/TrafficFlow/xuancheng26/training_data/graph"
-)
+import prep_paths
+
+NET_FILE = prep_paths.DEFAULT_NET_FILE
+GRAPH_DIR = prep_paths.DEFAULT_TRAINING_ROOT / "graph"
 R_GRAPH = GRAPH_DIR / "r_graph.npz"
 NODE_MAPPING = GRAPH_DIR / "node_mapping.csv"
 R_NODES = GRAPH_DIR / "r_nodes.csv"
@@ -476,7 +478,22 @@ def run_synthetic_checks() -> None:
         raise GraphError("synthetic gaussian weight left (0, 1]")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build the Xuancheng26 STGCN weighted adjacency")
+    prep_paths.add_path_arguments(parser, net=True)
+    args = parser.parse_args(argv)
+    graph_dir = prep_paths.resolved(args.training_root) / "graph"
+    prep_paths.bind(
+        sys.modules[__name__],
+        NET_FILE=prep_paths.resolved(args.net_file),
+        GRAPH_DIR=graph_dir,
+        R_GRAPH=graph_dir / "r_graph.npz",
+        NODE_MAPPING=graph_dir / "node_mapping.csv",
+        R_NODES=graph_dir / "r_nodes.csv",
+        OUTPUT=graph_dir / "stgcn_weighted_adjacency.npy",
+    )
+    print(f"net_file={NET_FILE}")
+    print(f"output={OUTPUT}")
     run_synthetic_checks()
     edge_ids, directed = load_r_graph()
     validate_node_order(edge_ids)

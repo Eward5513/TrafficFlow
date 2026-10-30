@@ -48,7 +48,19 @@ def assemble_history_and_indices(
     if int(time) != int(n_his):
         raise ReimplementationError(f"x time {time} != n_his {n_his}")
     if int(channels) != 1:
-        raise ReimplementationError("R-only traffic channel count must be 1")
+        return _history_from_traffic_channels(
+            traffic,
+            window_start_slot=window_start_slot,
+            day_index=day_index,
+            n_his=n_his,
+            input_dim=input_dim,
+            tod_embedding_dim=tod_embedding_dim,
+            dow_embedding_dim=dow_embedding_dim,
+            day_of_week_source=day_of_week_source,
+            weekday_mapping=weekday_mapping,
+            all_days=all_days,
+            target_slot=target_slot,
+        )
     if int(input_dim) not in {1, 2, 3}:
         raise ReimplementationError(f"unsupported input_dim {input_dim}")
     slots = assert_same_day_window(window_start_slot, n_his)
@@ -77,6 +89,62 @@ def assemble_history_and_indices(
             raise ReimplementationError("day_index batch does not match x")
         if int(input_dim) >= 3:
             history[..., 2] = dow[:, None, None].astype(np.float32)
+        dow_idx = torch.from_numpy(np.repeat(dow[:, None], n_his, axis=1).astype(np.int64))
+    payload = {
+        "history": torch.from_numpy(np.ascontiguousarray(history)),
+        "time_of_day_index": tod_idx,
+    }
+    if dow_idx is not None:
+        payload["day_of_week_index"] = dow_idx
+    return payload
+
+
+def _history_from_traffic_channels(
+    traffic: np.ndarray,
+    *,
+    window_start_slot: np.ndarray | torch.Tensor,
+    day_index: np.ndarray | torch.Tensor,
+    n_his: int,
+    input_dim: int,
+    tod_embedding_dim: int,
+    dow_embedding_dim: int,
+    day_of_week_source: str,
+    weekday_mapping: Mapping[str, int] | None,
+    all_days: Sequence[str] | None,
+    target_slot: np.ndarray | torch.Tensor | None,
+) -> dict[str, torch.Tensor]:
+    """Place every traffic channel first, then the same time channels as the one-channel path."""
+    batch, time, nodes, channels = traffic.shape
+    slots = assert_same_day_window(window_start_slot, n_his)
+    if slots.shape[0] != batch:
+        raise ReimplementationError("window_start_slot batch does not match x")
+    if target_slot is not None:
+        assert_target_is_last_history(window_start_slot, target_slot, n_his)
+    extras = int(int(tod_embedding_dim) > 0) + int(int(dow_embedding_dim) > 0)
+    width = int(channels) + extras
+    if int(input_dim) != width:
+        raise ReimplementationError(
+            f"input_dim {input_dim} != {channels} traffic channels + {extras} time channels"
+        )
+    history = np.zeros((batch, time, nodes, width), dtype=np.float32)
+    history[..., :channels] = traffic.astype(np.float32, copy=False)
+    tod_idx = torch.from_numpy(np.ascontiguousarray(slots)).to(dtype=torch.long)
+    cursor = int(channels)
+    if int(tod_embedding_dim) > 0:
+        if np.any(slots[:, -1] < 0) or np.any(slots[:, -1] >= SLOTS_PER_DAY):
+            raise ReimplementationError("last history slot is outside [0, 288)")
+        fractions = time_of_day_fraction(slots)
+        history[..., cursor] = np.repeat(fractions[:, :, None], nodes, axis=2)
+        cursor += 1
+    dow_idx = None
+    if int(dow_embedding_dim) > 0:
+        dow = day_of_week_index(
+            day_index,
+            source=day_of_week_source,
+            weekday_mapping=weekday_mapping,
+            all_days=all_days,
+        )
+        history[..., cursor] = dow[:, None, None].astype(np.float32)
         dow_idx = torch.from_numpy(np.repeat(dow[:, None], n_his, axis=1).astype(np.int64))
     payload = {
         "history": torch.from_numpy(np.ascontiguousarray(history)),

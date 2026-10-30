@@ -17,8 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 CODE = Path("/home/tzhang174/TrafficFlow")
-DATA = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data")
-RESULTS = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_results")
+DATA = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s")
+RESULTS = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s")
 PYTHON = Path("/home/tzhang174/miniforge3/envs/trafficflow/bin/python3")
 LAUNCHER_LOG = RESULTS / "training_launcher.log"
 GPUS = (0, 3, 4)

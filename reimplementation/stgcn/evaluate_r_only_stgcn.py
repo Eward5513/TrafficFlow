@@ -9,7 +9,7 @@ from pathlib import Path
 
 import torch
 
-from reimplementation.common.data.r_only_npz_dataset import rate_tag
+from reimplementation.common.data.r_only_npz_dataset import loss_scale, rate_tag
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.utils.checkpoint import assert_checkpoint_compatible, load_checkpoint
 from reimplementation.common.utils.hashing import sha256_file
@@ -90,8 +90,8 @@ def main() -> None:
             loaders["loaders"][split],
             criterion,
             device,
-            float(data_info["mean_y_full"]),
-            float(data_info["std_y_full"]),
+            loss_scale(data_info["mean_y_full"]),
+            loss_scale(data_info["std_y_full"]),
         )
         _write_split_outputs(
             output_dir,

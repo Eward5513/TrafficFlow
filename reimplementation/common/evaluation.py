@@ -51,11 +51,16 @@ def collect_split_predictions(
     loader,
     predict_fn: Callable[[Mapping[str, Any]], torch.Tensor],
     *,
-    mean_y: float,
-    std_y: float,
+    mean_y: Any,
+    std_y: Any,
     device: torch.device,
 ) -> dict[str, np.ndarray]:
-    """Run ``predict_fn`` on every batch and invert predictions to raw flow."""
+    """Run ``predict_fn`` on every batch and invert predictions to raw flow.
+
+    ``mean_y`` and ``std_y`` may be one number or one value per target channel.
+    ``invert_target`` broadcasts a channel vector; it must not be collapsed
+    with ``float()``.
+    """
     pred_norm: list[np.ndarray] = []
     true_norm: list[np.ndarray] = []
     pred_raw: list[np.ndarray] = []
@@ -74,7 +79,7 @@ def collect_split_predictions(
                 f"prediction {tuple(pred.shape)} != target {tuple(batch['y'].shape)}"
             )
         pred_cpu = pred.detach().cpu()
-        inverted = invert_target(pred_cpu, float(mean_y), float(std_y))
+        inverted = invert_target(pred_cpu, mean_y, std_y)
         pred_norm.append(_to_numpy(pred_cpu).astype(np.float32, copy=False))
         true_norm.append(_to_numpy(batch["y"]).astype(np.float32, copy=False))
         pred_raw.append(_to_numpy(inverted).astype(np.float32, copy=False))
@@ -194,8 +199,8 @@ def evaluate_loader(
     loader,
     predict_fn: Callable[[Mapping[str, Any]], torch.Tensor],
     *,
-    mean_y: float,
-    std_y: float,
+    mean_y: Any,
+    std_y: Any,
     device: torch.device,
     output_dir: Path,
     split: str,

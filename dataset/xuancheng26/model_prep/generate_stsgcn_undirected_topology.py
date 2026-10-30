@@ -8,15 +8,17 @@ identity are built later by the model.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
 
-GRAPH_DIR = Path(
-    "/data5/tzhang174/TrafficFlow/xuancheng26/training_data/graph"
-)
+import prep_paths
+
+GRAPH_DIR = prep_paths.DEFAULT_TRAINING_ROOT / "graph"
 R_GRAPH = GRAPH_DIR / "r_graph.npz"
 NODE_MAPPING = GRAPH_DIR / "node_mapping.csv"
 R_NODES = GRAPH_DIR / "r_nodes.csv"
@@ -129,7 +131,20 @@ def save_topology(undirected: np.ndarray) -> None:
     os.replace(temporary, OUTPUT)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build the Xuancheng26 STSGCN undirected topology")
+    prep_paths.add_path_arguments(parser)
+    args = parser.parse_args(argv)
+    graph_dir = prep_paths.resolved(args.training_root) / "graph"
+    prep_paths.bind(
+        sys.modules[__name__],
+        GRAPH_DIR=graph_dir,
+        R_GRAPH=graph_dir / "r_graph.npz",
+        NODE_MAPPING=graph_dir / "node_mapping.csv",
+        R_NODES=graph_dir / "r_nodes.csv",
+        OUTPUT=graph_dir / "stsgcn_undirected_topology.npy",
+    )
+    print(f"output={OUTPUT}")
     edge_ids, directed = load_r_graph()
     validate_node_order(edge_ids)
     undirected = build_undirected_topology(directed)

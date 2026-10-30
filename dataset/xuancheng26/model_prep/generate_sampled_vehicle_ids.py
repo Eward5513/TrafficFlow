@@ -11,6 +11,7 @@ import argparse
 import csv
 import gzip
 import hashlib
+import multiprocessing as mp
 import os
 import random
 import sys
@@ -20,10 +21,10 @@ from datetime import datetime
 from pathlib import Path
 from xml.parsers import expat
 
-FCD_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/simulation_data/fcd_data")
-OUT_ROOT = Path(
-    "/data5/tzhang174/TrafficFlow/xuancheng26/training_data/sampled_vehicle"
-)
+import prep_paths
+
+FCD_ROOT = prep_paths.DEFAULT_FCD_ROOT
+OUT_ROOT = prep_paths.DEFAULT_TRAINING_ROOT / "sampled_vehicle"
 SUMMARY_PATH = OUT_ROOT / "sampling_summary.csv"
 GLOBAL_SEED = 42
 RATES = (
@@ -235,9 +236,19 @@ def print_overall(rows: list[dict[str, object]]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sample nested vehicle IDs by penetration rate")
+    prep_paths.add_path_arguments(parser, fcd=True)
     parser.add_argument("--workers", type=int, default=29)
     parser.add_argument("--dates", nargs="*", default=None)
     args = parser.parse_args(argv)
+    out_root = prep_paths.resolved(args.training_root) / "sampled_vehicle"
+    prep_paths.bind(
+        sys.modules[__name__],
+        FCD_ROOT=prep_paths.resolved(args.fcd_root),
+        OUT_ROOT=out_root,
+        SUMMARY_PATH=out_root / "sampling_summary.csv",
+    )
+    log(f"fcd_root={FCD_ROOT}")
+    log(f"output_root={OUT_ROOT}")
     dates = args.dates or discover_dates()
     if not dates:
         log("no date directories")
@@ -245,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     workers = max(1, min(args.workers, len(dates)))
     log(f"dates={len(dates)} workers={workers} seed={GLOBAL_SEED}")
     rows: list[dict[str, object]] = []
-    with ProcessPoolExecutor(max_workers=workers) as pool:
+    with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("fork")) as pool:
         futures = {pool.submit(process_day, date_label): date_label for date_label in dates}
         for future in as_completed(futures):
             date_label = futures[future]

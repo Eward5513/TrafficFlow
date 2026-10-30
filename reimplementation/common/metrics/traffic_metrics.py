@@ -42,7 +42,7 @@ def traffic_metrics(
     denom = float(np.sum(np.abs(true)))
     wape = float(np.sum(abs_err) / denom * 100.0) if denom > 0.0 else float("nan")
     negative = pred < 0.0
-    return {
+    metrics = {
         "mae": mae,
         "rmse": rmse,
         "mape_nonzero": mape,
@@ -55,3 +55,14 @@ def traffic_metrics(
         "minimum_prediction": float(pred.min()) if pred.size else float("nan"),
         "clipped_negative_predictions": float(clip_negative),
     }
+    if pred.ndim >= 4 and int(pred.shape[-1]) > 1:
+        names = (
+            ("inflow", "outflow", "accumulation_start", "accumulation_end")
+            if int(pred.shape[-1]) == 4
+            else tuple(f"channel_{index}" for index in range(int(pred.shape[-1])))
+        )
+        for index, name in enumerate(names):
+            channel = traffic_metrics(pred[..., index], true[..., index], clip_negative=clip_negative)
+            for key, value in channel.items():
+                metrics[f"{name}_{key}"] = value
+    return metrics

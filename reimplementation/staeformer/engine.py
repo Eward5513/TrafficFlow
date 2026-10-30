@@ -24,10 +24,12 @@ from reimplementation.common.data.r_only_npz_dataset import (
     build_dataloader,
     expected_split_counts,
     invert_target,
+    loss_scale,
     load_json,
     rate_tag,
     read_target_scaler,
 )
+from reimplementation.common.data.state_windows import finalize_state_scaler, open_split_dataset
 from reimplementation.common.evaluation import (
     assert_official_rate_outputs,
     evaluate_loader,
@@ -183,10 +185,12 @@ def build_train_dataloader(
 ) -> dict[str, Any]:
     tag = rate_tag(rate)
     path = validate_train_npz_only(data_root / tag / "train.npz")
-    dataset = ROnlyNPZDataset(
-        path,
+    dataset = open_split_dataset(
+        data_root,
+        tag,
+        "train",
+        config,
         n_his=int(config.get("in_steps", config.get("n_his", 12))),
-        num_nodes=int(config["num_nodes"]),
         expected_count=int(split_counts["train"]),
     )
     loader = build_dataloader(
@@ -209,10 +213,12 @@ def build_dataloaders(
     datasets = {}
     n_his = int(config.get("in_steps", config.get("n_his", 12)))
     for split in SPLITS:
-        dataset = ROnlyNPZDataset(
-            data_root / rate_tag(rate) / f"{split}.npz",
+        dataset = open_split_dataset(
+            data_root,
+            rate,
+            split,
+            config,
             n_his=n_his,
-            num_nodes=int(config["num_nodes"]),
             expected_count=int(split_counts[split]),
         )
         datasets[split] = dataset
@@ -369,8 +375,8 @@ def run_p70_smoke(
     )
     optimizer = build_optimizer(model, config)
     criterion = HuberRawLoss(
-        float(data_info["mean_y_full"]),
-        float(data_info["std_y_full"]),
+        loss_scale(data_info["mean_y_full"]),
+        loss_scale(data_info["std_y_full"]),
         delta=float(config.get("huber_delta", 1.0)),
     )
     model.train()
@@ -398,7 +404,7 @@ def run_p70_smoke(
             changed += 1
     if changed == 0:
         raise ReimplementationError("optimizer step did not change parameters")
-    recovered = invert_target(probe["y"], float(data_info["mean_y_full"]), float(data_info["std_y_full"]))
+    recovered = invert_target(probe["y"], loss_scale(data_info["mean_y_full"]), loss_scale(data_info["std_y_full"]))
     y_raw_match = bool(torch.allclose(recovered, probe["y_raw"], atol=1e-4, rtol=1e-4))
     payload = {
         "status": "ok",
@@ -468,6 +474,7 @@ def run_single_rate(
     resume_path: Path | None = None,
 ) -> dict[str, Any]:
     """Train one penetration, then evaluate the best validation checkpoint."""
+    data_info = finalize_state_scaler(data_info, config, data_root)
     tag = rate_tag(rate)
     seed = int(config["seed"])
     seed_everything(seed)
@@ -480,8 +487,8 @@ def run_single_rate(
     optimizer = build_optimizer(model, config)
     scheduler = build_scheduler(optimizer, config)
     criterion = HuberRawLoss(
-        float(data_info["mean_y_full"]),
-        float(data_info["std_y_full"]),
+        loss_scale(data_info["mean_y_full"]),
+        loss_scale(data_info["std_y_full"]),
         delta=float(config.get("huber_delta", 1.0)),
     )
     start_epoch = 0
@@ -569,7 +576,7 @@ def run_single_rate(
                 packed = assemble_batch_payload(batch, config, **day)
                 pred = model(packed["history"].to(device), **model_kwargs_from_payload(packed, device))
                 pred_raw = invert_target(
-                    pred, float(data_info["mean_y_full"]), float(data_info["std_y_full"])
+                    pred, loss_scale(data_info["mean_y_full"]), loss_scale(data_info["std_y_full"])
                 )
                 val_abs.append(torch.abs(pred_raw - batch["y_raw"]).mean().cpu())
                 huber = criterion(pred, batch["y_raw"])
@@ -619,8 +626,8 @@ def run_single_rate(
             f"best checkpoint epoch {ckpt['epoch']} != history min-val epoch {hist_best['epoch']}"
         )
     best_epoch = int(ckpt["epoch"])
-    mean_y = float(data_info["mean_y_full"])
-    std_y = float(data_info["std_y_full"])
+    mean_y = loss_scale(data_info["mean_y_full"])
+    std_y = loss_scale(data_info["std_y_full"])
     n_his = int(config.get("in_steps", config.get("n_his", 12)))
     counts = data_info["sample_counts"]
     model.eval()

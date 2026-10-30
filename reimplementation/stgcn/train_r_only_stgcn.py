@@ -12,6 +12,7 @@ from typing import Any
 import torch
 
 from reimplementation.common.data.r_only_npz_dataset import rate_tag
+from reimplementation.common.data.state_windows import add_state_type_arguments, apply_state_types
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.utils.atomic_io import atomic_write_json
 from reimplementation.common.utils.hashing import sha256_file
@@ -59,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--smoke-test-only", action="store_true")
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--overwrite", action="store_true")
+    add_state_type_arguments(parser)
     return parser.parse_args()
 
 
@@ -109,6 +111,7 @@ def source_manifest(root: Path) -> dict[str, str]:
 def main() -> None:
     args = parse_args()
     config = overlay(load_config(args.config), args)
+    config = apply_state_types(config, args, model_name="stgcn")
     if str(config.get("target_mode")) != "last-observed-step":
         raise ReimplementationError("target_mode must be last-observed-step")
     data_root = resolve_path(PROJECT_ROOT, config["data_root"])

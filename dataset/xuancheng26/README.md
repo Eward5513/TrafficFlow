@@ -87,19 +87,27 @@ python3 build_tls_3s.py
 python3 run_fcd_simulations_3s.py --smoke-test
 ```
 
-晚高峰切换在 `night_peak.add.xml`：55000 秒切到 program 1，75000 秒切回 program 0。55000 不是 3 的整数倍，3 秒版本没有改这个切换时刻。
+`night_peak.add.xml` 在 55000 秒切到 program 1，75000 秒切回 program 0。`build_tls_3s.py` 生成的 `night_peak_3s.add.xml` 把切入晚高峰改到 54900 秒，75000 秒切回不变。54900 能被 3 整除。
+
+`run_fcd_simulations_tmp.py` 用 `xuancheng_tls_tmp.net.xml` 再跑同一套 29 天。除路网和输出目录外，参数与 3 秒批次相同，包括 `night_peak_3s.add.xml` 和 refined 路线。配置写到 `fcd_configs_tmp/`，结果写到 `simulation_data/fcd_tmp/YYYY_MM_DD/`。它不改 `fcd_data_3s/` 里正在跑的那一批。
 
 ## 2. model_prep：从仿真结果到模型输入
 
-这些脚本不改路网，也不改路线。它们读 `fcd_data/` 里已经完成的那一轮，写出 `training_data/`。3 秒相位那一轮还在 `fcd_data_3s/`，当前脚本不会自动改读它。
+这些脚本不改路网，也不改路线。默认读 `fcd_data/`，写出 `training_data/`。换一批仿真时用参数改路径，子目录结构保持不变：
+
+- `--fcd-root`：FCD 日目录
+- `--net-file`：生成路网图时用的 SUMO 路网
+- `--training-root`：流量、图、窗口和配置的根目录
+
+3 秒相位这批写到 `training_data_3s/`，输入是 `fcd_data_3s/` 和 `xuancheng_tls_3s.net.xml`。
 
 建议顺序：
 
 1. `generate_r_graph.py`：用 `xuancheng_tls_rebuilt.net.xml` 的真实连接做成有向路段图 `graph/r_graph.npz`。
-2. `generate_r_level_full_flow.py`：按 5 分钟统计每条路段的进入和离开。
+2. `generate_r_level_full_flow.py`：按 5 分钟写出 `inflow.csv`、`outflow.csv`、`accumulation_start.csv`、`accumulation_end.csv`。部分观测由 `generate_r_level_partial_flow.py` 用同样四个文件名写到各渗透率目录。
 3. `generate_sampled_vehicle_ids.py`：每个渗透率抽取实际出发的车辆。种子 42，低比例是高比例的前缀。
 4. `generate_r_level_partial_flow.py`：只用抽中的车辆再数一遍 5 分钟流量。
-5. `generate_r_level_windows.py`：切同一天内的 12 步窗口。输入是抽样流量，目标是窗口最后一步的全量进入流量。
+5. `generate_r_level_windows.py`：切同一天内的 12 步窗口。目标仍是这 12 步的最后一步。它为四个状态和四通道 `all` 各写一份 NPZ，放在 `{rate}/{split}/{date}/` 下，不覆盖原来的 `{split}/{date}.npz` 和 `normalization.json`。训练脚本默认仍读旧的合并窗口；`--input-type` 和 `--target-type` 才读新文件。
 6. `merge_r_level_window_data.py`：按固定日期顺序拼成 train、validation、test。
 7. 模型各自的图，都跟 `r_graph` 的节点顺序：
    - `generate_stgcn_weighted_adjacency.py`
@@ -122,6 +130,15 @@ python3 generate_r_level_partial_flow.py --workers 29
 python3 generate_r_level_windows.py --workers 29
 python3 merge_r_level_window_data.py
 python3 generate_training_support_files.py
+
+python3 generate_r_graph.py \
+  --net-file /home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_3s.net.xml \
+  --training-root /data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s
+python3 generate_r_level_full_flow.py \
+  --fcd-root /data5/tzhang174/TrafficFlow/xuancheng26/simulation_data/fcd_data_3s \
+  --net-file /home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_3s.net.xml \
+  --training-root /data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s \
+  --workers 29
 ```
 
-训练结果写到 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results/`。
+原来那一批的训练结果在 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results/`。3 秒这批的配置把 `output_root` 指到 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/`，`run_all_models_training.py` 也读 `training_data_3s` 并写到这个新目录。

@@ -89,10 +89,14 @@ def assert_task_config(config: dict[str, Any]) -> None:
         raise ReimplementationError("R-only input window must be 12")
     if int(config.get("output_steps", config.get("output_window", 0))) != 1:
         raise ReimplementationError("R-only output window must be 1; this is reconstruction, not multi-step forecast")
-    if int(config.get("input_channels", 0)) != 1 or int(config.get("output_channels", 0)) != 1:
-        raise ReimplementationError(
-            "Xuancheng26 windows provide penetrated inflow only and a full-inflow target; refusing extra channels"
-        )
+    in_channels = int(config.get("input_channels", 0))
+    out_channels = int(config.get("output_channels", 0))
+    if in_channels not in {1, 4} or out_channels not in {1, 4}:
+        raise ReimplementationError("input_channels and output_channels must be 1 or 4")
+    if (in_channels == 4) != (config.get("input_type") == "all"):
+        raise ReimplementationError("four input channels require --input-type all")
+    if (out_channels == 4) != (config.get("target_type") == "all"):
+        raise ReimplementationError("four output channels require --target-type all")
     if str(config.get("output_activation", "linear")) != "linear":
         raise ReimplementationError("targets are global z-scores, not [0, 1]; refusing a bounded output activation")
     if str(config.get("edge_weight", "binary_connectivity")) not in {"binary_connectivity", "distance", "gaussian"}:

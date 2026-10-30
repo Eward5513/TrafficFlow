@@ -19,7 +19,12 @@ from reimplementation.RF.data_loader import (
 from reimplementation.RF.metrics import regression_report
 from reimplementation.RF.model import N_CLUSTERS, N_ESTIMATORS, RFEstimator
 
-RESULTS_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_results/RF")
+RESULTS_ROOT = Path(
+    os.environ.get(
+        "XUANCHENG_RF_RESULTS_ROOT",
+        "/data5/tzhang174/TrafficFlow/xuancheng26/training_results/RF",
+    )
+).expanduser().resolve()
 CODE_ROOT = Path("/home/tzhang174/TrafficFlow")
 
 

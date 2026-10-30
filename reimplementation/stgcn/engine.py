@@ -19,8 +19,10 @@ from reimplementation.common.data.r_only_npz_dataset import (
     SPLITS,
     build_dataloader,
     invert_target,
+    loss_scale,
     rate_tag,
 )
+from reimplementation.common.data.state_windows import finalize_state_scaler, open_split_dataset
 from reimplementation.common.evaluation import reload_best_checkpoint
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.experiment_protocol import (
@@ -182,10 +184,12 @@ def build_dataloaders(
     loaders = {}
     datasets = {}
     for split in SPLITS:
-        dataset = ROnlyNPZDataset(
-            data_root / rate / f"{split}.npz",
+        dataset = open_split_dataset(
+            data_root,
+            rate,
+            split,
+            config,
             n_his=int(config["n_his"]),
-            num_nodes=int(config["num_nodes"]),
             expected_count=int(split_counts[split]),
         )
         datasets[split] = dataset
@@ -502,6 +506,7 @@ def run_single_rate(
     resume_path: Path | None = None,
     smoke_only: bool = False,
 ) -> dict[str, Any]:
+    data_info = finalize_state_scaler(data_info, config, data_root)
     tag = rate_tag(rate)
     seed = int(config["seed"])
     if bool(config.get("amp")):
@@ -521,8 +526,8 @@ def run_single_rate(
     scheduler = build_scheduler(optimizer, config, epoch_step)
     criterion = STGCNPredictionLoss()
     apply_decay = bool(config.get("weight_decay_in_optimizer", False))
-    mean_y = float(data_info["mean_y_full"])
-    std_y = float(data_info["std_y_full"])
+    mean_y = loss_scale(data_info["mean_y_full"])
+    std_y = loss_scale(data_info["std_y_full"])
     train_hash = data_info["file_hashes"][f"{tag}/train.npz"]
     start_epoch = 0
     best_metric = float("inf")

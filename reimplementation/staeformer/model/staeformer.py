@@ -272,6 +272,51 @@ class STAEformer(nn.Module):
             values = values / float(scale)
         return values.unsqueeze(-1)
 
+    def _append_time_channels(
+        self,
+        x: torch.Tensor,
+        time_of_day_index: torch.Tensor | None,
+        day_of_week_index: torch.Tensor | None,
+    ) -> torch.Tensor:
+        batch, time, _nodes, channels = x.shape
+        parts = [x]
+        if int(channels) + 1 <= self.input_dim:
+            if time_of_day_index is None:
+                raise ReimplementationError("time channels require time_of_day_index")
+            parts.append(
+                self._channel_from_index(
+                    time_of_day_index,
+                    batch=batch,
+                    time=time,
+                    dtype=x.dtype,
+                    device=x.device,
+                    scale=float(self.steps_per_day),
+                    name="time_of_day",
+                    size=self.steps_per_day,
+                )
+            )
+        if int(channels) + 2 <= self.input_dim:
+            if day_of_week_index is None:
+                raise ReimplementationError("time channels require day_of_week_index")
+            parts.append(
+                self._channel_from_index(
+                    day_of_week_index,
+                    batch=batch,
+                    time=time,
+                    dtype=x.dtype,
+                    device=x.device,
+                    scale=None,
+                    name="day_of_week",
+                    size=7,
+                )
+            )
+        assembled = torch.cat(parts, dim=-1)
+        if int(assembled.size(-1)) != self.input_dim:
+            raise ReimplementationError(
+                f"assembled channels {int(assembled.size(-1))} != input_dim {self.input_dim}"
+            )
+        return assembled
+
     def _assemble_input_channels(
         self,
         x: torch.Tensor,
@@ -287,12 +332,14 @@ class STAEformer(nn.Module):
         ``slot/288*288`` truncation cannot skip an embedding row.
         """
         batch, time, _nodes, channels = x.shape
-        if channels >= self.input_dim:
-            return x[..., : self.input_dim]
-        if channels != 1:
+        if channels == self.input_dim:
+            return x
+        if channels > self.input_dim:
             raise ReimplementationError(
-                f"x last dim is {channels}; expected 1 (flow) or {self.input_dim} (official)"
+                f"x has {channels} channels, more than input_dim {self.input_dim}; refusing to drop channels"
             )
+        if channels != 1:
+            return self._append_time_channels(x, time_of_day_index, day_of_week_index)
         parts = [x]
         if self.input_dim >= 2:
             if time_of_day_index is None:

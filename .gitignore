@@ -11,6 +11,7 @@ random_passenger
 # The hand-edited net and night_peak.add.xml stay tracked.
 dataset/xuancheng26/fcd_configs/
 dataset/xuancheng26/fcd_configs_3s/
+dataset/xuancheng26/fcd_configs_tmp/
 dataset/xuancheng26/fcd_batch*.log
 dataset/xuancheng26/fcd_batch*.pid
 dataset/xuancheng26/tls_3s_audit.json

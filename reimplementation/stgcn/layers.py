@@ -200,11 +200,12 @@ class STConvBlock(nn.Module):
 class FullyConLayer(nn.Module):
     """Original ``fully_con_layer``: 1x1 conv to one channel, bias ``[n, 1]``."""
 
-    def __init__(self, n_nodes: int, channels: int) -> None:
+    def __init__(self, n_nodes: int, channels: int, out_channels: int = 1) -> None:
         super().__init__()
-        self.conv = nn.Conv2d(channels, 1, kernel_size=1, bias=False)
+        self.out_channels = int(out_channels)
+        self.conv = nn.Conv2d(channels, self.out_channels, kernel_size=1, bias=False)
         nn.init.xavier_uniform_(self.conv.weight)
-        self.bias = nn.Parameter(torch.zeros(n_nodes, 1))
+        self.bias = nn.Parameter(torch.zeros(n_nodes, self.out_channels))
 
     def decay_weights(self) -> list[torch.Tensor]:
         return [self.conv.weight]
@@ -216,13 +217,20 @@ class FullyConLayer(nn.Module):
 class OutputLayer(nn.Module):
     """Original ``output_layer``: GLU over remaining time, LN, sigmoid k=1, FC."""
 
-    def __init__(self, remaining_time: int, channels: int, n_nodes: int, dropout_p: float = 0.0) -> None:
+    def __init__(
+        self,
+        remaining_time: int,
+        channels: int,
+        n_nodes: int,
+        dropout_p: float = 0.0,
+        out_channels: int = 1,
+    ) -> None:
         super().__init__()
         del dropout_p
         self.temporal_in = TemporalConvLayer(remaining_time, channels, channels, act_func="GLU")
         self.norm = SpatialTemporalNorm(n_nodes, channels)
         self.temporal_out = TemporalConvLayer(1, channels, channels, act_func="sigmoid")
-        self.fc = FullyConLayer(n_nodes, channels)
+        self.fc = FullyConLayer(n_nodes, channels, out_channels=out_channels)
 
     def decay_weights(self) -> list[torch.Tensor]:
         return self.temporal_in.decay_weights() + self.temporal_out.decay_weights() + self.fc.decay_weights()

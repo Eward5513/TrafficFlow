@@ -5,7 +5,8 @@ The source is the network that completed the 29-day FCD batch:
 ``xuancheng_tls_rebuilt.net.xml``. Only ``<phase duration>`` values inside
 ``<tlLogic>`` change. Lanes, connections, link indexes, phase states, program
 ids, and offsets stay byte-for-byte. ``night_peak.add.xml`` is copied to
-``night_peak_3s.add.xml`` without editing WAUT switch times.
+``night_peak_3s.add.xml`` with one switch change: program 1 starts at 54900 s
+instead of 55000 s. The return to program 0 stays at 75000 s.
 
 Rules:
 - a phase whose state contains ``y`` or ``Y`` gets duration 3;
@@ -35,6 +36,9 @@ OUTPUT_ADDITIONAL = CODE_ROOT / "night_peak_3s.add.xml"
 AUDIT_JSON = CODE_ROOT / "tls_3s_audit.json"
 AUDIT_MD = CODE_ROOT / "tls_3s_audit.md"
 AUDIT_CSV = CODE_ROOT / "tls_3s_phase_durations.csv"
+# 54900 = 3 * 18300. The source file keeps 55000, which is 1 second off that grid.
+PEAK_SWITCH_FROM = "55000"
+PEAK_SWITCH_TO = "54900"
 
 PHASE_RE = re.compile(
     r'^(?P<indent>\s*)<phase duration="(?P<duration>[^"]+)"'
@@ -266,10 +270,25 @@ def transform(text: str) -> tuple[str, dict]:
     return "".join(out_lines), audit
 
 
-def additional_notes(path: Path) -> dict:
-    text = path.read_text(encoding="utf-8")
+def write_peak_additional(source_text: str) -> str:
+    """Copy the source WAUT file and move the evening-peak start to 54900 s."""
+    if "<tlLogic" in source_text or "<phase " in source_text:
+        raise SystemExit(f"{SOURCE_ADDITIONAL} contains tlLogic or phase definitions")
+    old = f'<wautSwitch time="{PEAK_SWITCH_FROM}" to="1"/>'
+    new = f'<wautSwitch time="{PEAK_SWITCH_TO}" to="1"/>'
+    if source_text.count(old) != 1:
+        raise SystemExit(f"expected exactly one switch {old}")
+    if source_text.count('<wautSwitch time="75000" to="0"/>') != 1:
+        raise SystemExit("expected the 75000 s switch back to program 0 to stay unchanged")
+    updated = source_text.replace(old, new, 1)
+    if updated.count(new) != 1 or PEAK_SWITCH_FROM in updated:
+        raise SystemExit("peak switch rewrite did not apply cleanly")
+    return updated
+
+
+def additional_notes(text: str) -> dict:
     if "<tlLogic" in text or "<phase " in text:
-        raise SystemExit(f"{path} contains tlLogic or phase definitions; refusing to copy blindly")
+        raise SystemExit("additional file contains tlLogic or phase definitions")
     switches = re.findall(r'<wautSwitch\b([^>]*)/>', text)
     parsed = []
     for raw in switches:
@@ -305,12 +324,16 @@ def additional_notes(path: Path) -> dict:
         "switches": parsed,
         "commented_or_live_junction_ids": junction_ids,
         "live_junction_ids": live_ids,
-        "switch_times_changed": False,
+        "switch_times_changed": True,
+        "source_switch_to_program_1": PEAK_SWITCH_FROM,
+        "output_switch_to_program_1": PEAK_SWITCH_TO,
         "note": (
-            "WAUT switch times are unchanged. time=55000 is 1 second off the "
-            "global 3-second grid (55000 = 3*18333+1). time=75000 is aligned. "
-            "The file comment mentions 58000/76000, but the loaded switches are "
-            "55000 and 75000, which is what the completed 29-day run used."
+            f"The 3-second additional file starts program 1 at {PEAK_SWITCH_TO} s. "
+            f"night_peak.add.xml still starts it at {PEAK_SWITCH_FROM} s. "
+            f"{PEAK_SWITCH_TO} = 3*18300, so the evening-peak switch is on the "
+            "3-second grid. The switch back to program 0 stays at 75000 s. "
+            "The file comment still mentions 58000/76000; the loaded switches "
+            f"are {PEAK_SWITCH_TO} and 75000."
         ),
     }
 
@@ -323,7 +346,8 @@ def render_markdown(audit: dict, extra: dict) -> str:
         "# Xuancheng26 TLS 3-second phase audit",
         "",
         "Phase durations were rewritten from the completed 29-day network.",
-        "States, program ids, offsets, lanes, connections, and WAUT switch times were not changed.",
+        "States, program ids, offsets, lanes, and connections were not changed.",
+        f"The evening-peak WAUT switch moves from {PEAK_SWITCH_FROM} s to {PEAK_SWITCH_TO} s.",
         "",
         "## Summary",
         "",
@@ -373,9 +397,6 @@ def render_markdown(audit: dict, extra: dict) -> str:
         [
             "",
             extra["note"],
-            "",
-            "Program 1 phase boundaries therefore are not guaranteed to sit on the global 3-second grid after 55000 s.",
-            "The switch times were left unchanged.",
             "",
             "## Program cycles",
             "",
@@ -532,7 +553,8 @@ def main() -> int:
     if audit["tls_count"] == 0 or audit["phase_count"] == 0:
         raise SystemExit("no tlLogic phases parsed")
     validate_pair(source, output, audit)
-    extra = additional_notes(SOURCE_ADDITIONAL)
+    additional_text = write_peak_additional(SOURCE_ADDITIONAL.read_text(encoding="utf-8"))
+    extra = additional_notes(additional_text)
     program1 = {item["id"] for item in audit["programs"] if item["program_id"] == "1"}
     live = set(extra["live_junction_ids"])
     extra["program1_ids"] = sorted(program1)
@@ -548,12 +570,14 @@ def main() -> int:
     tmp_net = OUTPUT_NET.with_suffix(OUTPUT_NET.suffix + ".tmp")
     tmp_net.write_text(output, encoding="utf-8")
     os.replace(tmp_net, OUTPUT_NET)
-    shutil.copyfile(SOURCE_ADDITIONAL, OUTPUT_ADDITIONAL)
+    tmp_additional = OUTPUT_ADDITIONAL.with_suffix(OUTPUT_ADDITIONAL.suffix + ".tmp")
+    tmp_additional.write_text(additional_text, encoding="utf-8")
+    os.replace(tmp_additional, OUTPUT_ADDITIONAL)
     audit["output_net_sha256"] = sha256(OUTPUT_NET)
     audit["source_additional_sha256"] = sha256(SOURCE_ADDITIONAL)
     audit["output_additional_sha256"] = sha256(OUTPUT_ADDITIONAL)
-    if audit["source_additional_sha256"] != audit["output_additional_sha256"]:
-        raise SystemExit("night_peak copy hash mismatch")
+    if OUTPUT_ADDITIONAL.read_text(encoding="utf-8") != additional_text:
+        raise SystemExit("night_peak_3s.add.xml does not match the peak-switch rewrite")
     # Drop per-phase state from the JSON programs? Keep them; the file is small.
     AUDIT_JSON.write_text(json.dumps(audit, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     AUDIT_MD.write_text(render_markdown(audit, extra), encoding="utf-8")

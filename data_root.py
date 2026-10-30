@@ -137,11 +137,23 @@ def xuancheng26_training_results_root() -> Path:
     return data_root() / "xuancheng26" / "training_results"
 
 
+def xuancheng26_training_results_3s_root() -> Path:
+    """Checkpoints for the Xuancheng26 3-second-phase batch."""
+    return data_root() / "xuancheng26" / "training_results_3s"
+
+
 def xuancheng26_model_results_dir(model_name: str) -> Path:
     name = str(model_name).strip()
     if name not in MODEL_NAMES:
         raise PathLayoutError(f"unknown model name for training_results: {model_name!r}")
     return xuancheng26_training_results_root() / name
+
+
+def xuancheng26_model_results_3s_dir(model_name: str) -> Path:
+    name = str(model_name).strip()
+    if name not in MODEL_NAMES:
+        raise PathLayoutError(f"unknown model name for training_results: {model_name!r}")
+    return xuancheng26_training_results_3s_root() / name
 
 
 def rate_training_results_dir(model_name: str, rate: str, seed: int = 42) -> Path:
@@ -232,24 +244,30 @@ def assert_training_results_output(path: Path, *, model_name: str | None = None)
     allowed_roots = (
         training_results_root().resolve(),
         xuancheng26_training_results_root().resolve(),
+        xuancheng26_training_results_3s_root().resolve(),
     )
     if not any(resolved == root or _is_relative_to(resolved, root) for root in allowed_roots):
         raise PathLayoutError(
-            f"training output must be under {allowed_roots[0]} or {allowed_roots[1]}, got {resolved}"
+            "training output must be under "
+            f"{allowed_roots[0]}, {allowed_roots[1]}, or {allowed_roots[2]}, got {resolved}"
         )
     if _is_relative_to(resolved, training_data_root()):
         raise PathLayoutError(f"training_results must not be inside training_data: {resolved}")
-    xuancheng_data = data_root() / "xuancheng26" / "training_data"
-    if xuancheng_data.exists() and _is_relative_to(resolved, xuancheng_data.resolve()):
-        raise PathLayoutError(f"training_results must not be inside training_data: {resolved}")
+    for prepared in (
+        data_root() / "xuancheng26" / "training_data",
+        data_root() / "xuancheng26" / "training_data_3s",
+    ):
+        if prepared.exists() and _is_relative_to(resolved, prepared.resolve()):
+            raise PathLayoutError(f"training_results must not be inside training_data: {resolved}")
     if model_name is not None:
         expected_dirs = (
             model_training_results_dir(model_name).resolve(),
             xuancheng26_model_results_dir(model_name).resolve(),
+            xuancheng26_model_results_3s_dir(model_name).resolve(),
         )
         if not any(resolved == expected or _is_relative_to(resolved, expected) for expected in expected_dirs):
             raise PathLayoutError(
-                f"{model_name} output must be under {expected_dirs[0]} or {expected_dirs[1]}, got {resolved}"
+                f"{model_name} output must be under {expected_dirs[0]}, {expected_dirs[1]}, or {expected_dirs[2]}, got {resolved}"
             )
     return resolved
 
