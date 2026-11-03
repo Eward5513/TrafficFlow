@@ -45,7 +45,7 @@ def validate_model_shapes(model: STFGNN, *, batch_size: int, seq_len: int) -> di
     x = torch.zeros(batch_size, seq_len, model.num_nodes, model.input_channels, device=device)
     with torch.no_grad():
         y, trace = model(x, return_trace=True)
-    expected = (batch_size, model.horizon, model.num_nodes, 1)
+    expected = (batch_size, model.horizon, model.num_nodes, model.output_channels)
     if tuple(y.shape) != expected:
         raise ReimplementationError(f"model output {tuple(y.shape)} != {expected}")
     if int(trace["final_time_length"]) != int(model.final_time_length):

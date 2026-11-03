@@ -22,6 +22,7 @@ from threadpoolctl import threadpool_limits
 N_CLUSTERS = 50
 N_ESTIMATORS = 50
 FEATURE_COUNT = 7
+ALL_INPUT_WIDTH = 10
 
 
 class ModelError(RuntimeError):
@@ -164,17 +165,48 @@ class RFEstimator:
         self.cluster_status = np.array(["unfit"] * self.n_clusters, dtype="U32")
         self.kmeans_iterations = -1
         self.kmeans_inertia = float("nan")
+        self.feature_count = FEATURE_COUNT
+        self.flow_column = 0
+        self.feature_names = (
+            "fcd_flow",
+            "fcd_average_speed",
+            "normalized_speed",
+            "num_lanes",
+            "speed_limit",
+            "weekday",
+            "hour",
+        )
 
-    def fit(self, features: np.ndarray, target: np.ndarray) -> "RFEstimator":
+    def fit(
+        self,
+        features: np.ndarray,
+        target: np.ndarray,
+        *,
+        flow_column: int = 0,
+        feature_names: tuple[str, ...] | list[str] | None = None,
+    ) -> "RFEstimator":
         features = np.asarray(features)
         target = np.asarray(target, dtype=np.float64)
-        if features.ndim != 2 or features.shape[1] != FEATURE_COUNT:
-            raise ModelError(f"expected [N, 7] features, got {features.shape}")
+        width = int(features.shape[1]) if features.ndim == 2 else -1
+        column = int(flow_column)
+        if features.ndim != 2 or width not in {FEATURE_COUNT, ALL_INPUT_WIDTH}:
+            raise ModelError(f"expected [N, 7] or [N, 10] features, got {features.shape}")
+        if column < 0 or column >= width:
+            raise ModelError(f"flow column {column} is outside 0..{width - 1}")
+        if feature_names is None:
+            names = tuple(f"f{index}" for index in range(width))
+        else:
+            names = tuple(str(name) for name in feature_names)
+            if len(names) != width:
+                raise ModelError(f"feature_names length {len(names)} != {width}")
         if target.shape != (features.shape[0],):
             raise ModelError("target length does not match the feature rows")
         if features.shape[0] < self.n_clusters:
             raise ModelError("fewer samples than clusters")
-        print(f"scaler+kmeans start rows={features.shape[0]}", flush=True)
+        self.feature_count = width
+        self.flow_column = column
+        self.feature_names = names
+        print(f"scaler+kmeans start rows={features.shape[0]} width={width} flow_column={column}", flush=True)
         scaled = self.scaler.fit_transform(features)
         with threadpool_limits(limits=max(self.n_jobs, 1)):
             labels = self.kmeans.fit_predict(scaled)
@@ -184,7 +216,7 @@ class RFEstimator:
             f"kmeans done iterations={self.kmeans_iterations} inertia={self.kmeans_inertia:.6g}",
             flush=True,
         )
-        flow = np.asarray(features[:, 0], dtype=np.float64)
+        flow = np.asarray(features[:, column], dtype=np.float64)
         for cluster_id in range(self.n_clusters):
             selected = labels == cluster_id
             fitted = fit_lad(flow[selected], target[selected])
@@ -200,15 +232,15 @@ class RFEstimator:
 
     def predict(self, features: np.ndarray) -> np.ndarray:
         features = np.asarray(features)
-        if features.ndim != 2 or features.shape[1] != FEATURE_COUNT:
-            raise ModelError(f"expected [N, 7] features, got {features.shape}")
+        if features.ndim != 2 or int(features.shape[1]) != int(self.feature_count):
+            raise ModelError(f"expected [N, {self.feature_count}] features, got {features.shape}")
         scaled = self.scaler.transform(features)
         probabilities = self.forest.predict_proba(scaled)
         aligned = align_probabilities(probabilities, self.forest.classes_, self.n_clusters)
         row_sums = aligned.sum(axis=1)
         if float(np.max(np.abs(row_sums - 1.0))) > 1e-5:
             raise ModelError("soft-vote probabilities are not normalised")
-        flow = np.asarray(features[:, 0], dtype=np.float64)
+        flow = np.asarray(features[:, int(self.flow_column)], dtype=np.float64)
         return aligned @ self.alpha + flow * (aligned @ self.beta)
 
     def save(self, directory: Path) -> None:
@@ -237,16 +269,10 @@ class RFEstimator:
             "forest_params": self.forest.get_params(deep=False),
             "scaler_mean": self.scaler.mean_.tolist(),
             "scaler_scale": self.scaler.scale_.tolist(),
-            "feature_names": [
-                "fcd_flow",
-                "fcd_average_speed",
-                "normalized_speed",
-                "num_lanes",
-                "speed_limit",
-                "weekday",
-                "hour",
-            ],
-            "regression": "univariate LAD, alpha + beta * raw fcd_flow",
+            "feature_count": self.feature_count,
+            "flow_column": self.flow_column,
+            "feature_names": list(self.feature_names),
+            "regression": f"univariate LAD, alpha + beta * raw {self.feature_names[self.flow_column]}",
             "voting": "soft",
         }
         (directory / "model_config.json").write_text(
@@ -267,12 +293,18 @@ class RFEstimator:
         estimator.scaler = joblib.load(directory / "scaler.joblib")
         estimator.kmeans = joblib.load(directory / "kmeans.joblib")
         estimator.forest = joblib.load(directory / "random_forest.joblib")
+        names = config.get("feature_names")
+        estimator.feature_names = tuple(str(name) for name in names) if names else estimator.feature_names
+        estimator.feature_count = int(config.get("feature_count", len(estimator.feature_names)))
+        estimator.flow_column = int(config.get("flow_column", 0))
         with np.load(directory / "regression_coefficients.npz", allow_pickle=False) as payload:
             estimator.alpha = np.asarray(payload["alpha"], dtype=np.float64)
             estimator.beta = np.asarray(payload["beta"], dtype=np.float64)
             estimator.cluster_samples = np.asarray(payload["cluster_sample_counts"], dtype=np.int64)
             estimator.cluster_mae = np.asarray(payload["cluster_training_mae"], dtype=np.float64)
             estimator.cluster_status = np.asarray(payload["optimizer_status"]).astype(str)
+        if estimator.flow_column < 0 or estimator.flow_column >= estimator.feature_count:
+            raise ModelError(f"saved flow column {estimator.flow_column} does not match width {estimator.feature_count}")
         return estimator
 
 
@@ -337,4 +369,30 @@ def self_test() -> None:
         raise ModelError("reloaded model predictions differ")
     if estimator.forest.criterion != "gini" or estimator.forest.n_estimators != 8:
         raise ModelError("forest settings drifted")
+
+    wide = rng.normal(size=(120, ALL_INPUT_WIDTH))
+    wide[:, 3] = rng.integers(0, 6, size=120)
+    wide_y = 2.0 + 1.25 * wide[:, 3]
+    wide_names = tuple(f"f{index}" for index in range(ALL_INPUT_WIDTH))
+    wide_model = RFEstimator(n_clusters=3, n_estimators=4, seed=7, n_jobs=1, kmeans_n_init=2)
+    wide_model.fit(wide, wide_y, flow_column=3, feature_names=wide_names)
+    base = wide_model.predict(wide[:5])
+    changed = wide[:5].copy()
+    changed[:, 3] += 20.0
+    if np.allclose(base, wide_model.predict(changed)):
+        raise ModelError("flow column 3 did not affect the wide prediction")
+    try:
+        wide_model.fit(wide, wide_y, flow_column=ALL_INPUT_WIDTH)
+    except ModelError:
+        pass
+    else:
+        raise ModelError("out-of-range flow column was accepted")
+    with TemporaryDirectory(prefix="rf_selftest_wide_") as temporary:
+        directory = Path(temporary)
+        wide_model.save(directory)
+        restored = RFEstimator.load(directory)
+    if restored.flow_column != 3 or restored.feature_count != ALL_INPUT_WIDTH:
+        raise ModelError("wide model did not keep its flow column")
+    if not np.allclose(restored.predict(wide[:5]), base, atol=1e-8):
+        raise ModelError("wide reload predictions differ")
     print("rf self-test PASS", flush=True)

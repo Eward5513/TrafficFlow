@@ -12,9 +12,12 @@ from pathlib import Path
 import numpy as np
 
 from reimplementation.RF.data_loader import (
-    FEATURE_NAMES,
     N_TARGETS,
+    STATES,
     XuanchengRFData,
+    feature_names_for,
+    flow_column_for,
+    validate_task,
 )
 from reimplementation.RF.metrics import regression_report
 from reimplementation.RF.model import N_CLUSTERS, N_ESTIMATORS, RFEstimator
@@ -59,26 +62,57 @@ def _assert_output(path: Path) -> None:
         raise RunError(f"refusing to write into the git tree: {resolved}")
 
 
-def _complete(rate_dir: Path) -> bool:
-    required = [
-        rate_dir / "model" / "scaler.joblib",
-        rate_dir / "model" / "kmeans.joblib",
-        rate_dir / "model" / "random_forest.joblib",
-        rate_dir / "model" / "regression_coefficients.npz",
-        rate_dir / "metrics" / "test_metrics.json",
-        rate_dir / "metrics" / "validation_metrics.json",
+def _model_files(model_dir: Path) -> list[Path]:
+    return [
+        model_dir / "scaler.joblib",
+        model_dir / "kmeans.joblib",
+        model_dir / "random_forest.joblib",
+        model_dir / "regression_coefficients.npz",
     ]
+
+
+def _complete(rate_dir: Path, multi: bool) -> bool:
+    model_dirs = [rate_dir / "model" / state for state in STATES] if multi else [rate_dir / "model"]
+    required = [path for model_dir in model_dirs for path in _model_files(model_dir)]
+    required.extend(
+        [
+            rate_dir / "metrics" / "test_metrics.json",
+            rate_dir / "metrics" / "validation_metrics.json",
+        ]
+    )
     return all(path.is_file() and path.stat().st_size > 0 for path in required)
 
 
-def _score_split(estimator: RFEstimator, data: XuanchengRFData, penetration: str, days: list[str], prediction_dir: Path | None) -> dict:
+def _predict_day(estimators: list[tuple[str, RFEstimator]], cube: np.ndarray, multi: bool) -> np.ndarray:
+    flat = cube.reshape(-1, cube.shape[-1])
+    channels = [
+        estimator.predict(flat).reshape(N_TARGETS, cube.shape[1])
+        for _name, estimator in estimators
+    ]
+    if not multi:
+        return channels[0]
+    return np.stack(channels, axis=-1)
+
+
+def _score_split(
+    estimators: list[tuple[str, RFEstimator]],
+    data: XuanchengRFData,
+    penetration: str,
+    days: list[str],
+    prediction_dir: Path | None,
+    *,
+    input_type: str,
+    target_type: str,
+) -> dict:
+    multi = target_type == "all"
     predictions = []
     targets = []
+    state_predictions = {name: [] for name, _estimator in estimators} if multi else {}
+    state_targets = {name: [] for name, _estimator in estimators} if multi else {}
     daily = []
     for day_name in days:
-        cube, target = data.day_cube(penetration, day_name)
-        flat = cube.reshape(-1, cube.shape[-1])
-        predicted = estimator.predict(flat).reshape(N_TARGETS, cube.shape[1])
+        cube, target = data.day_cube(penetration, day_name, input_type, target_type)
+        predicted = _predict_day(estimators, cube, multi)
         report = regression_report(predicted, target)
         daily.append(
             {
@@ -92,21 +126,35 @@ def _score_split(estimator: RFEstimator, data: XuanchengRFData, penetration: str
         )
         if prediction_dir is not None:
             prediction_dir.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(
-                prediction_dir / f"{day_name}.npz",
-                prediction=predicted.astype(np.float32),
-                ground_truth=target.astype(np.float32),
-                edge_ids=np.asarray(data.edges, dtype="U32"),
-                time_bins=np.arange(11, 11 + N_TARGETS, dtype=np.int16),
-                date=np.asarray(day_name),
-                penetration=np.asarray(penetration),
-                supervised_bin_start=np.int16(11),
-                supervised_bin_end_inclusive=np.int16(287),
-            )
+            payload = {
+                "prediction": predicted.astype(np.float32),
+                "ground_truth": np.asarray(target, dtype=np.float32),
+                "edge_ids": np.asarray(data.edges, dtype="U32"),
+                "time_bins": np.arange(11, 11 + N_TARGETS, dtype=np.int16),
+                "date": np.asarray(day_name),
+                "penetration": np.asarray(penetration),
+                "input_type": np.asarray(input_type),
+                "target_type": np.asarray(target_type),
+                "supervised_bin_start": np.int16(11),
+                "supervised_bin_end_inclusive": np.int16(287),
+            }
+            if multi:
+                payload["states"] = np.asarray(STATES, dtype="U32")
+            np.savez_compressed(prediction_dir / f"{day_name}.npz", **payload)
         predictions.append(predicted.reshape(-1))
-        targets.append(target.reshape(-1))
+        targets.append(np.asarray(target).reshape(-1))
+        if multi:
+            for index, (name, _estimator) in enumerate(estimators):
+                state_predictions[name].append(predicted[:, :, index].reshape(-1))
+                state_targets[name].append(np.asarray(target)[:, :, index].reshape(-1))
     overall = regression_report(np.concatenate(predictions), np.concatenate(targets))
-    return {"overall": overall, "daily": daily}
+    result = {"overall": overall, "daily": daily}
+    if multi:
+        result["states"] = {
+            name: regression_report(np.concatenate(state_predictions[name]), np.concatenate(state_targets[name]))
+            for name, _estimator in estimators
+        }
+    return result
 
 
 def _active_mask(target: np.ndarray, n_days: int, n_edges: int) -> np.ndarray:
@@ -114,9 +162,113 @@ def _active_mask(target: np.ndarray, n_days: int, n_edges: int) -> np.ndarray:
     return summed > 0
 
 
+def _task_types(config: dict) -> tuple[str, str, bool, list[str]]:
+    input_type = str(config.get("input_type", "inflow"))
+    target_type = str(config.get("target_type", "inflow"))
+    validate_task(input_type, target_type)
+    multi = target_type == "all"
+    heads = list(STATES) if multi else [target_type]
+    return input_type, target_type, multi, heads
+
+
+def _fit_head(
+    data: XuanchengRFData,
+    config: dict,
+    penetration: str,
+    input_type: str,
+    state: str,
+    model_dir: Path,
+    log,
+) -> tuple[RFEstimator, np.ndarray, float]:
+    load_started = time.perf_counter()
+    features, target = data.stack(penetration, data.days["train"], input_type, state)
+    names = feature_names_for(input_type)
+    column = flow_column_for(input_type, state)
+    log(
+        f"{state} train matrix {features.shape} flow_column={column} "
+        f"load_seconds={time.perf_counter() - load_started:.1f} rss_mib={_rss_mib()}"
+    )
+    estimator = RFEstimator(
+        n_clusters=int(config["n_clusters"]),
+        n_estimators=int(config["n_estimators"]),
+        seed=int(config["seed"]),
+        n_jobs=int(config["n_jobs"]),
+        kmeans_n_init=int(config["kmeans_n_init"]),
+    )
+    fit_started = time.perf_counter()
+    estimator.fit(features, target, flow_column=column, feature_names=names)
+    fit_seconds = time.perf_counter() - fit_started
+    active = _active_mask(target, len(data.days["train"]), len(data.edges))
+    estimator.save(model_dir)
+    counts = estimator.cluster_samples
+    log(
+        f"{state} fit_seconds={fit_seconds:.1f} kmeans_iter={estimator.kmeans_iterations} "
+        f"inertia={estimator.kmeans_inertia:.6g} "
+        f"cluster_min={int(counts.min())} cluster_max={int(counts.max())} "
+        f"empty={int(np.count_nonzero(counts == 0))} rss_mib={_rss_mib()}"
+    )
+    for cluster_id, status in enumerate(estimator.cluster_status):
+        if status not in {"converged", "duplicate_flow", "expanded_bounds"}:
+            log(f"{state} cluster {cluster_id} status={status} samples={int(counts[cluster_id])}")
+    del features
+    return estimator, active, fit_seconds
+
+
+def _active_report(rate_dir: Path, days: list[str], multi: bool):
+    active_path = rate_dir / "active_edge_mask.npy"
+    if not active_path.is_file():
+        return None
+    mask = np.load(active_path)
+    pieces_p = []
+    pieces_t = []
+    per_state = {state: ([], []) for state in STATES} if multi else None
+    for day_name in days:
+        with np.load(rate_dir / "predictions" / f"{day_name}.npz") as payload:
+            prediction = payload["prediction"]
+            truth = payload["ground_truth"]
+        if multi:
+            for index, state in enumerate(STATES):
+                per_state[state][0].append(prediction[:, mask[index], index].reshape(-1))
+                per_state[state][1].append(truth[:, mask[index], index].reshape(-1))
+                pieces_p.append(per_state[state][0][-1])
+                pieces_t.append(per_state[state][1][-1])
+        else:
+            pieces_p.append(prediction[:, mask].reshape(-1))
+            pieces_t.append(truth[:, mask].reshape(-1))
+    report = regression_report(np.concatenate(pieces_p), np.concatenate(pieces_t))
+    if not multi:
+        return report
+    return {
+        "overall": report,
+        "states": {
+            state: regression_report(np.concatenate(values[0]), np.concatenate(values[1]))
+            for state, values in per_state.items()
+        },
+    }
+
+
+def _confirm_reload(
+    estimators: list[tuple[str, RFEstimator]],
+    data: XuanchengRFData,
+    penetration: str,
+    sample_day: str,
+    rate_dir: Path,
+    input_type: str,
+    target_type: str,
+) -> None:
+    multi = target_type == "all"
+    cube, _target = data.day_cube(penetration, sample_day, input_type, target_type)
+    recomputed = _predict_day(estimators, cube, multi)
+    with np.load(rate_dir / "predictions" / f"{sample_day}.npz") as payload:
+        saved = payload["prediction"]
+    if not np.allclose(recomputed, saved, atol=1e-4, rtol=1e-4):
+        raise RunError("reloaded model does not reproduce the saved test prediction")
+
+
 def train_penetration(config: dict) -> None:
     penetration = str(config["penetration"])
-    rate_dir = Path(config["run_dir"]) / penetration
+    input_type, target_type, multi, heads = _task_types(config)
+    rate_dir = Path(config["rate_dir"]) if config.get("rate_dir") else Path(config["run_dir"]) / penetration
     _assert_output(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
     log_path = rate_dir / "logs" / "train.log"
@@ -124,121 +276,116 @@ def train_penetration(config: dict) -> None:
     started = time.perf_counter()
     with log_path.open("a", encoding="utf-8") as handle:
         def log(message: str) -> None:
-            _log(handle, f"[{penetration}] {message}")
+            _log(handle, f"[{penetration} {input_type}->{target_type}] {message}")
 
         try:
             log(f"start pid={os.getpid()} ppid={os.getppid()} n_jobs={config['n_jobs']}")
-            if _complete(rate_dir) and not config["force"] and not config["evaluate_only"]:
+            if _complete(rate_dir, multi) and not config["force"] and not config["evaluate_only"]:
                 log("SKIP existing model and test metrics")
                 _write_status(rate_dir, "SKIP", time.perf_counter() - started, "")
                 return
             data = XuanchengRFData()
-            model_dir = rate_dir / "model"
             if config["evaluate_only"]:
-                if not _complete(rate_dir) and not (model_dir / "random_forest.joblib").is_file():
+                if not _complete(rate_dir, multi):
                     raise RunError("evaluate-only found no saved model")
-                estimator = RFEstimator.load(model_dir)
+                estimators = [
+                    (state, RFEstimator.load(rate_dir / "model" / state if multi else rate_dir / "model"))
+                    for state in heads
+                ]
                 log("loaded saved model")
             else:
-                load_started = time.perf_counter()
-                features, target = data.stack(penetration, data.days["train"])
-                log(
-                    f"train matrix {features.shape} dtype={features.dtype} "
-                    f"load_seconds={time.perf_counter() - load_started:.1f} rss_mib={_rss_mib()}"
-                )
-                estimator = RFEstimator(
-                    n_clusters=int(config["n_clusters"]),
-                    n_estimators=int(config["n_estimators"]),
-                    seed=int(config["seed"]),
-                    n_jobs=int(config["n_jobs"]),
-                    kmeans_n_init=int(config["kmeans_n_init"]),
-                )
-                fit_started = time.perf_counter()
-                estimator.fit(features, target)
-                fit_seconds = time.perf_counter() - fit_started
-                active = _active_mask(target, len(data.days["train"]), len(data.edges))
-                np.save(rate_dir / "active_edge_mask.npy", active)
-                estimator.save(model_dir)
-                counts = estimator.cluster_samples
-                log(
-                    f"fit_seconds={fit_seconds:.1f} kmeans_iter={estimator.kmeans_iterations} "
-                    f"inertia={estimator.kmeans_inertia:.6g} "
-                    f"cluster_min={int(counts.min())} cluster_max={int(counts.max())} "
-                    f"empty={int(np.count_nonzero(counts == 0))} rss_mib={_rss_mib()}"
-                )
-                for cluster_id, status in enumerate(estimator.cluster_status):
-                    if status not in {"converged", "duplicate_flow", "expanded_bounds"}:
-                        log(f"cluster {cluster_id} status={status} samples={int(counts[cluster_id])}")
-                del features, target
+                estimators = []
+                masks = []
+                fit_seconds = {}
+                names = feature_names_for(input_type)
+                for state in heads:
+                    model_dir = rate_dir / "model" / state if multi else rate_dir / "model"
+                    estimator, active, seconds = _fit_head(
+                        data, config, penetration, input_type, state, model_dir, log
+                    )
+                    estimators.append((state, estimator))
+                    masks.append(active)
+                    fit_seconds[state] = seconds
+                active_mask = np.stack(masks, axis=0) if multi else masks[0]
+                np.save(rate_dir / "active_edge_mask.npy", active_mask)
                 config_payload = {
                     "penetration": penetration,
-                    "feature_names": list(FEATURE_NAMES),
+                    "input_type": input_type,
+                    "target_type": target_type,
+                    "feature_names": list(names),
+                    "flow_columns": {
+                        state: flow_column_for(input_type, state) for state in heads
+                    },
                     "seed": int(config["seed"]),
                     "n_clusters": int(config["n_clusters"]),
                     "n_estimators": int(config["n_estimators"]),
                     "kmeans_n_init": int(config["kmeans_n_init"]),
-                    "fit_seconds": fit_seconds,
+                    "fit_seconds": fit_seconds if multi else fit_seconds[heads[0]],
                     "train_days": data.days["train"],
                     "adaptations": [
-                        "K-Means uses the same seven features as the forest; the paper does not specify this.",
+                        "K-Means uses every model feature; the paper does not specify this.",
                         "StandardScaler is fit on the training penetration only.",
                         "Functional class is replaced by num_lanes.",
                         "Capacity is replaced by the SUMO speed limit in km/h.",
                         "Supervised bins are 11..287.",
-                        "The target is the current 5-minute full entry count.",
+                        "The univariate line uses the partial count of the target state.",
+                        "all output is four independent single-state estimators.",
                     ],
                 }
                 (rate_dir / "config.json").write_text(
                     json.dumps(config_payload, indent=2) + "\n",
                     encoding="utf-8",
                 )
+            score_kwargs = {"input_type": input_type, "target_type": target_type}
             log("validation")
-            validation = _score_split(estimator, data, penetration, data.days["validation"], None)
+            validation = _score_split(
+                estimators, data, penetration, data.days["validation"], None, **score_kwargs
+            )
             log(
                 f"val mae={validation['overall']['mae']:.6f} "
                 f"rmse={validation['overall']['rmse']:.6f} bias={validation['overall']['bias']:.6f}"
             )
             log("test")
             test = _score_split(
-                estimator,
+                estimators,
                 data,
                 penetration,
                 data.days["test"],
                 rate_dir / "predictions",
+                **score_kwargs,
             )
-            active_path = rate_dir / "active_edge_mask.npy"
-            active_report = None
-            if active_path.is_file():
-                mask = np.load(active_path)
-                pieces_p = []
-                pieces_t = []
-                for day_name in data.days["test"]:
-                    with np.load(rate_dir / "predictions" / f"{day_name}.npz") as payload:
-                        pieces_p.append(payload["prediction"][:, mask])
-                        pieces_t.append(payload["ground_truth"][:, mask])
-                active_report = regression_report(np.concatenate(pieces_p), np.concatenate(pieces_t))
+            active_report = _active_report(rate_dir, data.days["test"], multi)
             metrics_dir = rate_dir / "metrics"
             metrics_dir.mkdir(parents=True, exist_ok=True)
             _write_daily(metrics_dir / "validation_daily.csv", validation["daily"])
             _write_daily(metrics_dir / "test_daily.csv", test["daily"])
+            validation_payload = dict(validation["overall"])
+            if "states" in validation:
+                validation_payload["states"] = validation["states"]
             (metrics_dir / "validation_metrics.json").write_text(
-                json.dumps(validation["overall"], indent=2) + "\n",
+                json.dumps(validation_payload, indent=2) + "\n",
                 encoding="utf-8",
             )
             test_payload = {"overall": test["overall"], "active_edges_train_defined": active_report}
+            if "states" in test:
+                test_payload["states"] = test["states"]
             (metrics_dir / "test_metrics.json").write_text(
                 json.dumps(test_payload, indent=2) + "\n",
                 encoding="utf-8",
             )
-            # Reload and confirm one saved test day reproduces.
-            restored = RFEstimator.load(model_dir)
-            sample_day = data.days["test"][0]
-            cube, _target = data.day_cube(penetration, sample_day)
-            recomputed = restored.predict(cube.reshape(-1, cube.shape[-1])).reshape(cube.shape[0], cube.shape[1])
-            with np.load(rate_dir / "predictions" / f"{sample_day}.npz") as payload:
-                saved = payload["prediction"]
-            if not np.allclose(recomputed, saved, atol=1e-4, rtol=1e-4):
-                raise RunError("reloaded model does not reproduce the saved test prediction")
+            reloaded = [
+                (state, RFEstimator.load(rate_dir / "model" / state if multi else rate_dir / "model"))
+                for state in heads
+            ]
+            _confirm_reload(
+                reloaded,
+                data,
+                penetration,
+                data.days["test"][0],
+                rate_dir,
+                input_type,
+                target_type,
+            )
             elapsed = time.perf_counter() - started
             log(f"PASS seconds={elapsed:.1f} test_mae={test['overall']['mae']:.6f} rss_mib={_rss_mib()}")
             _write_status(rate_dir, "PASS", elapsed, "")

@@ -43,11 +43,12 @@ def _parse_rates(values: list[str] | None) -> list[str]:
     return rates
 
 
-def _run_dir(run_id: str | None) -> Path:
-    now = datetime.now().astimezone()
-    folder = RESULTS_ROOT / now.strftime("%Y_%m_%d")
-    name = run_id or now.strftime("%H%M%S")
-    path = folder / name
+def _pair_dir(input_type: str, target_type: str, run_id: str | None) -> Path:
+    from reimplementation.RF.data_loader import task_dir_name
+
+    path = RESULTS_ROOT / task_dir_name(input_type, target_type)
+    if run_id:
+        path = path / run_id
     resolved = path.resolve()
     if RESULTS_ROOT.resolve() not in resolved.parents:
         raise SystemExit(f"run directory escapes {RESULTS_ROOT}: {resolved}")
@@ -148,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--training-root", type=Path, default=DEFAULT_TRAINING_ROOT)
     parser.add_argument("--results-root", type=Path, default=RESULTS_ROOT)
     parser.add_argument("--penetrations", nargs="*", default=None)
+    parser.add_argument("--input-type", default="inflow")
+    parser.add_argument("--target-type", default="inflow")
     parser.add_argument("--parallel-models", type=int, default=7)
     parser.add_argument("--n-jobs-per-model", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
@@ -173,15 +176,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.n_clusters < 2:
         parser.error("--n-clusters must be >= 2")
     rates = _parse_rates(args.penetrations)
-    from reimplementation.RF.data_loader import XuanchengRFData
+    from reimplementation.RF.data_loader import XuanchengRFData, validate_task
 
-    _log("auditing RF inputs")
-    audit = XuanchengRFData().audit()
+    try:
+        validate_task(args.input_type, args.target_type)
+    except Exception as exc:
+        raise SystemExit(str(exc)) from exc
+
+    _log(f"auditing RF inputs {args.input_type}->{args.target_type}")
+    audit = XuanchengRFData().audit(args.input_type, args.target_type)
     _log(f"audit {audit}")
     if args.audit_only:
         return 0
 
-    run_dir = _run_dir(args.run_id)
+    run_dir = _pair_dir(args.input_type, args.target_type, args.run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     experiment = {
         "model": "RF",
@@ -195,15 +203,19 @@ def main(argv: list[str] | None = None) -> int:
             "voting": "soft",
         },
         "project_adaptations": [
-            "K-Means features are the same seven inputs; the paper does not state this.",
+            "K-Means features are the model inputs; a single state has seven and all input has ten.",
             "StandardScaler is fit on each penetration's training rows.",
             "Functional class is replaced by number of lanes.",
             "Capacity is replaced by the SUMO speed limit.",
             "Base speed is the SUMO speed limit.",
             "Samples are 5-minute directed-edge counts, supervised bins 11-287.",
             "Split is the existing Xuancheng26 20/4/5 manifest.",
-            "The target is the current full entry count, not a future bin.",
+            "The target is the current full count of the selected state, not a future bin.",
+            "all input adds the other three partial counts as clustering features.",
+            "all output fits four independent estimators.",
         ],
+        "input_type": args.input_type,
+        "target_type": args.target_type,
         "penetrations": rates,
         "seed": args.seed,
         "parallel_models": min(args.parallel_models, len(rates)),
@@ -220,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     workers = min(args.parallel_models, len(rates))
     _log(
         f"run_dir={run_dir} training_root={training_root} results_root={RESULTS_ROOT} "
-        f"rates={rates} clusters={args.n_clusters} "
+        f"task={args.input_type}->{args.target_type} rates={rates} clusters={args.n_clusters} "
         f"parallel={workers} n_jobs={args.n_jobs_per_model}"
     )
     started = time.perf_counter()
@@ -230,6 +242,9 @@ def main(argv: list[str] | None = None) -> int:
         config = {
             "penetration": rate,
             "run_dir": str(run_dir),
+            "rate_dir": str(run_dir / rate),
+            "input_type": args.input_type,
+            "target_type": args.target_type,
             "seed": args.seed,
             "n_jobs": args.n_jobs_per_model,
             "n_clusters": args.n_clusters,

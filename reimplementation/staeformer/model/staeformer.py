@@ -1,9 +1,11 @@
 """STAEformer ported from ``reference/STAEformer/model/STAEformer.py``.
 
-Public flow is ``[B, T, V, 1]``. Official PeMS configs use ``input_dim=3`` so
-time-of-day fraction and day-of-week integers are concatenated for
-``input_proj``, then also used as embedding indices. Spatio-temporal adaptive
-embedding is ``[T, V, D_a]``, shared across samples, not a graph encoding.
+Public flow is ``[B, T, V, C]`` with ``C=1`` for one traffic state and ``C=4``
+for ``all``. Time-of-day fraction and day-of-week integers are concatenated
+after those traffic channels, so ``input_proj`` sees width 3 or 6 and maps
+either width to ``input_embedding_dim``. Later attention uses ``model_dim``.
+Spatio-temporal adaptive embedding is ``[T, V, D_a]``, shared across samples,
+not a graph encoding.
 """
 
 from __future__ import annotations
@@ -378,6 +380,23 @@ class STAEformer(nn.Module):
             )
         return assembled
 
+    def _fallback_time_values(self, features: torch.Tensor) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Read time channels that sit after the traffic stack.
+
+        Official one-state input is ``[flow, tod, dow]``, so the indices stay
+        1 and 2. Four-state input is ``[inflow, outflow, accumulation_start,
+        accumulation_end, tod, dow]``.
+        """
+        width = int(features.size(-1))
+        extras = int(self.tod_embedding_dim > 0) + int(self.dow_embedding_dim > 0)
+        traffic = width - extras
+        if traffic < 1:
+            raise ReimplementationError(f"input width {width} cannot hold {extras} time channels")
+        tod_values = features[..., traffic] if self.tod_embedding_dim > 0 else None
+        dow_at = traffic + int(self.tod_embedding_dim > 0)
+        dow_values = features[..., dow_at] if self.dow_embedding_dim > 0 else None
+        return tod_values, dow_values
+
     def forward(
         self,
         x: torch.Tensor,
@@ -402,8 +421,7 @@ class STAEformer(nn.Module):
             raise ReimplementationError("x contains NaN or inf")
 
         features_in = self._assemble_input_channels(x, time_of_day_index, day_of_week_index)
-        tod_values = features_in[..., 1] if self.input_dim >= 2 else None
-        dow_values = features_in[..., 2] if self.input_dim >= 3 else None
+        tod_values, dow_values = self._fallback_time_values(features_in)
 
         feature_emb = self.input_proj(features_in)
         pieces = [feature_emb]
@@ -416,7 +434,7 @@ class STAEformer(nn.Module):
                 )
             else:
                 if tod_values is None:
-                    raise ReimplementationError("time-of-day embedding needs channel 1 or integer indices")
+                    raise ReimplementationError("time-of-day embedding needs its time channel or integer indices")
                 tod_idx = (tod_values * self.steps_per_day).long()
                 if bool((tod_idx < 0).any() or (tod_idx >= self.steps_per_day).any()):
                     raise ReimplementationError("time-of-day index is outside [0, 288)")
@@ -427,7 +445,7 @@ class STAEformer(nn.Module):
                 dow_idx = self._expand_index(day_of_week_index, batch, time, "day_of_week", 7)
             else:
                 if dow_values is None:
-                    raise ReimplementationError("day-of-week embedding needs channel 2 or integer indices")
+                    raise ReimplementationError("day-of-week embedding needs its time channel or integer indices")
                 dow_idx = dow_values.long()
                 if bool((dow_idx < 0).any() or (dow_idx >= 7).any()):
                     raise ReimplementationError("day-of-week index is outside [0, 7)")

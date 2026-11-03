@@ -509,8 +509,8 @@ def run_single_rate(
             num_nodes=int(config["num_nodes"]),
             n_his=int(config.get("in_steps", 12)),
             output_steps=1,
-            input_channels=1,
-            output_channels=1,
+            input_channels=int(config.get("input_channels", 1)),
+            output_channels=int(config.get("output_channels", 1)),
         )
         model.load_state_dict(payload["model_state_dict"])
         optimizer.load_state_dict(payload["optimizer_state_dict"])

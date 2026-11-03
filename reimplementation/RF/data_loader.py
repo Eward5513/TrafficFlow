@@ -3,6 +3,11 @@
 Each sample is one directed edge and one 5-minute bin. Bins 0-10 are kept
 out of the supervised matrices so the evaluated slots match the existing
 sequence models: target bins 11 through 287.
+
+A single state keeps the original seven columns, with that state's partial
+count in column 0. ``all`` input stacks the four partial counts first, then
+the same six context columns. The label is the matching full-count CSV, or
+four full counts when the target is ``all``.
 """
 
 from __future__ import annotations
@@ -29,8 +34,8 @@ N_EDGES = 1406
 N_BINS = 288
 TARGET_START = 11
 N_TARGETS = N_BINS - TARGET_START
-FEATURE_NAMES = (
-    "fcd_flow",
+STATES = ("inflow", "outflow", "accumulation_start", "accumulation_end")
+CONTEXT_FEATURES = (
     "fcd_average_speed",
     "normalized_speed",
     "num_lanes",
@@ -38,10 +43,55 @@ FEATURE_NAMES = (
     "weekday",
     "hour",
 )
+FEATURE_NAMES = ("fcd_flow",) + CONTEXT_FEATURES
+SINGLE_INPUT_WIDTH = len(FEATURE_NAMES)
+ALL_INPUT_WIDTH = len(STATES) + len(CONTEXT_FEATURES)
 
 
 class DataError(RuntimeError):
     """Xuancheng26 RF inputs are missing or inconsistent."""
+
+
+def observed_feature_name(state: str) -> str:
+    if state == "inflow":
+        return "fcd_flow"
+    if state not in STATES:
+        raise DataError(f"unknown state {state}")
+    return f"fcd_{state}"
+
+
+def validate_task(input_type: str, target_type: str) -> None:
+    """Accept one state predicting itself, or ``all`` predicting one state or all four."""
+    if input_type not in STATES and input_type != "all":
+        raise DataError(f"unknown input_type {input_type}")
+    if target_type not in STATES and target_type != "all":
+        raise DataError(f"unknown target_type {target_type}")
+    if input_type != "all" and input_type != target_type:
+        raise DataError(f"single-state input {input_type} must predict itself, not {target_type}")
+    if target_type == "all" and input_type != "all":
+        raise DataError("target all requires input all")
+
+
+def feature_names_for(input_type: str) -> tuple[str, ...]:
+    validate_task(input_type, input_type if input_type != "all" else "inflow")
+    if input_type == "all":
+        return tuple(observed_feature_name(state) for state in STATES) + CONTEXT_FEATURES
+    return (observed_feature_name(input_type),) + CONTEXT_FEATURES
+
+
+def flow_column_for(input_type: str, target_type: str) -> int:
+    """Column of the partial count used by the univariate line."""
+    validate_task(input_type, target_type)
+    if target_type == "all":
+        raise DataError("all output has one flow column per state")
+    if input_type != "all":
+        return 0
+    return STATES.index(target_type)
+
+
+def task_dir_name(input_type: str, target_type: str) -> str:
+    validate_task(input_type, target_type)
+    return f"in_{input_type}__out_{target_type}"
 
 
 def _header(path: Path) -> list[str]:
@@ -155,47 +205,91 @@ class XuanchengRFData:
     def all_days(self) -> list[str]:
         return [day for split in ("train", "validation", "test") for day in self.days[split]]
 
-    def audit(self) -> dict[str, int]:
+    def audit(self, input_type: str = "inflow", target_type: str = "inflow") -> dict[str, int]:
+        validate_task(input_type, target_type)
         checked = 0
         for rate in RATES:
             for day_name in self.all_days():
-                self.day_cube(rate, day_name)
+                self.day_cube(rate, day_name, input_type, target_type)
                 checked += 1
-        return {"rate_days_checked": checked, "edges": len(self.edges)}
+        return {
+            "rate_days_checked": checked,
+            "edges": len(self.edges),
+            "input_type": input_type,
+            "target_type": target_type,
+            "feature_width": len(feature_names_for(input_type)),
+        }
 
-    def day_cube(self, penetration: str, day_name: str) -> tuple[np.ndarray, np.ndarray]:
-        """Return X[277, 1406, 7] and y[277, 1406] for supervised bins 11..287."""
-        inflow_path = PARTIAL_ROOT / penetration / day_name / "inflow.csv"
-        label_path = FULL_ROOT / day_name / "inflow.csv"
+    def day_cube(
+        self,
+        penetration: str,
+        day_name: str,
+        input_type: str = "inflow",
+        target_type: str = "inflow",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return supervised bins 11..287.
+
+        Single input is ``X[277, 1406, 7]`` and one ``y[277, 1406]``. ``all``
+        input is ``X[277, 1406, 10]``. ``all`` target adds a last axis of four
+        full counts in ``STATES`` order.
+        """
+        validate_task(input_type, target_type)
+        names = feature_names_for(input_type)
         speed_path = RF_ROOT / penetration / f"{day_name}.npz"
-        for path in (inflow_path, label_path, speed_path):
+        if not speed_path.is_file():
+            raise DataError(f"missing {speed_path}")
+        observed_states = STATES if input_type == "all" else (input_type,)
+        label_states = STATES if target_type == "all" else (target_type,)
+        observed = []
+        for state in observed_states:
+            path = PARTIAL_ROOT / penetration / day_name / f"{state}.csv"
             if not path.is_file():
                 raise DataError(f"missing {path}")
-        flow = _load_flow(inflow_path, self.edges)
-        label = _load_flow(label_path, self.edges)
+            observed.append(_load_flow(path, self.edges))
+        labels = []
+        for state in label_states:
+            path = FULL_ROOT / day_name / f"{state}.csv"
+            if not path.is_file():
+                raise DataError(f"missing {path}")
+            labels.append(_load_flow(path, self.edges))
         speed, norm = _load_speed(speed_path, self.edges, penetration, day_name, self.speed_limit)
         sl = slice(TARGET_START, N_BINS)
-        features = np.empty((N_TARGETS, N_EDGES, len(FEATURE_NAMES)), dtype=np.float32)
-        features[:, :, 0] = flow[sl]
-        features[:, :, 1] = speed[sl]
-        features[:, :, 2] = norm[sl]
-        features[:, :, 3] = self.lanes
-        features[:, :, 4] = self.speed_limit
-        features[:, :, 5] = np.float32(self.weekday[day_name])
+        features = np.empty((N_TARGETS, N_EDGES, len(names)), dtype=np.float32)
+        for index, flow in enumerate(observed):
+            features[:, :, index] = flow[sl]
+        context = len(observed)
+        features[:, :, context] = speed[sl]
+        features[:, :, context + 1] = norm[sl]
+        features[:, :, context + 2] = self.lanes
+        features[:, :, context + 3] = self.speed_limit
+        features[:, :, context + 4] = np.float32(self.weekday[day_name])
         hours = (np.arange(TARGET_START, N_BINS, dtype=np.int32) // 12).astype(np.float32)
-        features[:, :, 6] = hours[:, None]
-        target = label[sl]
+        features[:, :, context + 5] = hours[:, None]
+        if target_type == "all":
+            target = np.stack([label[sl] for label in labels], axis=-1).astype(np.float32, copy=False)
+        else:
+            target = labels[0][sl]
         if not np.isfinite(features).all() or not np.isfinite(target).all():
             raise DataError(f"{penetration} {day_name} produced a non-finite sample")
         return features, target
 
-    def stack(self, penetration: str, days: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    def stack(
+        self,
+        penetration: str,
+        days: list[str],
+        input_type: str = "inflow",
+        target_type: str = "inflow",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if target_type == "all":
+            raise DataError("stack one target state; all-to-all fits each state separately")
+        validate_task(input_type, target_type)
+        width = len(feature_names_for(input_type))
         features = []
         targets = []
         for day_name in days:
-            cube, target = self.day_cube(penetration, day_name)
-            features.append(cube.reshape(-1, len(FEATURE_NAMES)))
-            targets.append(target.reshape(-1))
+            cube, target = self.day_cube(penetration, day_name, input_type, target_type)
+            features.append(cube.reshape(-1, width))
+            targets.append(np.asarray(target).reshape(-1))
         return np.concatenate(features, axis=0), np.concatenate(targets, axis=0)
 
 

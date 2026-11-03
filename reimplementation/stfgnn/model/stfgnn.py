@@ -21,7 +21,7 @@ CODE_VERSION = "0.1.0"
 
 
 class STFGNN(nn.Module):
-    """Public tensors ``[B, T, V, C]``. Output ``[B, 1, V, 1]``."""
+    """Public tensors ``[B, T, V, C]``. Output ``[B, horizon, V, C_out]``."""
 
     def __init__(
         self,

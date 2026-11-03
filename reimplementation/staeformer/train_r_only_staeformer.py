@@ -164,8 +164,31 @@ def _assert_task(config: dict[str, Any]) -> None:
         "calendar",
     }:
         raise ReimplementationError(f"unknown day_of_week_source {source}")
-    if int(config.get("input_dim", 3)) != 3:
-        raise ReimplementationError("official PeMS04 input_dim is 3; refusing to change feature projection width")
+    _assert_input_width(config)
+
+
+def _assert_input_width(config: dict[str, Any]) -> None:
+    """Keep the PeMS04 time channels, and let the traffic stack be 1 or 4.
+
+    ``input_proj`` is ``Linear(input_dim, input_embedding_dim)``. A single
+    state stays at official width 3. ``all`` is four traffic channels plus the
+    same time-of-day and day-of-week channels. Attention width stays
+    ``model_dim``.
+    """
+    input_type = str(config.get("input_type") or "inflow")
+    if input_type == "all":
+        traffic = 4
+    elif input_type in {"inflow", "outflow", "accumulation_start", "accumulation_end"}:
+        traffic = 1
+    else:
+        raise ReimplementationError(f"unknown input_type {input_type}")
+    extras = int(int(config.get("tod_embedding_dim", 0)) > 0) + int(int(config.get("dow_embedding_dim", 0)) > 0)
+    expected = traffic + extras
+    actual = int(config.get("input_dim", expected))
+    if actual != expected:
+        raise ReimplementationError(
+            f"input_dim {actual} != {traffic} traffic channels + {extras} time channels"
+        )
 
 
 def source_manifest(root: Path) -> dict[str, str]:

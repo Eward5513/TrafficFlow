@@ -26,7 +26,9 @@ ocr -> analysis/road_network + analysis/matching
  \-> reimplementation/stid
  \-> reimplementation/staeformer
  \-> reimplementation/s2s_gcn_lstm
-```
+ \-> reimplementation/tlast
+ \-> MSTT (new backbone, not a baseline port; see MSTT/AGENTS.md)
+ ```
 
 Read `README.md` for the conceptual workflow, but treat the current scripts and
 their constants as authoritative when documentation and code disagree.

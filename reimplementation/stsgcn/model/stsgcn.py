@@ -23,7 +23,7 @@ CODE_VERSION = "0.1.0"
 
 
 class STSGCN(nn.Module):
-    """R-only STSGCN. Public tensors are ``[B, T, V, C]``. Output is ``[B, 1, V, 1]``."""
+    """R-only STSGCN. Public tensors are ``[B, T, V, C]``. Output is ``[B, horizon, V, C_out]``."""
 
     def __init__(
         self,

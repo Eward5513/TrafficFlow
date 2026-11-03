@@ -1,7 +1,8 @@
-"""Assemble official 3-channel STAEformer history from R-only NPZ metadata.
+"""Assemble STAEformer history from R-only NPZ metadata.
 
-Channel 0 is already-normalized flow. Channel 1 is ``slot / 288``. Channel 2
-is the integer weekday 0..6 (official PeMS npz encoding). NPZ files are not
+One traffic state is the official 3-channel layout: normalized flow, then
+``slot / 288``, then integer weekday 0..6. ``all`` keeps every traffic
+channel first and appends those same two time channels. NPZ files are not
 rewritten. Integer TOD/DOW indices are returned separately for embedding
 lookup so float32 ``slot/288*288`` truncation cannot skip an embedding row.
 """

@@ -1,0 +1,5 @@
+"""Xuancheng26 TLAST reimplementation."""
+
+from reimplementation.tlast.model.tlast import CODE_VERSION, MODEL_NAME, TLAST
+
+__all__ = ["CODE_VERSION", "MODEL_NAME", "TLAST"]

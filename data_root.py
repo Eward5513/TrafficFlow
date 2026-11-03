@@ -27,6 +27,8 @@ MODEL_NAMES = (
     "stid",
     "staeformer",
     "s2s_gcn_lstm",
+    "tlast",
+    "MSTT",
 )
 
 # Old in-repo relative locations -> current disk layout. Existing files stay put.
@@ -179,6 +181,11 @@ def node_table() -> Path:
 def xuancheng26_training_root() -> Path:
     """Xuancheng26 prepared windows, graph tables, and model configs."""
     return data_root() / "xuancheng26" / "training_data"
+
+
+def xuancheng26_training_3s_root() -> Path:
+    """Xuancheng26 3-second-phase package with the four-state windows."""
+    return data_root() / "xuancheng26" / "training_data_3s"
 
 
 def xuancheng26_model_config(model_name: str) -> Path:
