@@ -141,4 +141,95 @@ python3 generate_r_level_full_flow.py \
   --workers 29
 ```
 
+## 3. M-level（Movement）数据
+
+M-level 只做 3 秒批次，三个脚本默认就读 `fcd_data_3s/`、`xuancheng_tls_3s.net.xml`、`night_peak_3s.add.xml`，写到 `training_data_3s/`。它们不改 R-level 文件，只读 `graph/r_graph.npz` 做映射核对，读 R-level 全量总数写进 summary 作对照。
+
+`fcd_data_3s/` 的 FCD 头写的是 `xuancheng_tls_tmp.net.xml` 和 `fcd_tmp/`。这两个路网文件逐字节相同，lane id 可以直接对上。
+
+一个 Movement 是 `(junction, incoming real edge, outgoing real edge)`，ID 为 `M::<junction>::<in>::<out>`。同一三元组的所有 lane-level `<connection>` 合成一个节点，车道号、via 车道（含内部路口的第二段 via）、`tl`、`linkIndex`、`state` 按 lane connection 全部保留。节点按入边、再按出边在 R 图里的序号排序。`m_i -> m_j` 当且仅当 `out(m_i) == in(m_j)`，中间道路就是这条共享 edge，`free_flow_travel_time = 车道平均长度 / 车道平均限速`。
+
+```text
+training_data_3s/
+├── graph/
+│   ├── m_graph.npz              movement_ids、adjacency(uint8)、edge_index[2,E]、via 车道映射、graph_signature
+│   ├── m_nodes.csv  m_transitions.csv
+│   ├── m_signal_connections.csv m_signal_programs.json   TLS/linkIndex 多对多、各 program 的逐相位灯色、WAUT
+│   └── m_graph_audit.json  m_graph_audit.md              度、连通分量、via 覆盖、信号覆盖、与 r_graph 的逐对核对
+├── full_flow/m-level/YYYY_MM_DD/{inflow,outflow,accumulation_start,accumulation_end}.csv
+│   ├── generation_summary.csv   day_stats/YYYY_MM_DD.json   anomalies/YYYY_MM_DD.csv
+├── partial_flow/m-level/p05..p70/YYYY_MM_DD/  同样四个文件
+│   └── generation_summary.csv   day_stats/YYYY_MM_DD.json
+├── full_flow/mr-level/YYYY_MM_DD/  partial_flow/mr-level/p05..p70/YYYY_MM_DD/   MR 拼接数据，见第 5 节
+```
+
+CSV 与 R-level 同格式：`time_bin,start_time,<movement_id...>`，288 行，每格 300 秒，列顺序就是 `m_graph.npz` 的节点顺序。四个量都描述 Movement 连接区（via 车道），不是入边或出边上的存量：
+
+- `inflow`：车辆第一次出现在该 Movement 的任一 via 车道。
+- `outflow`：车辆随后第一次出现在该 Movement 的出边。
+- `accumulation_*`：窗口起点/终点仍在连接区内的车辆数，`N_end = N_start + inflow - outflow`，`N_start[0] = 0`。
+
+FCD 是 1 秒一帧，短连接常被整段跳过。车辆从入边直接出现在出边时，在出现时刻同一格记 1 次 inflow 和 1 次 outflow，不产生存量（`direct_transitions`）。一天结束仍在连接区的车，只有 tripinfo 的 `arrivalLane` 正是该 Movement 出边时，才在 arrival 时刻记 outflow（`final_exits`），否则留作 `unresolved`，不补 outflow。驶出到非预期道路（多为 teleport）记 outflow 并计入 `mismatched_exits`，从非预期道路驶入记 `mismatched_entries`，两条不相连的真实道路之间的跳变不分配 Movement，记 `unmapped_transitions`。逐条记录在 `anomalies/`。
+
+部分观测只扫一遍 FCD，只跟踪 p70 车辆，每个事件写入车辆所属最低档及以上各档。逐 Movement、逐时间片检查 `partial <= full`（流量和存量）以及 p05 到 p70 的嵌套。
+
+```bash
+cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
+
+python3 generate_m_graph.py
+python3 generate_m_level_full_flow.py --workers 29 --skip-complete
+python3 generate_m_level_partial_flow.py --workers 29 --skip-complete
+```
+
+`--skip-complete` 只在 `day_stats` 为 PASS、图签名一致、四个文件重读后守恒都通过时跳过该日。全量和部分观测不要同时跑，部分观测依赖全量结果。
+
+## 4. MR（R-M 异构）图
+
+`generate_mr_graph.py` 只读 `graph/r_graph.npz`、`graph/m_graph.npz`（及 `m_nodes.csv`、`m_transitions.csv`、`r_nodes.csv` 做一致性核对），不读路网和 FCD，不改任何已有文件。默认 `--training-root` 是 `training_data_3s/`；已有 `mr_*` 输出时需加 `--force`。所有文件先写临时文件，重读校验通过后才原子替换；校验失败时只写审计文件，退出码 2。
+
+节点：先全部 R 节点（`R::<edge_id>`，global 0..R-1，顺序同 `r_graph` 的 `edge_ids`），再全部 M 节点（沿用 `M::<junction>::<in>::<out>`，global R..R+M-1，顺序同 `m_graph` 的 `movement_ids`）。`node_types`：0=R，1=M。`node_local_indices[g]` 就是该节点在 R-level 或 M-level 流量 CSV 中 `time_bin,start_time` 之后的列序号，列名等于 `node_original_ids[g]`；脚本逐个核对了 `full_flow/` 和 `partial_flow/` 下两级、全部渗透率、全部日期的四个 CSV 表头。R 与 M 的流量/存量物理含义不同，这里不合并。
+
+四类有向关系分别编码，按 0..3 连续存放（`relation_edge_offsets`），不做无向化、不加自环：
+
+| 编码 | 关系 | 来源 | 3 秒批次边数 |
+| --- | --- | --- | --- |
+| 0 | R->R | `r_graph` 邻接，行优先 | 3877 |
+| 1 | M->M | `m_graph` 的 `edge_index`，顺序不变，可直接对齐 `transition_*` 数组 | 10551 |
+| 2 | R->M | Movement 的入边 -> Movement，每个 Movement 恰一条 | 3877 |
+| 3 | M->R | Movement -> 出边，每个 Movement 恰一条 | 3877 |
+
+```text
+training_data_3s/graph/
+├── mr_graph.npz         node_ids/node_types/node_local_indices/node_original_ids、edge_index[2,E]、edge_type[E]、
+│                        edge_type_names、r_r/m_m/r_m/m_r_edge_index（均为 global index）、
+│                        edge_road_global_index/edge_movement_global_index（每条边关联的道路和 Movement，无则 -1）、
+│                        m_incoming/outgoing_r_global_index、r_downstream_m_ptr/_global_index、r_upstream_m_ptr/_global_index（CSR）、
+│                        输入 sha256、m_graph_signature、graph_signature；无需 allow_pickle
+├── mr_nodes.csv         每个节点的 global/local index、流量层级与列、M 的路口/入边/出边、R 的上下游 Movement、按关系拆分的入/出度
+├── mr_edges.csv         每条边的 source/target（global、ID、类型、local）、relation_type/name、关联道路与 Movement
+└── mr_graph_audit.json  mr_graph_audit.md   逐边核对、两跳 R->M->R 与 R->R 一致性、度、孤立点、弱/强连通分量、流量列映射
+```
+
+`mr_edges.csv` 的关联字段：R->R 记对应的唯一 Movement（A->B），M->M 记共享的中间道路，R->M / M->R 同时记道路和 Movement。原 M 图的孤立 Movement 在 MR 图中经 R->M、M->R 接通，属正常现象。
+
+## 5. MR-level 四状态数据
+
+MR-level 不产生新的物理量：每天、每个状态把 R-level 矩阵（1406 列道路）和 M-level 矩阵（3877 列 Movement）按 `mr_graph.npz` 的节点顺序直接按列拼接，`X_MR[t] = [X_R[t], X_M[t]]`。不读 FCD，不重新抽样，不归一化。CSV 仍是 `time_bin,start_time,<node_ids...>`，288 行，5283 个数据列，列名就是 MR 的 `node_ids`：前 1406 列 `R::<edge_id>`，后 3877 列 Movement ID。
+
+R 列是道路存量，M 列是连接区（via 车道）存量，两者不能相加，也不要求 R、M 总量相等。守恒只逐节点检查：`N_end = N_start + inflow - outflow`、`N_start[t+1] = N_end[t]`、`N_start[0] = 0`、无负值。
+
+| 脚本 | 输入 | 输出 |
+| --- | --- | --- |
+| `generate_mr_level_full_flow.py` | `full_flow/r-level/<date>/`、`full_flow/m-level/<date>/` | `full_flow/mr-level/<date>/` |
+| `generate_mr_level_partial_flow.py` | `partial_flow/<rate>/<date>/`（R-level，没有 `r-level` 中间层）、`partial_flow/m-level/<rate>/<date>/`、`full_flow/mr-level/` | `partial_flow/mr-level/<rate>/<date>/` |
+
+两个脚本都默认读 `training_data_3s/`，一天一个 worker（默认 `--workers 29`）；部分观测的 worker 依次处理当天七档。每个文件先写 `.tmp` 再原子替换，然后严格重读：表头、0..287 时间片、非负整数，R 块和 M 块与输入逐格相等，逐节点守恒。部分观测还逐格检查四个状态的 `partial <= full MR` 和 `p05 <= p10 <= ... <= p70`。`--skip-complete` 只跳过 `day_stats` 为 PASS、图签名一致、且重读后与输入逐格相等的天（或档）；`--dates` 可单独重跑失败的日期。summary 由主进程汇总到各自的 `generation_summary.csv`（全量 29 行，部分观测 29×7 行）。`mr_level_metadata.json` 记录节点数、索引范围、两类节点四个状态的含义、列顺序（附表头 sha256）、数据来源、时间粒度和渗透率定义。全量要先跑完，部分观测依赖它。
+
+```bash
+cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
+python3 generate_mr_graph.py --training-root /data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s
+python3 generate_mr_level_full_flow.py --training-root /data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s --workers 29 --skip-complete
+python3 generate_mr_level_partial_flow.py --training-root /data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s --workers 29 --skip-complete
+```
+
 原来那一批的训练结果在 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results/`。3 秒这批的配置把 `output_root` 指到 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/`，`run_all_models_training.py` 也读 `training_data_3s` 并写到这个新目录。

@@ -1,0 +1,82 @@
+{
+  "processed_runs": 126,
+  "expected_runs": 126,
+  "anomalies": [],
+  "node_order_sha256": "71e8097ef61e82cb49c4ab83345de840312788125a1100443ac403a9a81240fe",
+  "label_sha256": "7d6ac372e02ef2fa602ec2e49bc7c97603960cd8a0ae159dfdddbb5c7476ac06",
+  "day_slot_hash": "e3f76baf142c4293f81475e7a5277ca7e35f71b30d0712295e4ada8f11f5ead7:d0b4f06d297989255a33359c8d9b8bc37d435c2caec539a413da9363a309dfd5",
+  "groups": {
+    "counts": {
+      "inactive": 266,
+      "low": 380,
+      "medium": 380,
+      "high": 380
+    },
+    "low_max_mean": 5.971600373586015,
+    "mid_max_mean": 19.75186475118001,
+    "inactive_max_mean": 0.0,
+    "node_metric_mismatches": 0
+  },
+  "slots_per_hour": [
+    1,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12
+  ],
+  "published": {
+    "mae": 8.881784197001252e-16,
+    "rmse": 7.72715225139109e-14,
+    "mape_nonzero": 1.4210854715202004e-14,
+    "wape": 7.105427357601002e-15,
+    "zero_fraction": 0.0
+  },
+  "direct_sums": {
+    "mae": 8.881784197001252e-16,
+    "rmse": 7.72715225139109e-14,
+    "mape_nonzero": 1.4210854715202004e-14,
+    "wape": 7.105427357601002e-15,
+    "bias": 1.1102230246251565e-16,
+    "sum_abs_error": 1.862645149230957e-09
+  },
+  "max_day_hour_sum_gap": 1.4551915228366852e-11,
+  "max_group_sum_gap": 2.3283064365386963e-10,
+  "existing_tables": {
+    "day_mae": 4.440892098500626e-16,
+    "day_bias": 1.1102230246251565e-16,
+    "hour_mae": 1.3322676295501878e-15,
+    "hour_bias": 2.220446049250313e-16,
+    "period_mae": 8.881784197001252e-16,
+    "period_bias": 1.1102230246251565e-16,
+    "spatial_mae": 8.881784197001252e-16,
+    "spatial_bias": 4.440892098500626e-16
+  },
+  "identity": {
+    "U_plus_O_minus_abs": 9.094947017729282e-13,
+    "O_minus_U_minus_error": 4.547473508864641e-13,
+    "direction_count": 0.0,
+    "true_abs_gap": 0.0,
+    "negative_true": 0.0
+  },
+  "coverage_element_gap": 0.0,
+  "command": "python3 analysis/model_comparison/scripts/analyze_inflow_time_groups.py"
+}

@@ -20,6 +20,37 @@ DEFAULT_FCD_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/simulation_dat
 DEFAULT_NET_FILE = Path("/home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_rebuilt.net.xml")
 DEFAULT_TRAINING_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data")
 
+# The M-level scripts default to the 3-second signal batch.
+FCD_ROOT_3S = Path("/data5/tzhang174/TrafficFlow/xuancheng26/simulation_data/fcd_data_3s")
+NET_FILE_3S = Path("/home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_3s.net.xml")
+TLS_FILE_3S = Path("/home/tzhang174/TrafficFlow/dataset/xuancheng26/night_peak_3s.add.xml")
+TRAINING_ROOT_3S = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s")
+CODE_ROOT = Path(__file__).resolve().parents[3]
+
+
+def add_3s_path_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    fcd: bool = False,
+    net: bool = False,
+    tls: bool = False,
+) -> None:
+    parser.add_argument("--training-root", type=Path, default=TRAINING_ROOT_3S)
+    if fcd:
+        parser.add_argument("--fcd-root", type=Path, default=FCD_ROOT_3S)
+    if net:
+        parser.add_argument("--net-file", type=Path, default=NET_FILE_3S)
+    if tls:
+        parser.add_argument("--tls-file", type=Path, default=TLS_FILE_3S)
+
+
+def refuse_code_root(path: Path) -> Path:
+    """Generated data never goes into the git checkout."""
+    target = resolved(path)
+    if target == CODE_ROOT or CODE_ROOT in target.parents:
+        raise RuntimeError(f"refusing to write generated data under CODE_ROOT: {target}")
+    return target
+
 
 def add_path_arguments(
     parser: argparse.ArgumentParser,
