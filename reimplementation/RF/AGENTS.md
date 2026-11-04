@@ -8,6 +8,11 @@ and does not use a GPU or the road adjacency.
 - Do not rewrite partial flow, full flow, FCD, or other models' results.
 - Write runs under `<results-root>/in_<input>__out_<target>/<rate>/`.
   Pass `--run-id` to nest a named experiment under that pair directory.
+- After predictions and metrics are saved, delete the fitted scaler, K-Means,
+  forest, and LAD coefficients. Keep `model_config.json` and write
+  `model_discarded.json` with file sizes and those parameters. Keep
+  `predictions/` and `metrics/`. Do not delete a forest that has no test
+  predictions yet.
 - A single state predicts itself from seven features. Column 0 is that
   state's partial count. `all` input uses ten features: the four partial
   counts, then speed, normalized speed, lanes, speed limit, weekday, and hour.

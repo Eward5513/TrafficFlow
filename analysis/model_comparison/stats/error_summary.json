@@ -1,0 +1,14 @@
+{
+  "runs": 407,
+  "aligned": 407,
+  "test_days_match_manifest": 407,
+  "max_mae_abs_diff": 0.0,
+  "max_channel_mae_abs_diff": 0.0,
+  "label_hash_conflicts": [],
+  "phase3s_flat_vs_four_state_inflow": {
+    "pairs": 35,
+    "identical_published_metrics": 35,
+    "identical_pred_raw_sha256": 35
+  },
+  "node_metrics": "/home/tzhang174/TrafficFlow/analysis/model_comparison/tables/node_metrics.csv.gz"
+}

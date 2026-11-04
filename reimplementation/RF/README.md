@@ -11,6 +11,13 @@ A single state keeps the original seven features and must predict itself.
 independent estimators. Results go to
 `<results-root>/in_<input>__out_<target>/<rate>/`.
 
+Once a penetration has written its test predictions and metrics, the run
+deletes the fitted scaler, K-Means, random forest, and LAD coefficients.
+`model_discarded.json` in that penetration directory records the file sizes,
+model settings, cluster centers, and LAD coefficients. Predictions and metrics
+stay. Starting the same task again skips training and removes a forest left
+by an older run. `--evaluate-only` cannot reload a forest that was removed.
+
 ```bash
 python3 reimplementation/RF/run_rf.py --self-test
 python3 reimplementation/RF/run_rf.py --audit-only \

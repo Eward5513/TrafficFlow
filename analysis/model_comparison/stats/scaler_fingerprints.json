@@ -1,0 +1,32 @@
+{
+  "legacy_normalization": {
+    "path": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data/window_data/normalization.json",
+    "exists": true,
+    "sha256": "04e003a8ccd0c672ba8a7e284de1fb30b661f5eadf9af7559efdb93262e55665"
+  },
+  "phase3s_normalization": {
+    "path": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/window_data/normalization.json",
+    "exists": true,
+    "sha256": "4046101b9df7bc9eee098b7be8fc10308c795289078e789cf8cc63ce360c5b93"
+  },
+  "phase3s_state_normalization": {
+    "path": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/window_data/state_normalization.json",
+    "exists": true,
+    "sha256": "062f69664c18cde3b298cb1b434b78015de629663f3abc0389151d294bce397a"
+  },
+  "legacy_split": {
+    "path": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data/window_data/split_manifest.json",
+    "exists": true,
+    "sha256": "e6f68a83aaf185b4e954e558fa89b331ec2bc9e5047d40ea982e0b4e4f8ca50c"
+  },
+  "phase3s_split": {
+    "path": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/window_data/split_manifest.json",
+    "exists": true,
+    "sha256": "e6f68a83aaf185b4e954e558fa89b331ec2bc9e5047d40ea982e0b4e4f8ca50c"
+  },
+  "phase3s_state_manifest": {
+    "path": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/window_data/state_window_manifest.json",
+    "exists": true,
+    "sha256": "a0eea6fc60d8356166e57f89d6b713bf5cf65af6a8bebd56ae5705d941ed9e8d"
+  }
+}

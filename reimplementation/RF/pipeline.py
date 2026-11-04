@@ -62,25 +62,246 @@ def _assert_output(path: Path) -> None:
         raise RunError(f"refusing to write into the git tree: {resolved}")
 
 
+_FITTED_FILENAMES = (
+    "scaler.joblib",
+    "kmeans.joblib",
+    "random_forest.joblib",
+    "regression_coefficients.npz",
+)
+_KEPT_MODEL_FILENAMES = ("model_config.json",)
+
+
 def _model_files(model_dir: Path) -> list[Path]:
-    return [
-        model_dir / "scaler.joblib",
-        model_dir / "kmeans.joblib",
-        model_dir / "random_forest.joblib",
-        model_dir / "regression_coefficients.npz",
-    ]
+    return [model_dir / name for name in _FITTED_FILENAMES]
+
+
+def _model_dirs(rate_dir: Path, multi: bool) -> list[Path]:
+    if multi:
+        return [rate_dir / "model" / state for state in STATES]
+    return [rate_dir / "model"]
+
+
+def _head_dirs(rate_dir: Path, multi: bool, heads: list[str]) -> list[tuple[str, Path]]:
+    if multi:
+        return [(state, rate_dir / "model" / state) for state in heads]
+    return [(heads[0], rate_dir / "model")]
+
+
+def _outputs_ready(rate_dir: Path) -> bool:
+    required = (
+        rate_dir / "metrics" / "test_metrics.json",
+        rate_dir / "metrics" / "validation_metrics.json",
+    )
+    if not all(path.is_file() and path.stat().st_size > 0 for path in required):
+        return False
+    return any((rate_dir / "predictions").glob("*.npz"))
+
+
+def _fitted_complete(rate_dir: Path, multi: bool) -> bool:
+    for model_dir in _model_dirs(rate_dir, multi):
+        for path in _model_files(model_dir):
+            if not path.is_file() or path.stat().st_size <= 0:
+                return False
+    return True
+
+
+def _any_fitted(rate_dir: Path, multi: bool) -> bool:
+    for model_dir in _model_dirs(rate_dir, multi):
+        for path in _model_files(model_dir):
+            if path.is_file() and path.stat().st_size > 0:
+                return True
+    return False
+
+
+def _read_discard_record(rate_dir: Path) -> dict | None:
+    path = rate_dir / "model_discarded.json"
+    if not path.is_file() or path.stat().st_size <= 0:
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not payload.get("discarded"):
+        return None
+    return payload
 
 
 def _complete(rate_dir: Path, multi: bool) -> bool:
-    model_dirs = [rate_dir / "model" / state for state in STATES] if multi else [rate_dir / "model"]
-    required = [path for model_dir in model_dirs for path in _model_files(model_dir)]
-    required.extend(
-        [
-            rate_dir / "metrics" / "test_metrics.json",
-            rate_dir / "metrics" / "validation_metrics.json",
-        ]
-    )
-    return all(path.is_file() and path.stat().st_size > 0 for path in required)
+    """Finished means predictions and metrics exist, with or without the forest."""
+    if not _outputs_ready(rate_dir):
+        return False
+    if _fitted_complete(rate_dir, multi):
+        return True
+    return _read_discard_record(rate_dir) is not None
+
+
+def _json_default(value):
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(type(value).__name__)
+
+
+def _write_payload(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _regression_parameters(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as payload:
+            status = np.asarray(payload["optimizer_status"]).tolist()
+            return {
+                "alpha": np.asarray(payload["alpha"], dtype=float).tolist(),
+                "beta": np.asarray(payload["beta"], dtype=float).tolist(),
+                "cluster_sample_counts": np.asarray(payload["cluster_sample_counts"], dtype=int).tolist(),
+                "cluster_training_mae": np.asarray(payload["cluster_training_mae"], dtype=float).tolist(),
+                "optimizer_status": [str(item) for item in status],
+                "n_clusters": int(payload["n_clusters"]) if "n_clusters" in payload.files else None,
+            }
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _kmeans_parameters(path: Path) -> dict | None:
+    """Record cluster centers only. The joblib also holds every training label."""
+    if not path.is_file():
+        return None
+    try:
+        import joblib
+
+        model = joblib.load(path)
+        payload = {}
+        centers = getattr(model, "cluster_centers_", None)
+        if centers is not None:
+            payload["cluster_centers"] = np.asarray(centers, dtype=float).tolist()
+        n_iter = getattr(model, "n_iter_", None)
+        if n_iter is not None:
+            payload["n_iter"] = int(n_iter)
+        inertia = getattr(model, "inertia_", None)
+        if inertia is not None and np.isfinite(inertia):
+            payload["inertia"] = float(inertia)
+        return payload
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _forest_structure(estimator: RFEstimator) -> dict:
+    trees = list(estimator.forest.estimators_)
+    node_counts = [int(tree.tree_.node_count) for tree in trees]
+    depths = [int(tree.tree_.max_depth) for tree in trees]
+    n_classes = getattr(estimator.forest, "n_classes_", None)
+    if n_classes is not None:
+        n_classes = int(np.max(np.asarray(n_classes)))
+    return {
+        "n_trees": len(node_counts),
+        "n_classes": n_classes,
+        "node_count_sum": int(sum(node_counts)),
+        "node_count_min": int(min(node_counts)) if node_counts else 0,
+        "node_count_max": int(max(node_counts)) if node_counts else 0,
+        "max_depth_max": int(max(depths)) if depths else 0,
+    }
+
+
+def _state_record(state: str, model_dir: Path, estimator: RFEstimator | None) -> dict:
+    files = []
+    total = 0
+    for name in _FITTED_FILENAMES + _KEPT_MODEL_FILENAMES:
+        path = model_dir / name
+        present = path.is_file()
+        size = path.stat().st_size if present else 0
+        files.append(
+            {
+                "name": name,
+                "bytes": size,
+                "removed": name in _FITTED_FILENAMES and present,
+            }
+        )
+        if name in _FITTED_FILENAMES:
+            total += size
+    parameters = None
+    config_path = model_dir / "model_config.json"
+    if config_path.is_file():
+        try:
+            parameters = json.loads(config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            parameters = {"error": str(exc)}
+    record = {
+        "state": state,
+        "directory": str(model_dir),
+        "total_bytes": total,
+        "files": files,
+        "parameters": parameters,
+        "regression": _regression_parameters(model_dir / "regression_coefficients.npz"),
+        "kmeans": _kmeans_parameters(model_dir / "kmeans.joblib"),
+    }
+    if estimator is not None:
+        try:
+            record["forest"] = _forest_structure(estimator)
+        except Exception as exc:
+            record["forest"] = {"error": f"{type(exc).__name__}: {exc}"}
+    return record
+
+
+def _unlink_fitted(model_dir: Path) -> None:
+    for path in _model_files(model_dir):
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+
+
+def _discard_fitted_models(
+    rate_dir: Path,
+    multi: bool,
+    heads: list[str],
+    *,
+    input_type: str,
+    target_type: str,
+    estimators: list[tuple[str, RFEstimator]] | None = None,
+) -> dict:
+    """Write sizes and parameters, then delete the fitted forest files.
+
+    Predictions, metrics, ``config.json``, and ``model_config.json`` stay.
+    A second call only removes files left behind by an interrupted delete.
+    """
+    existing = _read_discard_record(rate_dir)
+    if _any_fitted(rate_dir, multi) and existing is not None and not _fitted_complete(rate_dir, multi):
+        for _state, model_dir in _head_dirs(rate_dir, multi, heads):
+            _unlink_fitted(model_dir)
+        return existing
+    if not _any_fitted(rate_dir, multi):
+        if existing is not None:
+            return existing
+        raise RunError(f"no fitted forest to remove under {rate_dir}")
+    estimator_map = dict(estimators or [])
+    by_state = {}
+    total = 0
+    for state, model_dir in _head_dirs(rate_dir, multi, heads):
+        record = _state_record(state, model_dir, estimator_map.get(state))
+        by_state[state] = record
+        total += int(record["total_bytes"])
+    summary = {
+        "discarded": True,
+        "input_type": input_type,
+        "target_type": target_type,
+        "penetration": rate_dir.name,
+        "total_bytes": total,
+        "kept": [
+            "predictions/",
+            "metrics/",
+            "config.json",
+            "active_edge_mask.npy",
+            "model/model_config.json",
+        ],
+        "states": by_state,
+    }
+    _write_payload(rate_dir / "model_discarded.json", summary)
+    for _state, model_dir in _head_dirs(rate_dir, multi, heads):
+        _unlink_fitted(model_dir)
+    return summary
 
 
 def _predict_day(estimators: list[tuple[str, RFEstimator]], cube: np.ndarray, multi: bool) -> np.ndarray:
@@ -281,12 +502,27 @@ def train_penetration(config: dict) -> None:
         try:
             log(f"start pid={os.getpid()} ppid={os.getppid()} n_jobs={config['n_jobs']}")
             if _complete(rate_dir, multi) and not config["force"] and not config["evaluate_only"]:
-                log("SKIP existing model and test metrics")
+                if _any_fitted(rate_dir, multi):
+                    discarded = _discard_fitted_models(
+                        rate_dir,
+                        multi,
+                        heads,
+                        input_type=input_type,
+                        target_type=target_type,
+                    )
+                    log(
+                        "SKIP removed fitted forest "
+                        f"bytes={discarded['total_bytes']} kept predictions"
+                    )
+                else:
+                    log("SKIP existing predictions; fitted forest already removed")
                 _write_status(rate_dir, "SKIP", time.perf_counter() - started, "")
                 return
             data = XuanchengRFData()
             if config["evaluate_only"]:
-                if not _complete(rate_dir, multi):
+                if not _fitted_complete(rate_dir, multi):
+                    if _read_discard_record(rate_dir) is not None:
+                        raise RunError("evaluate-only found predictions but the fitted forest was removed")
                     raise RunError("evaluate-only found no saved model")
                 estimators = [
                     (state, RFEstimator.load(rate_dir / "model" / state if multi else rate_dir / "model"))
@@ -386,6 +622,15 @@ def train_penetration(config: dict) -> None:
                 input_type,
                 target_type,
             )
+            discarded = _discard_fitted_models(
+                rate_dir,
+                multi,
+                heads,
+                input_type=input_type,
+                target_type=target_type,
+                estimators=estimators,
+            )
+            log(f"removed fitted forest bytes={discarded['total_bytes']} kept predictions")
             elapsed = time.perf_counter() - started
             log(f"PASS seconds={elapsed:.1f} test_mae={test['overall']['mae']:.6f} rss_mib={_rss_mib()}")
             _write_status(rate_dir, "PASS", elapsed, "")

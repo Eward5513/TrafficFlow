@@ -1,0 +1,98 @@
+[
+  {
+    "severity": "low",
+    "scope": "calendar",
+    "issue": "Stored dates are 2023, not 2026-04-01 through 2026-04-29",
+    "detail": "Both split manifests contain 29 dates from 2023-04-01 through 2023-04-30 with 2023-04-09 removed. Test days are 2023-04-26 through 2023-04-30. The analysis uses these stored dates."
+  },
+  {
+    "severity": "low",
+    "scope": "location",
+    "issue": "Four-state results are not under the path named in the request",
+    "detail": "The request names /data5/tzhang174/TrafficFlow/xuancheng26/training_results. That directory holds the earlier single-channel inflow runs. Four-state runs and the 3-second-phase single-channel reruns are under /data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s. The 3-second label is the signal-timing grid (xuancheng_tls_3s), not a 3-second aggregation. Both packages use 288 five-minute bins."
+  },
+  {
+    "severity": "medium",
+    "scope": "four_state",
+    "issue": "Checkpoint selection metric is not the same for every model",
+    "detail": "validation_huber_raw_delta_2, validation_mae_raw_including_zero. Test metrics are still raw-scale MAE/RMSE/MAPE_nonzero/WAPE. A run stays in the comparison even when the selected epoch is not the validation-MAE epoch; those runs are listed separately."
+  },
+  {
+    "severity": "medium",
+    "scope": "checkpoint",
+    "issue": "46 runs selected a checkpoint that is not the validation-MAE minimum",
+    "detail": "tlast four_state all_to_all all->all p10 selected 84 vs MAE-best 87; tlast four_state all_to_all all->all p20 selected 81 vs MAE-best 59; tlast four_state all_to_all all->all p30 selected 81 vs MAE-best 83; tlast four_state all_to_all all->all p40 selected 82 vs MAE-best 79; tlast four_state all_to_all all->all p50 selected 55 vs MAE-best 86; tlast four_state all_to_single all->accumulation_end p05 selected 82 vs MAE-best 78; tlast four_state all_to_single all->accumulation_end p10 selected 77 vs MAE-best 92; tlast four_state all_to_single all->accumulation_end p20 selected 81 vs MAE-best 87; tlast four_state all_to_single all->accumulation_end p30 selected 61 vs MAE-best 78; tlast four_state all_to_single all->accumulation_end p40 selected 48 vs MAE-best 75; tlast four_state all_to_single all->accumulation_end p50 selected 46 vs MAE-best 43; tlast four_state all_to_single all->accumulation_end p70 selected 33 vs MAE-best 27; tlast four_state all_to_single all->accumulation_start p20 selected 63 vs MAE-best 71; tlast four_state all_to_single all->accumulation_start p30 selected 52 vs MAE-best 83; tlast four_state all_to_single all->accumulation_start p40 selected 46 vs MAE-best 73; tlast four_state all_to_single all->accumulation_start p50 selected 40 vs MAE-best 77; tlast four_state all_to_single all->accumulation_start p70 selected 33 vs MAE-best 67; tlast four_state all_to_single all->inflow p10 selected 46 vs MAE-best 67; tlast four_state all_to_single all->inflow p20 selected 61 vs MAE-best 53; tlast four_state all_to_single all->inflow p70 selected 35 vs MAE-best 40; tlast four_state all_to_single all->outflow p20 selected 57 vs MAE-best 56; tlast four_state all_to_single all->outflow p30 selected 77 vs MAE-best 59; tlast four_state all_to_single all->outflow p40 selected 47 vs MAE-best 64; tlast four_state all_to_single all->outflow p50 selected 34 vs MAE-best 48; tlast four_state all_to_single all->outflow p70 selected 34 vs MAE-best 50"
+  },
+  {
+    "severity": "medium",
+    "scope": "four_state",
+    "issue": "Training loss is not uniform",
+    "detail": "normalized_l2, unmasked_huber_raw_delta_2, unmasked_raw_mae. TLAST trains Huber delta=2 on the raw scale. The other five models train unmasked raw MAE. Published test metrics use the shared raw-count definition either way."
+  },
+  {
+    "severity": "medium",
+    "scope": "legacy_single_channel",
+    "issue": "Training loss is not uniform",
+    "detail": "normalized_l2, unmasked_raw_mae. TLAST trains Huber delta=2 on the raw scale. The other five models train unmasked raw MAE. Published test metrics use the shared raw-count definition either way."
+  },
+  {
+    "severity": "medium",
+    "scope": "phase3s_single_channel",
+    "issue": "Training loss is not uniform",
+    "detail": "normalized_l2, unmasked_raw_mae. TLAST trains Huber delta=2 on the raw scale. The other five models train unmasked raw MAE. Published test metrics use the shared raw-count definition either way."
+  },
+  {
+    "severity": "low",
+    "scope": "schedule",
+    "issue": "Epoch budget and early-stopping flags differ by model",
+    "detail": "four_state dcrnn max_epochs=100 early_stopping=True; four_state graph_wavenet max_epochs=100 early_stopping=False; four_state s2s_gcn_lstm max_epochs=200 early_stopping=True; four_state stgcn max_epochs=50 early_stopping=False; four_state stid max_epochs=100 early_stopping=False; four_state tlast max_epochs=100 early_stopping=False; legacy_single_channel dcrnn max_epochs=100 early_stopping=True; legacy_single_channel graph_wavenet max_epochs=100 early_stopping=False; legacy_single_channel s2s_gcn_lstm max_epochs=100 early_stopping=True; legacy_single_channel stgcn max_epochs=50 early_stopping=False; legacy_single_channel stid max_epochs=100 early_stopping=False; phase3s_single_channel dcrnn max_epochs=100 early_stopping=True; phase3s_single_channel graph_wavenet max_epochs=100 early_stopping=False; phase3s_single_channel s2s_gcn_lstm max_epochs=200 early_stopping=True; phase3s_single_channel stgcn max_epochs=50 early_stopping=False; phase3s_single_channel stid max_epochs=100 early_stopping=False"
+  },
+  {
+    "severity": "low",
+    "scope": "early_stop",
+    "issue": "40 compared runs stopped before the epoch budget",
+    "detail": "dcrnn p05 all_to_all all->all epoch 89/100; dcrnn p10 all_to_all all->all epoch 89/100; dcrnn p05 all_to_single all->inflow epoch 74/100; dcrnn p10 all_to_single all->inflow epoch 83/100; dcrnn p20 all_to_single all->inflow epoch 89/100; dcrnn p05 all_to_single all->outflow epoch 74/100; dcrnn p10 all_to_single all->outflow epoch 89/100; dcrnn p20 all_to_single all->outflow epoch 89/100; dcrnn p30 all_to_single all->outflow epoch 89/100; dcrnn p05 single_to_single inflow->inflow epoch 89/100; dcrnn p10 single_to_single inflow->inflow epoch 83/100; dcrnn p20 single_to_single inflow->inflow epoch 89/100; dcrnn p05 single_to_single outflow->outflow epoch 83/100; dcrnn p10 single_to_single outflow->outflow epoch 83/100; dcrnn p20 single_to_single outflow->outflow epoch 93/100; s2s_gcn_lstm p05 all_to_single all->accumulation_end epoch 163/200; s2s_gcn_lstm p10 all_to_single all->accumulation_end epoch 178/200; s2s_gcn_lstm p05 all_to_single all->accumulation_start epoch 163/200; s2s_gcn_lstm p10 all_to_single all->accumulation_start epoch 190/200; s2s_gcn_lstm p30 all_to_single all->accumulation_start epoch 198/200"
+  },
+  {
+    "severity": "medium",
+    "scope": "normalization",
+    "issue": "Resolved configs name a normalization file; four-state training replaces the target scaler at runtime",
+    "detail": "Recorded paths: four_state: /data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/window_data/normalization.json; legacy_single_channel: /data5/tzhang174/TrafficFlow/xuancheng26/training_data/window_data/normalization.json; phase3s_single_channel: /data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/window_data/normalization.json. Single-channel runs use normalization.json (global z-score, input scaler per penetration, shared full-inflow target scaler, fit on training days). Four-state engines call finalize_state_scaler, which reads state_normalization.json and uses one training-set scalar per physical variable. TLAST norm_flag=none is the published architecture switch, not a skipped scaler. Test JSON metrics are computed after denormalization, with MAPE only where the raw target is positive and with negative predictions left unclipped."
+  },
+  {
+    "severity": "medium",
+    "scope": "seed",
+    "issue": "Every compared run uses a single seed",
+    "detail": "Seeds present: 42. No mean or standard deviation across seeds can be reported."
+  },
+  {
+    "severity": "low",
+    "scope": "nonstandard",
+    "issue": "11 seed directories sit outside the comparison protocol",
+    "detail": "/data5/tzhang174/TrafficFlow/xuancheng26/training_results/s2s_gcn_lstm/gaussian_stgcn/p70/seed_42; /data5/tzhang174/TrafficFlow/xuancheng26/training_results/s2s_gcn_lstm/searched_trial018/p05/seed_42; /data5/tzhang174/TrafficFlow/xuancheng26/training_results/s2s_gcn_lstm/searched_trial018/p10/seed_42; /data5/tzhang174/TrafficFlow/xuancheng26/training_results/s2s_gcn_lstm/searched_trial018/p20/seed_42; /data5/tzhang174/TrafficFlow/xuancheng26/training_results/s2s_gcn_lstm/searched_trial018/p30/seed_42; /data5/tzhang174/TrafficFlow/xuancheng26/training_results/s2s_gcn_lstm/searched_trial018/p40/seed_42; /data5/tzhang174/TrafficFlow/xuancheng26/training_results/s2s_gcn_lstm/searched_trial018/p50/seed_42; /data5/tzhang174/TrafficFlow/xuancheng26/training_results/s2s_gcn_lstm/searched_trial018/p70/seed_42; /data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/tlast/_smoke/in_all__out_all/p70/seed_42; /data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/tlast/_smoke/in_all__out_outflow/p70/seed_42; /data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/tlast/_smoke/in_inflow__out_inflow/p70/seed_42"
+  },
+  {
+    "severity": "low",
+    "scope": "labels",
+    "issue": "Within each family, task, output and penetration, zero-target fractions match across models",
+    "detail": "This is consistent with a shared test label. It does not prove the arrays are identical; the prediction pass checks hashes."
+  },
+  {
+    "severity": "high",
+    "scope": "families",
+    "issue": "The two single-channel packages do not share inflow labels with each other",
+    "detail": "STID p05 zero-target fraction legacy=0.3725405816, phase3s flat=0.3726602339, four-state inflow=0.3726602339. Legacy uses the original signal timing. Phase3s and four-state use the regenerated 3-second-phase FCD. Their MAE values are not one leaderboard."
+  },
+  {
+    "severity": "high",
+    "scope": "legacy_single_channel",
+    "issue": "13 expected completed runs are absent from the comparison set",
+    "detail": "s2s_gcn_lstm single_channel_inflow inflow->inflow p05; s2s_gcn_lstm single_channel_inflow inflow->inflow p10; s2s_gcn_lstm single_channel_inflow inflow->inflow p20; s2s_gcn_lstm single_channel_inflow inflow->inflow p30; s2s_gcn_lstm single_channel_inflow inflow->inflow p40; s2s_gcn_lstm single_channel_inflow inflow->inflow p50; tlast single_channel_inflow inflow->inflow p05; tlast single_channel_inflow inflow->inflow p10; tlast single_channel_inflow inflow->inflow p20; tlast single_channel_inflow inflow->inflow p30; tlast single_channel_inflow inflow->inflow p40; tlast single_channel_inflow inflow->inflow p50; tlast single_channel_inflow inflow->inflow p70"
+  },
+  {
+    "severity": "medium",
+    "scope": "phase3s_single_channel",
+    "issue": "7 expected completed runs are absent from the comparison set",
+    "detail": "tlast single_channel_inflow inflow->inflow p05; tlast single_channel_inflow inflow->inflow p10; tlast single_channel_inflow inflow->inflow p20; tlast single_channel_inflow inflow->inflow p30; tlast single_channel_inflow inflow->inflow p40; tlast single_channel_inflow inflow->inflow p50; tlast single_channel_inflow inflow->inflow p70"
+  }
+]

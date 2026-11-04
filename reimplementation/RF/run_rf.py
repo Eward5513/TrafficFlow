@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Train the seven Xuancheng26 RF penetrations in detached worker processes."""
+"""Train the seven Xuancheng26 RF penetrations in detached worker processes.
+
+A finished penetration keeps its predictions and metrics. The fitted scaler,
+K-Means, forest, and LAD coefficients are removed after their sizes and
+parameters are written to ``model_discarded.json``.
+"""
 
 from __future__ import annotations
 
@@ -97,6 +102,10 @@ def _summarize(run_dir: Path, rates: list[str], elapsed: float, workers: int) ->
         fit_seconds = None
         if config_path.is_file():
             fit_seconds = json.loads(config_path.read_text(encoding="utf-8")).get("fit_seconds")
+        discard_path = run_dir / rate / "model_discarded.json"
+        discarded_bytes = None
+        if discard_path.is_file():
+            discarded_bytes = json.loads(discard_path.read_text(encoding="utf-8")).get("total_bytes")
         rows.append(
             {
                 "model": "RF",
@@ -109,6 +118,7 @@ def _summarize(run_dir: Path, rates: list[str], elapsed: float, workers: int) ->
                 "train_seconds": fit_seconds if fit_seconds is not None else status.get("seconds"),
                 "negative_prediction_fraction": test_metrics["negative_prediction_fraction"],
                 "test_samples": test_metrics["sample_count"],
+                "discarded_model_bytes": discarded_bytes,
             }
         )
     summary = {
@@ -128,6 +138,7 @@ def _summarize(run_dir: Path, rates: list[str], elapsed: float, workers: int) ->
             "test_rmse",
             "test_bias",
             "train_seconds",
+            "discarded_model_bytes",
         ]
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
@@ -136,7 +147,8 @@ def _summarize(run_dir: Path, rates: list[str], elapsed: float, workers: int) ->
     for row in rows:
         _log(
             f"{row['penetration']} status={row['status']} val_mae={row['val_mae']} "
-            f"test_mae={row['test_mae']} test_rmse={row['test_rmse']} test_bias={row['test_bias']}"
+            f"test_mae={row['test_mae']} test_rmse={row['test_rmse']} test_bias={row['test_bias']} "
+            f"discarded_model_bytes={row.get('discarded_model_bytes')}"
         )
 
 
