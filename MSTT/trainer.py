@@ -26,7 +26,18 @@ import numpy as np
 import torch
 
 from MSTT import CODE_VERSION, MODEL_NAME
-from MSTT.config import STATE_CHANNELS, TaskSpec, rate_tag, resolve_ffn_hidden_dim, task_spec, validate_config
+from MSTT.config import (
+    STATE_CHANNELS,
+    TaskSpec,
+    rate_tag,
+    resolve_ffn_hidden_dim,
+    task_spec,
+    validate_config,
+    with_legacy_defaults,
+    validate_conservation_task,
+    conservation_settings,
+    conservation_output_root,
+)
 from MSTT.data.dataset import (
     build_loader,
     open_task_datasets,
@@ -38,11 +49,12 @@ from MSTT.data.dataset import (
 from MSTT.data.graph import load_r_graph
 from MSTT.model import MSTT, MSTTConfig
 from MSTT.utils.device import resolve_device
-from MSTT.utils.losses import RawScaleLoss
+from MSTT.utils.losses import RawScaleLoss, conservation_objective, objective_description
+from MSTT.utils.conservation_evaluation import collect_conservation_predictions, save_mstt_predictions
 from MSTT.utils.metrics import CORE, flat_core, raw_metrics
 from reimplementation.common.data.r_only_npz_dataset import SPLITS
 from reimplementation.common.errors import ReimplementationError
-from reimplementation.common.evaluation import collect_split_predictions, save_predictions_npz
+from reimplementation.common.evaluation import collect_split_predictions
 from reimplementation.common.experiment_protocol import (
     ExperimentClock,
     LibCityCosineLRScheduler,
@@ -77,6 +89,7 @@ def run_is_complete(run_dir: Path) -> bool:
 
 
 def model_config(config: Mapping[str, Any], task: TaskSpec) -> MSTTConfig:
+    validate_conservation_task(config, task)
     return MSTTConfig.from_mapping(
         config,
         num_nodes=int(config["num_nodes"]),
@@ -84,6 +97,42 @@ def model_config(config: Mapping[str, Any], task: TaskSpec) -> MSTTConfig:
         out_channels=task.out_channels,
         ffn_hidden_dim=resolve_ffn_hidden_dim(int(config["d_model"]), config.get("ffn_hidden_dim")),
     )
+
+
+_CONCAT_WIDTH_KEYS = ("value_embedding_dim", "node_embedding_dim", "tod_embedding_dim", "dow_embedding_dim")
+
+
+def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """``add`` fusion ignores the concat widths, so they do not distinguish two ``add`` runs."""
+    result = dict(payload)
+    if result.get("conservation_mode", "none") != "projected":
+        result.pop("projection_mlp_hidden_dim", None)
+    if result.get("embedding_fusion") == "add":
+        for key in _CONCAT_WIDTH_KEYS:
+            result.pop(key, None)
+    return result
+
+
+def assert_run_dir_matches(run_dir: Path, config: Mapping[str, Any], task: TaskSpec) -> None:
+    """Refuse to skip into or resume a run directory trained with another model config or batch size."""
+    path = Path(run_dir) / "resolved_config.json"
+    if not path.is_file():
+        return
+    stored = with_legacy_defaults(json.loads(path.read_text(encoding="utf-8")))
+    current = _effective_model_config(model_config(config, task).to_dict())
+    stored_model = _effective_model_config(stored.get("model_config") or {})
+    diff = {key: (stored_model.get(key), value) for key, value in current.items() if stored_model.get(key) != value}
+    if int(stored.get("batch_size", -1)) != int(config["batch_size"]):
+        diff["batch_size"] = (stored.get("batch_size"), int(config["batch_size"]))
+    if config.get("conservation_mode", "none") != "none":
+        for key, value in conservation_settings(config).items():
+            if conservation_settings(stored)[key] != value:
+                diff[key] = (conservation_settings(stored)[key], value)
+    if diff:
+        raise ReimplementationError(
+            f"{run_dir} holds a run with a different config (stored, requested): {diff}; "
+            "use another --output-root for a new experiment, or --overwrite to replace it"
+        )
 
 
 def build_optimizer(model: torch.nn.Module, config: Mapping[str, Any]) -> torch.optim.Optimizer:
@@ -132,6 +181,26 @@ def predict(model: MSTT, batch: Mapping[str, torch.Tensor], *, amp: str, device:
     return output.float().unsqueeze(1)
 
 
+def predict_with_aux(model, batch, *, amp, device):
+    tod, dow = time_features(batch, model.config.input_window, steps_per_day=model.config.steps_per_day)
+    with autocast_context(device, amp):
+        outputs = model.forward_with_aux(batch["x"], tod, dow)
+    return {key: value.float().unsqueeze(1) for key, value in outputs.items()}
+
+
+def assert_conservation_checkpoint(payload, config, *, normalization_sha256=None):
+    saved_mode = payload.get("conservation_mode", payload.get("config", {}).get("conservation_mode", "none"))
+    mode = config.get("conservation_mode", "none")
+    if saved_mode != mode:
+        raise ReimplementationError(f"checkpoint conservation_mode={saved_mode} != requested {mode}")
+    if mode != "none":
+        saved = conservation_settings(payload.get("config", {}))
+        if saved != conservation_settings(config):
+            raise ReimplementationError("checkpoint conservation coefficients/MLP config differ; start an independent run")
+        if normalization_sha256 is not None and payload.get("normalization_sha256") != normalization_sha256:
+            raise ReimplementationError("checkpoint target scaler SHA256 differs from state_normalization.json")
+
+
 def _limited(loader, limit: int | None) -> Iterable:
     return loader if limit is None else itertools.islice(loader, int(limit))
 
@@ -141,7 +210,9 @@ class TaskRun:
 
     def __init__(self, config: Mapping[str, Any], *, task: str, rate: str, output_root: Path, splits=SPLITS) -> None:
         validate_config(config)
+        validate_conservation_task(config, task_spec(task))
         self.config = dict(config)
+        self.config["output_root"] = Path(output_root).as_posix()
         self.task = task_spec(task)
         self.rate = rate_tag(rate)
         self.seed = int(config["seed"])
@@ -202,20 +273,28 @@ class TaskRun:
         return self.mean_y, self.std_y
 
     def build_model(self) -> MSTT:
-        return MSTT(self.model_config, self.graph).to(self.device)
+        return MSTT(self.model_config, self.graph, target_mean=self.mean_y, target_std=self.std_y).to(self.device)
 
     def evaluate(self, model: MSTT, split: str, limit: int | None = None) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
         model.eval()
         amp = str(self.config["amp"])
         mean, std = self.scaler_args()
-        packed = collect_split_predictions(
-            _limited(self.loaders[split], limit),
-            lambda batch: predict(model, batch, amp=amp, device=self.device),
-            mean_y=mean,
-            std_y=std,
-            device=self.device,
-        )
+        diagnostics = {}
+        if self.task.name == "All2All":
+            packed, diagnostics = collect_conservation_predictions(
+                _limited(self.loaders[split], limit),
+                lambda batch: predict_with_aux(model, batch, amp=amp, device=self.device),
+                criterion=self.criterion, device=self.device,
+            )
+        else:
+            packed = collect_split_predictions(
+                _limited(self.loaders[split], limit),
+                lambda batch: predict(model, batch, amp=amp, device=self.device),
+                mean_y=mean, std_y=std, device=self.device,
+            )
         metrics = raw_metrics(packed["pred_raw"], packed["y_raw"], self.channel_names, self.std_y)
+        metrics.update(diagnostics)
+        metrics["conservation_mode"] = self.config.get("conservation_mode", "none")
         with torch.no_grad():
             loss = self.criterion(
                 torch.from_numpy(packed["y_pred_normalized"]).to(self.device),
@@ -228,6 +307,8 @@ class TaskRun:
         return metrics, packed
 
     def selection_value(self, metrics: Mapping[str, Any]) -> float:
+        if self.config.get("conservation_mode", "none") != "none":
+            return float(metrics["mae"])
         key = {"val_loss": "loss", "val_mae": "mae", "val_scaled_mae": "scaled_mae"}[str(self.config["selection_metric"])]
         return float(metrics[key])
 
@@ -266,6 +347,41 @@ def gradient_report(model: torch.nn.Module) -> dict[str, Any]:
     return {"missing": missing, "nonfinite": nonfinite, "all_zero": zero}
 
 
+def train_step(
+    run: TaskRun,
+    model: MSTT,
+    batch: Mapping[str, torch.Tensor],
+    optimizer: torch.optim.Optimizer,
+    grad_scaler: torch.amp.GradScaler,
+    *,
+    amp: str,
+    clip: float,
+    epoch: int,
+) -> tuple[float, float]:
+    """One optimizer step; returns (loss, pre-clip grad norm or 0.0 without clipping)."""
+    batch = move_batch(batch, run.device)
+    if run.config.get("conservation_mode", "none") == "none":
+        prediction = predict(model, batch, amp=amp, device=run.device)
+        loss = run.criterion(prediction, batch["y_raw"])
+        supervised_name = "supervised_mae" if run.criterion.describe() == "mae_raw" else "supervised_loss"
+        parts = {supervised_name: loss, "total_loss": loss}
+    else:
+        outputs = predict_with_aux(model, batch, amp=amp, device=run.device)
+        loss, parts = conservation_objective(run.criterion, outputs, batch["y_raw"], run.config)
+    if not torch.isfinite(loss):
+        raise ReimplementationError(f"non-finite training loss at epoch {epoch}: {float(loss)}")
+    optimizer.zero_grad(set_to_none=True)
+    grad_scaler.scale(loss).backward()
+    norm = 0.0
+    if clip > 0.0:
+        grad_scaler.unscale_(optimizer)
+        norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), clip))
+    grad_scaler.step(optimizer)
+    grad_scaler.update()
+    run.last_train_components = {key: float(value.detach()) for key, value in parts.items()}
+    return float(loss.detach()), norm
+
+
 def _write_history(run_dir: Path, history: list[dict[str, Any]]) -> None:
     atomic_write_json(run_dir / "training_history.json", history)
     if not history:
@@ -283,7 +399,7 @@ def _write_history(run_dir: Path, history: list[dict[str, Any]]) -> None:
 def _save_split(run: TaskRun, split: str, metrics: dict[str, Any], packed: Mapping[str, np.ndarray], save_predictions: bool) -> None:
     atomic_write_json(run.run_dir / f"{split}_metrics.json", metrics)
     if save_predictions:
-        save_predictions_npz(run.run_dir / f"{split}_predictions.npz", packed)
+        save_mstt_predictions(run.run_dir / f"{split}_predictions.npz", packed)
 
 
 def train_task(
@@ -295,7 +411,17 @@ def train_task(
     overwrite: bool = False,
     resume: Path | None = None,
 ) -> dict[str, Any]:
+    validate_config(config)
+    validate_conservation_task(config, task_spec(task))
+    output_root = conservation_output_root(config, output_root)
     planned_dir = run_directory(output_root, rate, task_spec(task).name, int(config["seed"]))
+    stored_config = planned_dir / "resolved_config.json"
+    if stored_config.is_file():
+        stored = json.loads(stored_config.read_text(encoding="utf-8"))
+        if stored.get("conservation_mode", "none") != config.get("conservation_mode", "none"):
+            raise ReimplementationError("cannot overwrite a different conservation mode; use an independent output root")
+    if not overwrite:
+        assert_run_dir_matches(planned_dir, config, task_spec(task))
     if run_is_complete(planned_dir) and not overwrite and resume is None:
         print(f"[MSTT] skip completed {planned_dir}", flush=True)
         return summary_from_disk(planned_dir)
@@ -308,6 +434,7 @@ def train_task(
     cfg = run.config
     smoke = is_smoke(cfg)
     data_sha = train_data_sha256(run.data_root, run.rate, run.task, run.package["days"]["train"])
+    model = run.build_model()
     saved_config = {
         **cfg,
         "task": run.task.name,
@@ -319,10 +446,10 @@ def train_task(
         "n_his": run.n_his,
         "output_steps": 1,
         "model_config": run.model_config.to_dict(),
+        "embedding": model.embedding_summary(),
+        "spatial": model.spatial_summary(),
         "smoke": smoke,
     }
-    atomic_write_json(run_dir / "resolved_config.json", saved_config)
-    model = run.build_model()
     optimizer = build_optimizer(model, cfg)
     scheduler = build_scheduler(optimizer, cfg)
     amp = str(cfg["amp"])
@@ -335,6 +462,7 @@ def train_task(
         resume_path = run_dir / "last_checkpoint.pt"
     if resume_path is not None:
         payload = load_checkpoint(Path(resume_path), map_location="cpu")
+        assert_conservation_checkpoint(payload, cfg, normalization_sha256=run.package["state_normalization_sha256"])
         assert_checkpoint_compatible(
             payload,
             penetration_rate=run.rate,
@@ -361,6 +489,7 @@ def train_task(
         history = list(payload.get("history", []))
         _restore_rng(payload["rng_state"], train_loader)
         print(f"[MSTT] resume {resume_path} at epoch {start_epoch}", flush=True)
+    atomic_write_json(run_dir / "resolved_config.json", saved_config)
     param_count = model.parameter_count()
     epochs = int(cfg["epochs"])
     patience = cfg.get("early_stop_patience")
@@ -381,6 +510,7 @@ def train_task(
             "rng_state": _rng_state(train_loader),
             "config": saved_config,
             "task": run.task.name,
+            "conservation_mode": cfg.get("conservation_mode", "none"),
             "penetration_rate": run.rate,
             "seed": run.seed,
             "model_parameter_count": param_count,
@@ -399,22 +529,16 @@ def train_task(
             epoch_start = time.perf_counter()
             model.train()
             loss_sum, loss_batches, grad_norm_max = 0.0, 0, 0.0
+            component_sums, train_samples = {}, 0
             for batch in _limited(train_loader, cfg.get("max_train_batches")):
-                batch = move_batch(batch, run.device)
-                prediction = predict(model, batch, amp=amp, device=run.device)
-                loss = run.criterion(prediction, batch["y_raw"])
-                if not torch.isfinite(loss):
-                    raise ReimplementationError(f"non-finite training loss at epoch {epoch}: {float(loss)}")
-                optimizer.zero_grad(set_to_none=True)
-                grad_scaler.scale(loss).backward()
-                if clip > 0.0:
-                    grad_scaler.unscale_(optimizer)
-                    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-                    grad_norm_max = max(grad_norm_max, float(norm))
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
-                loss_sum += float(loss.detach())
+                loss_value, norm = train_step(run, model, batch, optimizer, grad_scaler, amp=amp, clip=clip, epoch=epoch)
+                grad_norm_max = max(grad_norm_max, norm)
+                loss_sum += loss_value
                 loss_batches += 1
+                batch_samples = int(batch["x"].shape[0])
+                train_samples += batch_samples
+                for key, value in run.last_train_components.items():
+                    component_sums[key] = component_sums.get(key, 0.0) + value * batch_samples
             lr = float(optimizer.param_groups[0]["lr"])
             if scheduler is not None:
                 scheduler.step(epoch + 1)
@@ -433,10 +557,13 @@ def train_task(
                 "learning_rate": lr,
                 "train_loss": loss_sum / max(loss_batches, 1),
                 "train_batches": loss_batches,
+                **{f"train_{key}": value / max(train_samples, 1) for key, value in component_sums.items()},
                 "grad_norm_max": grad_norm_max,
                 "val_loss": val_metrics["loss"],
                 **{f"val_{key}": val_metrics[key] for key in CORE + ("scaled_mae",)},
                 **{f"val_{name}_mae": val_metrics[f"{name}_mae"] for name in run.channel_names},
+                **{f"val_{key}": value for key, value in val_metrics.items()
+                   if key.startswith(("conservation_", "raw_", "negative_", "correction_", "projection_"))},
                 "selection_value": value,
                 "improved": improved,
                 "epoch_train_seconds": train_seconds,
@@ -492,7 +619,7 @@ def train_task(
             seed=run.seed,
             device=run.device,
             parameter_count=param_count,
-            training_loss=run.criterion.describe(),
+            training_loss=objective_description(run.criterion, cfg),
             optimizer="AdamW",
             initial_lr=float(cfg["learning_rate"]),
             scheduler=None if scheduler is None else "libcity_cosine_warmup",
@@ -522,6 +649,11 @@ def train_task(
                 "device_info": run.device_info,
                 "amp": amp,
                 "batch_size": int(cfg["batch_size"]),
+                **conservation_settings(cfg),
+                "selection_prediction": "final",
+                "effective_selection_metric": "val_mae" if cfg.get("conservation_mode", "none") != "none" else cfg["selection_metric"],
+                "embedding": model.embedding_summary(),
+                "spatial": model.spatial_summary(),
             },
         )
         atomic_write_json(run_dir / "run_metadata.json", metadata)
@@ -541,6 +673,7 @@ def train_task(
 
 
 SUMMARY_FIELDS = [
+    "conservation_mode", "conservation_lambda", "projection_raw_loss_weight", "projection_consistency_weight",
     "task",
     "rate",
     "seed",
@@ -557,6 +690,10 @@ SUMMARY_FIELDS = [
     *[f"val_{key}" for key in CORE + ("scaled_mae",)],
     *[f"test_{key}" for key in CORE + ("scaled_mae",)],
     *[f"test_{name}_{key}" for name in STATE_CHANNELS for key in CORE],
+    *[f"{split}_{key}" for split in ("val", "test") for key in (
+        "conservation_mae", "conservation_max_abs", "raw_mae", "raw_conservation_mae",
+        "raw_conservation_max_abs", "negative_fraction", "negative_mean_abs", "negative_max_abs",
+    )],
     "train_wall_time_sec",
     "average_epoch_time_sec",
     "test_inference_sec",
@@ -593,6 +730,11 @@ def summary_from_disk(run_dir: Path) -> dict[str, Any]:
     }
     row.update(flat_core(val, [], "val"))
     row.update(flat_core(test, channels, "test"))
+    row.update(conservation_settings(meta))
+    for prefix, metrics in (("val", val), ("test", test)):
+        for key, value in metrics.items():
+            if key.startswith(("conservation_", "raw_", "negative_", "correction_", "projection_")):
+                row[f"{prefix}_{key}"] = value
     return row
 
 

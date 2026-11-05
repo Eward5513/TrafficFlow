@@ -109,6 +109,7 @@ python3 run_fcd_simulations_3s.py --smoke-test
 4. `generate_r_level_partial_flow.py`：只用抽中的车辆再数一遍 5 分钟流量。
 5. `generate_r_level_windows.py`：切同一天内的 12 步窗口。目标仍是这 12 步的最后一步。它为四个状态和四通道 `all` 各写一份 NPZ，放在 `{rate}/{split}/{date}/` 下，不覆盖原来的 `{split}/{date}.npz` 和 `normalization.json`。训练脚本默认仍读旧的合并窗口；`--input-type` 和 `--target-type` 才读新文件。
 6. `merge_r_level_window_data.py`：按固定日期顺序拼成 train、validation、test。
+   `generate_r_level_sequence_targets.py`（可选，12→12 序列重建）：从全量 CSV 为每天写一份 `window_data/sequence_targets_12step/{split}/{date}.npz`（`full_raw [288,1406,4]` float32 原始计数，节点按 `r_graph.npz` 的 `edge_ids`）和 `sequence_manifest.json`。标签 `Y = full[s:s+12]`，与输入 12 步逐步对齐，不是预测；`X` 继续读已有窗口文件，不重写，也不为每个渗透率重复存标签。沿用 `state_normalization.json` 的 target scaler，不重新拟合。脚本逐日核对 7 个渗透率 × 5 个状态文件的旧 12→1 标签（`y_raw_seq[-1] == y_raw[0]`），只读旧文件并在运行前后比对其大小、mtime 和抽样哈希。支持 `--dates`、`--skip-complete`、`--verify-only`；已存在且与 CSV 不一致的文件需显式 `--overwrite` 才会替换。
 7. 模型各自的图，都跟 `r_graph` 的节点顺序：
    - `generate_stgcn_weighted_adjacency.py`
    - `generate_dcrnn_directed_adjacency.py`（DCRNN 和 Graph WaveNet 共用）
@@ -130,6 +131,7 @@ python3 generate_r_level_partial_flow.py --workers 29
 python3 generate_r_level_windows.py --workers 29
 python3 merge_r_level_window_data.py
 python3 generate_training_support_files.py
+python3 generate_r_level_sequence_targets.py --workers 6   # 默认 training_data_3s
 
 python3 generate_r_graph.py \
   --net-file /home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_3s.net.xml \

@@ -22,11 +22,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from data_root import PathLayoutError, assert_training_results_output  # noqa: E402
 from MSTT import MODEL_NAME  # noqa: E402
-from MSTT.config import TASKS, add_config_arguments, load_config, overlay_args, rate_tag, validate_config  # noqa: E402
+from MSTT.config import (TASKS, add_config_arguments, load_config, overlay_args, rate_tag,
+                         validate_config, validate_conservation_task, task_spec, conservation_output_root)  # noqa: E402
 
 
-def resolve_output_root(config: dict) -> Path:
-    root = Path(config["output_root"]).expanduser()
+def resolve_output_root(config: dict, *, explicit_conservation: bool = False) -> Path:
+    root = conservation_output_root(config, Path(config["output_root"]), explicit=explicit_conservation)
     if (config.get("max_train_batches") is not None or config.get("max_eval_batches") is not None) and "_smoke" not in root.parts:
         root = root / "_smoke"
     try:
@@ -53,7 +54,9 @@ def main(argv: list[str] | None = None) -> dict:
     if args.gpu is not None:
         config["device"] = f"cuda:{args.gpu}"
     validate_config(config)
-    output_root = resolve_output_root(config)
+    validate_conservation_task(config, task_spec(args.task))
+    output_root = resolve_output_root(config, explicit_conservation=args.task == "All2All" and args.conservation_mode is not None)
+    config["output_root"] = output_root.as_posix()
     from MSTT.trainer import train_task
 
     summary = train_task(

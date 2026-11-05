@@ -19,6 +19,8 @@ import numpy as np
 import torch
 from torch import nn
 
+from MSTT.model.conservation import conservation_residual
+
 
 class RawScaleLoss(nn.Module):
     def __init__(
@@ -70,3 +72,35 @@ class RawScaleLoss(nn.Module):
     def describe(self) -> str:
         name = self.kind if self.kind != "huber_raw" else f"huber_raw_delta_{self.huber_delta:g}"
         return name if self.channel_balance == "none" else f"{name}__balance_{self.channel_balance}"
+
+
+def conservation_objective(criterion: RawScaleLoss, outputs, target_raw, config):
+    """All components remain tensors on the training device until after backward."""
+    mode = config.get("conservation_mode", "none")
+    supervised = criterion(outputs["final_pred"], target_raw)
+    total = supervised
+    parts = {"supervised_mae": supervised}
+    if mode != "none":
+        raw_cons = conservation_residual(criterion.denormalize(outputs["raw_pred"])).abs().mean()
+        parts["conservation_loss"] = raw_cons
+        if mode == "soft":
+            total = supervised + float(config.get("conservation_lambda", 0.1)) * raw_cons
+        elif mode == "projected":
+            raw_mae = criterion(outputs["raw_pred"], target_raw)
+            parts["raw_mae"] = raw_mae
+            total = (supervised + float(config.get("projection_raw_loss_weight", 0.5)) * raw_mae
+                     + float(config.get("projection_consistency_weight", 0.0)) * raw_cons)
+        else:
+            raise ValueError(f"unknown conservation_mode {mode}")
+    parts["total_loss"] = total
+    return total, parts
+
+
+def objective_description(criterion: RawScaleLoss, config) -> str:
+    mode = config.get("conservation_mode", "none")
+    if mode == "soft":
+        return f"mae_raw + {float(config.get('conservation_lambda', .1)):g} * conservation_mae"
+    if mode == "projected":
+        return (f"final_mae_raw + {float(config.get('projection_raw_loss_weight', .5)):g} * raw_mae_raw"
+                f" + {float(config.get('projection_consistency_weight', 0.)):g} * raw_conservation_mae")
+    return criterion.describe()

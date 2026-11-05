@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -101,12 +102,31 @@ MODEL_DEFAULTS: dict[str, Any] = {
     "use_tod": True,
     "use_dow": True,
     "use_node_embedding": True,
+    "embedding_fusion": "concat",
+    "value_embedding_dim": 32,
+    "node_embedding_dim": 16,
+    "tod_embedding_dim": 8,
+    "dow_embedding_dim": 8,
+    "use_adaptive_embedding": False,
     "steps_per_day": 288,
     "norm_eps": 1e-6,
     "head_type": "flatten",
+    "conservation_mode": "none",
+    "projection_mlp_hidden_dim": 32,
+}
+
+# Meaning of keys that older run directories never stored: v0.1 predates
+# ``embedding_fusion`` (it summed), v0.1/v0.2 predate the adaptive embedding.
+# Fill them in before rebuilding an old model from its resolved_config.json.
+LEGACY_DEFAULTS: dict[str, Any] = {
+    "embedding_fusion": "add", "use_adaptive_embedding": False,
+    "conservation_mode": "none", "projection_mlp_hidden_dim": 32,
 }
 
 TRAIN_DEFAULTS: dict[str, Any] = {
+    "conservation_lambda": 0.1,
+    "projection_raw_loss_weight": 0.5,
+    "projection_consistency_weight": 0.0,
     "seed": 42,
     "device": "auto",
     "batch_size": 16,
@@ -173,9 +193,11 @@ def _parse_optional_int(text: str) -> int | None:
 
 _OPTIONAL_INT_KEYS = {"ffn_hidden_dim", "max_train_batches", "max_eval_batches", "early_stop_patience"}
 _CHOICES = {
-    "spatial_attention": ("sparse",),
+    "conservation_mode": ("none", "soft", "projected"),
+    "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
     "head_type": ("flatten", "last"),
+    "embedding_fusion": ("add", "concat"),
     "loss": ("mae_raw", "huber_raw", "mse_raw"),
     "channel_balance": ("none", "target_std"),
     "selection_metric": ("val_loss", "val_mae", "val_scaled_mae"),
@@ -224,8 +246,22 @@ def resolve_ffn_hidden_dim(d_model: int, value: int | None) -> int:
 
 def validate_config(config: Mapping[str, Any]) -> None:
     for key, choices in _CHOICES.items():
-        if str(config[key]) not in choices:
+        if str(config.get(key, MODEL_DEFAULTS.get(key))) not in choices:
             raise ValueError(f"{key}={config[key]!r} not in {choices}")
+    for key in ("conservation_lambda", "projection_raw_loss_weight", "projection_consistency_weight"):
+        value = float(config.get(key, TRAIN_DEFAULTS[key]))
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{key} must be finite and non-negative")
+    if int(config.get("projection_mlp_hidden_dim", 32)) < 1:
+        raise ValueError("projection_mlp_hidden_dim must be positive")
+    if config.get("conservation_mode", "none") != "none":
+        if config["loss"] != "mae_raw" or config["channel_balance"] != "none":
+            raise ValueError("soft/projected requires unbalanced raw-scale MAE (mae_raw, channel_balance=none)")
+        if config["selection_metric"] not in ("val_loss", "val_mae"):
+            raise ValueError("soft/projected selects final raw-scale MAE; use val_mae or val_loss")
+        if (config["embedding_fusion"] != "concat" or config["use_adaptive_embedding"]
+                or config["spatial_attention"] != "sparse" or int(config["input_window"]) != 12):
+            raise ValueError("soft/projected requires v0.2 concat, sparse R-Graph, no adaptive embedding, 12→1")
     if str(config["target_mode"]) != "last-observed-step":
         raise ValueError("MSTT reconstructs the last observed slot; target_mode must be last-observed-step")
     if int(config["d_model"]) % int(config["num_heads"]) != 0:
@@ -234,3 +270,61 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("RoPE needs an even head dimension")
     if int(config["input_window"]) < 1 or int(config["num_layers"]) < 1:
         raise ValueError("input_window and num_layers must be positive")
+    if str(config["spatial_attention"]) == "global" and bool(config["use_edge_type_bias"]):
+        raise ValueError("use_edge_type_bias does not apply to spatial_attention=global; pass --use-edge-type-bias 0")
+    if str(config["embedding_fusion"]) == "concat":
+        from MSTT.model.embedding import embedding_widths
+
+        embedding_widths(
+            "concat",
+            int(config["d_model"]),
+            config["value_embedding_dim"],
+            config["node_embedding_dim"],
+            config["tod_embedding_dim"],
+            config["dow_embedding_dim"],
+        )
+
+
+def with_legacy_defaults(saved: Mapping[str, Any]) -> dict[str, Any]:
+    """A stored run config with the old meaning of keys it predates."""
+    payload = dict(saved)
+    for key, value in LEGACY_DEFAULTS.items():
+        payload.setdefault(key, value)
+    if isinstance(payload.get("model_config"), Mapping):
+        model = dict(payload["model_config"])
+        for key, value in LEGACY_DEFAULTS.items():
+            model.setdefault(key, value)
+        payload["model_config"] = model
+    return payload
+
+
+def validate_conservation_task(config: Mapping[str, Any], task: TaskSpec) -> None:
+    if config.get("conservation_mode", "none") != "none" and task.name != "All2All":
+        raise ValueError(f"conservation_mode={config['conservation_mode']} is only allowed for All2All, got {task.name}")
+
+
+def conservation_settings(config: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: config.get(key, default_config()[key]) for key in (
+        "conservation_mode", "conservation_lambda", "projection_raw_loss_weight",
+        "projection_consistency_weight", "projection_mlp_hidden_dim",
+    )}
+
+
+def conservation_output_root(config: Mapping[str, Any], root: Path, *, explicit: bool = False) -> Path:
+    """Opt-in experiment roots; an omitted switch preserves historical Mode A paths."""
+    mode = config.get("conservation_mode", "none")
+    root = Path(root).expanduser()
+    base = Path(DATA_DEFAULTS["output_root"])
+    if (mode != "none" or explicit) and root.resolve() == base.resolve():
+        root = root / f"v0.2_concat_A2A_{mode}"
+    for part in root.parts:
+        if part.startswith("v0.2_concat_A2A_") and part != f"v0.2_concat_A2A_{mode}":
+            raise ValueError(f"output root {root} belongs to a different conservation mode")
+        if mode != "none" and part.startswith(("v0.1", "v0.2", "v0.3", "v0.4")) and not part.startswith("v0.2_concat_A2A_"):
+            raise ValueError(f"conservation experiments must not write into legacy experiment {root}")
+    # Check the whole experiment root, including other rates/tasks, before any writes.
+    for path in root.glob("p*/*/seed_*/resolved_config.json"):
+        stored_mode = json.loads(path.read_text(encoding="utf-8")).get("conservation_mode", "none")
+        if stored_mode != mode:
+            raise ValueError(f"{root} already contains conservation_mode={stored_mode}; use an independent root")
+    return root

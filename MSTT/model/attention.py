@@ -1,4 +1,4 @@
-"""Temporal self-attention and sparse spatial graph attention.
+"""Temporal self-attention and spatial attention (sparse R-graph or global).
 
 Both modules take an already normalized ``[B, T, N, D]`` tensor and return
 the sublayer update with the same shape; the residual lives in the block.
@@ -222,8 +222,106 @@ class SparseSpatialAttention(nn.Module):
         return self.out_proj(attention)
 
 
+def _dense_attention_chunk(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, dropout_p: float) -> torch.Tensor:
+    return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=False)
+
+
+def global_softmax_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    dropout_p: float = 0.0,
+    chunk_size: int | None = None,
+    use_checkpoint: bool = False,
+) -> torch.Tensor:
+    """Unmasked SDPA, ``q/k/v`` [M, H, N, d] -> [M, H, N, d], every query sees all N keys.
+
+    ``chunk_size`` splits only the independent ``M = B * T`` axis, never the
+    key axis, so the result equals one unchunked call. No ``N x N`` tensor is
+    built here; SDPA picks a fused (memory-efficient / flash) kernel when the
+    device and dtype allow.
+    """
+    if q.shape != k.shape or q.shape != v.shape or q.ndim != 4:
+        raise ValueError(f"q/k/v must share [M, H, N, d], got {q.shape}, {k.shape}, {v.shape}")
+    total = int(q.shape[0])
+    step = total if not chunk_size else max(1, int(chunk_size))
+    checkpointing = use_checkpoint and torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v))
+    pieces = []
+    for start in range(0, total, step):
+        part = slice(start, start + step)
+        args = (q[part], k[part], v[part], float(dropout_p))
+        if checkpointing:
+            pieces.append(activation_checkpoint(_dense_attention_chunk, *args, use_reentrant=False))
+        else:
+            pieces.append(_dense_attention_chunk(*args))
+    return pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=0)
+
+
+class GlobalSpatialAttention(nn.Module):
+    """Multi-head Q/K/V attention over all N roads (self included) within each step.
+
+    Each of the ``B * T`` steps is one length-``N`` sequence; steps never mix.
+    No adjacency mask, top-k, positional bias, or RoPE. The graph is only used
+    to check the node count; ``edge_type_bias`` does not apply (no edges).
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        *,
+        graph: SpatialGraph,
+        attention_dropout: float = 0.0,
+        use_qk_norm: bool = True,
+        use_gated_attention: bool = False,
+        use_edge_type_bias: bool = False,
+        chunk_size: int | None = None,
+        use_checkpoint: bool = False,
+        norm_eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        if d_model % num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads")
+        if use_edge_type_bias:
+            raise ValueError("global spatial attention has no graph edges; set use_edge_type_bias=False")
+        self.num_heads = int(num_heads)
+        self.head_dim = d_model // num_heads
+        self.num_nodes = int(graph.num_nodes)
+        self.attention_dropout = float(attention_dropout)
+        self.chunk_size = chunk_size
+        self.use_checkpoint = bool(use_checkpoint)
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        self.q_norm = nn.RMSNorm(self.head_dim, eps=norm_eps) if use_qk_norm else None
+        self.k_norm = nn.RMSNorm(self.head_dim, eps=norm_eps) if use_qk_norm else None
+        self.gate = AttentionOutputGate(d_model) if use_gated_attention else None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, steps, nodes, width = x.shape
+        if nodes != self.num_nodes:
+            raise ValueError(f"node axis {nodes} != graph nodes {self.num_nodes}")
+        q, k, v = self.qkv(x).view(batch * steps, nodes, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        attention = global_softmax_attention(
+            q,
+            k,
+            v,
+            dropout_p=self.attention_dropout if self.training else 0.0,
+            chunk_size=self.chunk_size,
+            use_checkpoint=self.use_checkpoint,
+        )
+        attention = attention.transpose(1, 2).reshape(batch, steps, nodes, width)
+        if self.gate is not None:
+            attention = self.gate(x, attention)
+        return self.out_proj(attention)
+
+
 SPATIAL_ATTENTION: dict[str, Callable[..., nn.Module]] = {
     "sparse": SparseSpatialAttention,
+    "global": GlobalSpatialAttention,
 }
 
 

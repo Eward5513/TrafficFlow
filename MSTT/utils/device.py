@@ -1,13 +1,17 @@
-"""Device selection. ``auto`` picks the visible GPU with the most free memory.
+"""Device selection.
 
-Free memory is read from ``nvidia-smi`` so probing does not open a CUDA
-context on every GPU. Indexes returned are logical (after
-``CUDA_VISIBLE_DEVICES``); the physical index is reported alongside.
+``auto`` uses an idle visible GPU: any GPU with a compute process is
+excluded, one of the rest is chosen at random, and training does not start
+when none are idle. Memory is not consulted. The draw uses
+``random.SystemRandom`` so it does not consume the seeded training RNG.
+Indexes returned are logical (after ``CUDA_VISIBLE_DEVICES``); the physical
+index is reported alongside.
 """
 
 from __future__ import annotations
 
 import os
+import random
 import subprocess
 
 import torch
@@ -24,45 +28,78 @@ def _visible_physical() -> list[int] | None:
         return None
 
 
-def gpu_free_memory_mb() -> dict[int, float]:
-    """Physical GPU index -> free MiB."""
+def _nvidia_smi(query: str) -> list[str]:
     try:
-        output = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,memory.free", "--format=csv,noheader,nounits"],
-            check=True,
+        completed = subprocess.run(
+            ["nvidia-smi", f"--query-{query}", "--format=csv,noheader,nounits"],
+            check=False,
             capture_output=True,
             text=True,
             timeout=20,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    free: dict[int, float] = {}
-    for line in output.strip().splitlines():
-        index, value = (part.strip() for part in line.split(","))
-        free[int(index)] = float(value)
-    return free
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"nvidia-smi failed: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}"
+        raise RuntimeError(f"nvidia-smi failed: {detail}")
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
 
-def resolve_device(name: str) -> tuple[torch.device, dict[str, object]]:
+def busy_physical_gpus() -> set[int]:
+    """Physical indexes that currently have at least one compute process."""
+    uuid_to_index: dict[str, int] = {}
+    for line in _nvidia_smi("gpu=index,uuid"):
+        index_text, uuid = (part.strip() for part in line.split(",", 1))
+        uuid_to_index[uuid] = int(index_text)
+    busy: set[int] = set()
+    for line in _nvidia_smi("compute-apps=gpu_uuid,pid"):
+        uuid, _pid = (part.strip() for part in line.split(",", 1))
+        index = uuid_to_index.get(uuid)
+        if index is not None:
+            busy.add(index)
+    return busy
+
+
+def idle_logical_gpus(logical_to_physical: dict[int, int], busy: set[int]) -> list[int]:
+    return sorted(logical for logical, physical in logical_to_physical.items() if physical not in busy)
+
+
+def resolve_device(name: str, *, rng: random.Random | None = None) -> tuple[torch.device, dict[str, object]]:
     text = str(name).strip().lower()
-    if text == "cpu" or not torch.cuda.is_available():
-        if text not in ("cpu", "auto"):
-            raise RuntimeError(f"device {name!r} requested but CUDA is unavailable")
+    if text == "cpu":
         return torch.device("cpu"), {"physical_gpu_index": None, "selection": "cpu"}
+    if not torch.cuda.is_available():
+        raise RuntimeError(f"device {name!r} requested but CUDA is unavailable")
     visible = _visible_physical()
+    logical_to_physical = {i: (visible[i] if visible is not None else i) for i in range(torch.cuda.device_count())}
     if text == "auto":
-        free = gpu_free_memory_mb()
-        logical_to_physical = {i: (visible[i] if visible is not None else i) for i in range(torch.cuda.device_count())}
-        ranked = sorted(logical_to_physical, key=lambda i: -free.get(logical_to_physical[i], 0.0))
-        logical = ranked[0]
+        if visible is None and os.environ.get("CUDA_VISIBLE_DEVICES"):
+            raise RuntimeError("device auto cannot parse CUDA_VISIBLE_DEVICES as GPU indexes")
+        busy = busy_physical_gpus()
+        idle = idle_logical_gpus(logical_to_physical, busy)
+        if not idle:
+            visible_physical = [logical_to_physical[i] for i in sorted(logical_to_physical)]
+            raise RuntimeError(
+                "no idle GPU; refusing to start. "
+                f"visible={visible_physical} busy={sorted(busy)}"
+            )
+        logical = (rng or random.SystemRandom()).choice(idle)
+        physical = logical_to_physical[logical]
+        print(
+            f"[MSTT] device auto selected physical GPU {physical} (cuda:{logical}); "
+            f"idle={[logical_to_physical[i] for i in idle]}",
+            flush=True,
+        )
         return torch.device(f"cuda:{logical}"), {
-            "physical_gpu_index": logical_to_physical[logical],
-            "selection": "auto_max_free_memory",
-            "free_memory_mb_at_selection": free.get(logical_to_physical[logical]),
+            "physical_gpu_index": physical,
+            "selection": "auto_idle",
+            "idle_physical_gpus": [logical_to_physical[i] for i in idle],
         }
     if text.isdigit():
         text = f"cuda:{text}"
     device = torch.device(text)
     logical = device.index if device.index is not None else 0
-    physical = visible[logical] if visible is not None and logical < len(visible) else logical
+    if logical not in logical_to_physical:
+        raise RuntimeError(f"device {name!r} is outside the visible GPUs {sorted(logical_to_physical)}")
+    physical = logical_to_physical[logical]
     return torch.device(f"cuda:{logical}"), {"physical_gpu_index": physical, "selection": "explicit"}

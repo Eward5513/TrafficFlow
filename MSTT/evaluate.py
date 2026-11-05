@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from MSTT.config import TASKS, load_config, rate_tag  # noqa: E402
+from MSTT.config import TASKS, load_config, rate_tag, with_legacy_defaults  # noqa: E402
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -40,8 +40,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> dict:
     args = parse_args(argv)
-    from MSTT.trainer import TaskRun, run_directory
-    from reimplementation.common.evaluation import save_predictions_npz
+    from MSTT.trainer import TaskRun, run_directory, assert_conservation_checkpoint
+    from MSTT.utils.conservation_evaluation import save_mstt_predictions
     from reimplementation.common.utils.atomic_io import atomic_write_json
     from reimplementation.common.utils.checkpoint import load_checkpoint
 
@@ -52,7 +52,7 @@ def main(argv=None) -> dict:
         root = args.output_root or Path(load_config(None)["output_root"])
         run_dir = run_directory(root, rate_tag(args.penetration), args.task, args.seed)
     run_dir = Path(run_dir).resolve()
-    saved = json.loads((run_dir / "resolved_config.json").read_text(encoding="utf-8"))
+    saved = with_legacy_defaults(json.loads((run_dir / "resolved_config.json").read_text(encoding="utf-8")))
     config = load_config(None)
     config.update({key: saved[key] for key in config if key in saved})
     if args.device is not None:
@@ -62,6 +62,7 @@ def main(argv=None) -> dict:
     if run.run_dir != run_dir:
         raise SystemExit(f"resolved run directory {run.run_dir} != {run_dir}")
     checkpoint = load_checkpoint(args.checkpoint or run_dir / "best_checkpoint.pt", map_location=run.device)
+    assert_conservation_checkpoint(checkpoint, config, normalization_sha256=run.package["state_normalization_sha256"])
     if checkpoint.get("task") != run.task.name or checkpoint.get("penetration_rate") != run.rate:
         raise SystemExit("checkpoint task/penetration does not match the run directory")
     if checkpoint.get("graph_sha256") != run.graph_info["graph_sha256"]:
@@ -73,7 +74,7 @@ def main(argv=None) -> dict:
         metrics, packed = run.evaluate(model, split, config.get("max_eval_batches"))
         atomic_write_json(run_dir / "reeval" / f"{split}_metrics.json", metrics)
         if args.save_predictions:
-            save_predictions_npz(run_dir / "reeval" / f"{split}_predictions.npz", packed)
+            save_mstt_predictions(run_dir / "reeval" / f"{split}_predictions.npz", packed)
         stored_path = run_dir / f"{split}_metrics.json"
         entry = {key: metrics[key] for key in ("mae", "rmse", "mape_nonzero", "wape", "sample_count")}
         if stored_path.is_file():
