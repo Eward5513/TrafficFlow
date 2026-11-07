@@ -48,7 +48,7 @@ SUMO 全天仿真（人工路网 + 晚高峰 WAUT）
         +---- fcd_data_3s/    只把相位时长改成 3 秒整数倍后重跑
         |
         v
-model_prep/  目前读取的是 fcd_data/，不是 fcd_data_3s/
+model_prep/  早期 R-level 脚本默认 fcd_data/；多种子 v2 和 M/MR 脚本默认 3s 批次
         |
         v
 training_data/  全量流量、抽样流量、路网图、12 步窗口
@@ -93,7 +93,7 @@ python3 run_fcd_simulations_3s.py --smoke-test
 
 ## 2. model_prep：从仿真结果到模型输入
 
-这些脚本不改路网，也不改路线。默认读 `fcd_data/`，写出 `training_data/`。换一批仿真时用参数改路径，子目录结构保持不变：
+这些脚本不改路网，也不改路线。早期 R-level 脚本默认读 `fcd_data/`，写出 `training_data/`；下文的多种子 v2 和 M/MR 脚本默认使用 3 秒批次。换一批仿真时用参数改路径，子目录结构保持不变：
 
 - `--fcd-root`：FCD 日目录
 - `--net-file`：生成路网图时用的 SUMO 路网
@@ -147,7 +147,7 @@ python3 generate_r_level_full_flow.py \
 
 `generate_sampling_seed_tests.py` 只处理 3 秒批次的测试集。它从 `window_data/split_manifest.json` 读取 5 个测试日，不改训练、验证、全量标签或归一化。五套观测都在 `sampling_seeds/seed_<id>/`，sampling seed 分别是 42、43、44、45、46。原来的测试车辆名单、p05 部分流量和 `p05/test/<date>/` 窗口在 `seed_42`，旧目录里的这些测试路径已经去掉。这个种子只决定抽哪些车，和模型初始化、训练 shuffle 用的 training seed 不是一回事。
 
-每天的派生种子是 `SHA256(f"{sampling_seed}_{date}")` 的前 8 字节。候选车仍是当天 `depart >= 0` 的车辆，按字符串排序后用这个派生种子打乱，p05 取前 `int(车辆数 * 0.05)` 辆。同一天的 4 个新种子各扫一遍同一份 `fcd_data_3s` FCD，四状态和窗口都来自这同一批车。窗口仍是 5 分钟、同日 12 步、标签为最后一步的全量状态。归一化直接引用原来的 `state_normalization.json`，不重新拟合。
+每天的派生种子是 `SHA256(f"{sampling_seed}_{date}")` 的前 8 字节。候选车仍是当天 `depart >= 0` 的车辆，按字符串排序后用这个派生种子打乱，p05 取前 `int(车辆数 * 0.05)` 辆。同一天的 4 个新种子共用一次 `fcd_data_3s` FCD 扫描，四状态和窗口都来自这同一批车。窗口仍是 5 分钟、同日 12 步、标签为最后一步的全量状态。归一化直接引用原来的 `state_normalization.json`，不重新拟合。
 
 ```bash
 cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
@@ -162,6 +162,83 @@ python3 generate_sampling_seed_tests.py --workers 32 --skip-complete
 ```
 
 五套测试观测要分别计算 MAE，再对这五个 MAE 取平均。不要先把五份输入或预测平均后再算一次 MAE。
+
+## 五种子全渗透率数据 v2（3 秒批次）
+
+新入口为两个独立阶段，默认通过 `data_root.py` 解析
+`xuancheng26/training_data_3s` 和 `xuancheng26/simulation_data/fcd_data_3s`，
+支持 `TRAFFICFLOW_DATA_ROOT`。不运行 SUMO、不训练模型，也不生成 Speed。
+日期以现有 `window_data/split_manifest.json` 为准：train 20 天、validation 4 天、test 5 天。
+五个采样种子 42–46、七档 p05/p10/p20/p30/p40/p50/p70，共 1015 组。
+
+```text
+training_data_3s/sampling_seeds/
+├── vehicle_sampling_manifest_v2.json
+├── vehicle_sampling_validation_v2.json
+├── flow_generation_manifest_v2.json
+├── flow_generation_validation_v2.json
+├── audit_v2/<date>.json
+└── seed_<sampling_seed>/
+    ├── sampled_vehicle/<rate>/<date>.csv
+    ├── flow/
+    │   ├── partial_flow/<rate>/<date>/<state>.csv
+    │   └── window_data/
+    │       ├── split_manifest.json
+    │       ├── state_normalization.json
+    │       ├── state_window_manifest.json
+    │       ├── validation_summary.json
+    │       ├── node_mapping.csv
+    │       └── <rate>/<split>/<date>/{inflow,outflow,accumulation_start,accumulation_end,all}.npz
+    ├── partial_flow/  # 历史 p05 测试路径保留
+    └── window_data/   # 历史兼容路径保留，不能用作新种子的全档数据根
+```
+
+`generate_multi_seed_vehicle_sampling.py` 只处理车辆身份。每日按字符串排序有效车辆，
+使用 `int.from_bytes(SHA256(f"{seed}_{date}")[:8], "big")` 派生种子，
+`random.Random(...).shuffle` 后取 `int(N * rate)` 前缀，保存排序后的 ID。
+逐日检查七档嵌套、唯一性、有效车辆归属、重复运行确定性和种子间差异。
+seed 42 全部历史名单以及 42–46 的 p05 测试名单必须与理论集合逐一相同；
+不一致就失败，不覆盖。其他特征以后可以直接复用这些清单，例如另建 `seed_43/speed/`。
+
+`generate_multi_seed_flow_data.py` 必须读到第一阶段全量 PASS 报告，核对 manifest 和
+全部车辆文件 SHA256 后才处理 Flow；它不进行随机采样。一天一个进程，缺数据时只流式扫描
+一次 FCD，复用 `generate_r_level_full_flow.stream_fcd` 的真实道路、internal lane、
+Entry/Exit、到达补齐规则，读取缓冲为 16 MiB，不缓存完整轨迹。
+事件先计入每个种子的最低待生成渗透率层级，再沿渗透率轴累加。
+四状态保持 288×1406、整数守恒、零日初存量、连续存量，并逐格检查非负、partial≤full、
+渗透率单调和 R 图列顺序。
+
+窗口为同日 12→1，共 277 个，目标是最后输入时间片的全量状态。
+四通道顺序固定为 `[inflow,outflow,accumulation_start,accumulation_end]`。
+保留 `x,y,x_raw,y_raw,day_index,window_start_slot,target_slot` 的原 dtype、shape 和语义。
+所有种子的同一渗透率都使用 seed 42 原训练集 input scaler；所有目标共用原 full target scaler，
+不拟合任何新 scaler。每一个 NPZ 的所有数组都会与 CSV 推导值精确比较，因此全量标签在
+所有种子和渗透率间相同。`day_index` 仍是 Monday=0 的星期索引。
+
+全量 CSV 和图只引用权威 `training_data_3s/full_flow/r-level`、`training_data_3s/graph`，
+不在各 seed 下复制；NPZ 内保留读取接口要求的 `y/y_raw` 数组。
+seed 42 历史 CSV/NPZ，以及 43–46 的 p05 测试 CSV/NPZ，验证后通过文件级相对软链接复用。
+旧 `seed_*/window_data` 的 train/validation 和非 p05 档仍可能指向 seed 42，
+因此新实验统一指定 `seed_*/flow/window_data`，不需要 seed 42 或 test 特例。
+本阶段不更改模型 Dataset/DataLoader 或实验配置。
+
+从仓库根目录运行：
+
+```bash
+python dataset/xuancheng26/model_prep/generate_multi_seed_vehicle_sampling.py --workers 29
+python dataset/xuancheng26/model_prep/generate_multi_seed_flow_data.py --dates 2023_04_01 --workers 1
+python dataset/xuancheng26/model_prep/generate_multi_seed_flow_data.py --workers 24
+```
+
+默认校验并跳过已存在数据，不需要 `--skip-complete`。中断后重复同一命令可继续，
+缺失 CSV 的日期才扫描 FCD；只有缺窗口时直接由 CSV 补齐。也可用 `--dates` 仅重试失败日期，
+然后运行全日期命令汇总验收。`--verify-only` 不生成 CSV/NPZ，但会更新 v2 审计报告。
+子集报告写 `flow_generation_subset_v2.json`，不会将部分完成冒充完整成功。
+运行时持有共享阶段锁，按日期隔离输出。新数据先写临时文件、回读校验后以原子且不覆盖
+已有目标的方式发布；任何已有数据不一致都报错并保留原文件。
+仅 v2 manifest/审计元数据允许原子更新。
+磁盘按最多 300 GiB 新 Flow/窗口预估并保留额外空间；并发根据 CPU affinity 和可用内存限制，
+不给 GPU 分配任务，给训练预留 CPU/内存。日志可通过 `tee` 保存到 `sampling_seeds/logs_v2/`。
 
 ## 3. M-level（Movement）数据
 
