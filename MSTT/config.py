@@ -84,6 +84,9 @@ def rate_tag(rate: str | int) -> str:
 MODEL_DEFAULTS: dict[str, Any] = {
     "d_model": 64,
     "num_heads": 4,
+    "temporal_num_heads": None,
+    "spatial_num_heads": None,
+    "attention_head_dim": None,
     "num_layers": 2,
     "input_window": 12,
     "ffn_hidden_dim": None,
@@ -108,6 +111,11 @@ MODEL_DEFAULTS: dict[str, Any] = {
     "tod_embedding_dim": 8,
     "dow_embedding_dim": 8,
     "use_adaptive_embedding": False,
+    "base_embedding_dim": None,
+    "adaptive_embedding_dim": None,
+    "adaptive_embedding_fusion": "add",
+    "ffn_placement": "after_spatial",
+    "attention_order": "TS",
     "steps_per_day": 288,
     "norm_eps": 1e-6,
     "head_type": "flatten",
@@ -119,6 +127,11 @@ MODEL_DEFAULTS: dict[str, Any] = {
 # ``embedding_fusion`` (it summed), v0.1/v0.2 predate the adaptive embedding.
 # Fill them in before rebuilding an old model from its resolved_config.json.
 LEGACY_DEFAULTS: dict[str, Any] = {
+    "attention_order": "TS",
+    "temporal_num_heads": None, "spatial_num_heads": None,
+    "attention_head_dim": None,
+    "base_embedding_dim": None, "adaptive_embedding_dim": None,
+    "adaptive_embedding_fusion": "add", "ffn_placement": "after_spatial",
     "embedding_fusion": "add", "use_adaptive_embedding": False,
     "conservation_mode": "none", "projection_mlp_hidden_dim": 32,
 }
@@ -191,8 +204,13 @@ def _parse_optional_int(text: str) -> int | None:
     return None if str(text).lower() in {"none", "null", ""} else int(text)
 
 
-_OPTIONAL_INT_KEYS = {"ffn_hidden_dim", "max_train_batches", "max_eval_batches", "early_stop_patience"}
+_OPTIONAL_INT_KEYS = {"ffn_hidden_dim", "max_train_batches", "max_eval_batches", "early_stop_patience",
+                      "base_embedding_dim", "adaptive_embedding_dim",
+                      "temporal_num_heads", "spatial_num_heads", "attention_head_dim"}
 _CHOICES = {
+    "attention_order": ("TS", "ST", "TTFSSF"),
+    "adaptive_embedding_fusion": ("add", "concat"),
+    "ffn_placement": ("after_spatial", "after_each_attention", "after_type_group"),
     "conservation_mode": ("none", "soft", "projected"),
     "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
@@ -212,7 +230,7 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
         flags = [f"--{key.replace('_', '-')}"]
         if "_" in key:
             flags.append(f"--{key}")
-        kwargs: dict[str, Any] = {"dest": key, "default": None}
+        kwargs: dict[str, Any] = {"dest": key, "default": argparse.SUPPRESS}
         if key in _OPTIONAL_INT_KEYS:
             kwargs["type"] = _parse_optional_int
         elif isinstance(value, bool):
@@ -230,9 +248,8 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
 
 def overlay_args(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     for key in default_config():
-        value = getattr(args, key, None)
-        if value is not None:
-            config[key] = value
+        if hasattr(args, key):
+            config[key] = getattr(args, key)
     return config
 
 
@@ -245,6 +262,13 @@ def resolve_ffn_hidden_dim(d_model: int, value: int | None) -> int:
 
 
 def validate_config(config: Mapping[str, Any]) -> None:
+    if config.get("attention_order", "TS") == "ST" and config.get("ffn_placement") != "after_each_attention":
+        raise ValueError("attention_order=ST requires ffn_placement=after_each_attention (SFTF)")
+    if config.get("attention_order") == "TTFSSF":
+        if config.get("ffn_placement") != "after_type_group" or int(config.get("num_layers", 0)) != 2:
+            raise ValueError("attention_order=TTFSSF requires num_layers=2 and ffn_placement=after_type_group")
+    elif config.get("ffn_placement") == "after_type_group":
+        raise ValueError("ffn_placement=after_type_group is only valid for attention_order=TTFSSF")
     for key, choices in _CHOICES.items():
         if str(config.get(key, MODEL_DEFAULTS.get(key))) not in choices:
             raise ValueError(f"{key}={config[key]!r} not in {choices}")
@@ -259,30 +283,56 @@ def validate_config(config: Mapping[str, Any]) -> None:
             raise ValueError("soft/projected requires unbalanced raw-scale MAE (mae_raw, channel_balance=none)")
         if config["selection_metric"] not in ("val_loss", "val_mae"):
             raise ValueError("soft/projected selects final raw-scale MAE; use val_mae or val_loss")
-        if (config["embedding_fusion"] != "concat" or config["use_adaptive_embedding"]
-                or config["spatial_attention"] != "sparse" or int(config["input_window"]) != 12):
-            raise ValueError("soft/projected requires v0.2 concat, sparse R-Graph, no adaptive embedding, 12→1")
+        if config["embedding_fusion"] != "concat" or int(config["input_window"]) != 12:
+            raise ValueError("soft/projected requires concat embeddings and a 12-step window")
+        if config["spatial_attention"] not in ("sparse", "global"):
+            raise ValueError("soft/projected spatial attention must be sparse or global")
+        if config["use_adaptive_embedding"] and config.get("adaptive_embedding_fusion") != "concat":
+            raise ValueError("soft/projected adaptive embedding must be concatenated, not added")
     if str(config["target_mode"]) != "last-observed-step":
         raise ValueError("MSTT reconstructs the last observed slot; target_mode must be last-observed-step")
     if int(config["d_model"]) % int(config["num_heads"]) != 0:
         raise ValueError("d_model must be divisible by num_heads")
     if bool(config["use_rope"]) and (int(config["d_model"]) // int(config["num_heads"])) % 2 != 0:
         raise ValueError("RoPE needs an even head dimension")
+    for key in ("temporal_num_heads", "spatial_num_heads"):
+        heads = attention_head_count(config, key)
+        if heads < 1 or int(config["d_model"]) % heads != 0:
+            raise ValueError(f"{key}={heads} must be a positive divisor of d_model={config['d_model']}")
+    temporal_heads = attention_head_count(config, "temporal_num_heads")
+    head_dim = config.get("attention_head_dim")
+    if head_dim is not None and int(head_dim) < 1:
+        raise ValueError("attention_head_dim must be positive")
+    resolved_head_dim = int(config["d_model"]) // temporal_heads if head_dim is None else int(head_dim)
+    if bool(config["use_rope"]) and resolved_head_dim % 2 != 0:
+        raise ValueError("RoPE needs an even temporal head dimension")
     if int(config["input_window"]) < 1 or int(config["num_layers"]) < 1:
         raise ValueError("input_window and num_layers must be positive")
     if str(config["spatial_attention"]) == "global" and bool(config["use_edge_type_bias"]):
         raise ValueError("use_edge_type_bias does not apply to spatial_attention=global; pass --use-edge-type-bias 0")
+    from MSTT.model.embedding import resolve_embedding_dims
+
+    base_dim, _ = resolve_embedding_dims(
+        config["d_model"], config.get("base_embedding_dim"), config.get("adaptive_embedding_dim"),
+        adaptive=config["use_adaptive_embedding"], fusion=config.get("adaptive_embedding_fusion", "add"),
+    )
     if str(config["embedding_fusion"]) == "concat":
         from MSTT.model.embedding import embedding_widths
 
         embedding_widths(
             "concat",
-            int(config["d_model"]),
+            base_dim,
             config["value_embedding_dim"],
             config["node_embedding_dim"],
             config["tod_embedding_dim"],
             config["dow_embedding_dim"],
         )
+
+
+def attention_head_count(config: Mapping[str, Any], key: str) -> int:
+    """Missing or null per-attention head counts keep the shared ``num_heads``."""
+    value = config.get(key)
+    return int(config["num_heads"] if value is None else value)
 
 
 def with_legacy_defaults(saved: Mapping[str, Any]) -> dict[str, Any]:

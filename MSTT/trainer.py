@@ -1,11 +1,12 @@
-"""Train / validate / test one (task, penetration) pair of MSTT.
+"""Train and validate one (task, penetration) pair of MSTT.
 
 Protocol (shared with the 9-task baselines in ``training_results_3s``):
 
 - inputs: partial state of the chosen rate; labels: full state, same windows
 - 20 / 4 / 5 days -> 5540 / 1108 / 1385 windows, 12 steps, label = last step
-- loss and checkpoint selection on validation only; test is evaluated once,
-  after the best checkpoint is reloaded
+- loss and checkpoint selection on validation only
+- the p05 test split lives under ``sampling_seeds/`` and is scored afterwards
+  by ``MSTT/eval_sampling_mean.py``, not during training
 - metrics: shared ``traffic_metrics`` on the raw scale, per channel for All2All
 """
 
@@ -68,7 +69,7 @@ from reimplementation.common.utils.reproducibility import seed_everything
 from reimplementation.common.utils.structured_logging import JsonlLogger
 
 BATCH_KEYS = ("x", "y", "y_raw", "day_index", "window_start_slot", "target_slot", "sample_index")
-REQUIRED_OUTPUTS = ("best_checkpoint.pt", "training_history.json", "validation_metrics.json", "test_metrics.json")
+REQUIRED_OUTPUTS = ("best_checkpoint.pt", "training_history.json", "validation_metrics.json")
 
 
 def run_directory(output_root: Path, rate: str, task: str, seed: int) -> Path:
@@ -427,8 +428,10 @@ def train_task(
         return summary_from_disk(planned_dir)
     clock = ExperimentClock()
     clock.mark_experiment_start()
+    process_start = time.perf_counter()
+    previous_wall_seconds = 0.0
     seed_everything(int(config["seed"]))
-    run = TaskRun(config, task=task, rate=rate, output_root=output_root)
+    run = TaskRun(config, task=task, rate=rate, output_root=output_root, splits=("train", "validation"))
     run_dir = run.run_dir
     run_dir.mkdir(parents=True, exist_ok=True)
     cfg = run.config
@@ -448,6 +451,7 @@ def train_task(
         "model_config": run.model_config.to_dict(),
         "embedding": model.embedding_summary(),
         "spatial": model.spatial_summary(),
+        "architecture": model.architecture_summary(),
         "smoke": smoke,
     }
     optimizer = build_optimizer(model, cfg)
@@ -487,6 +491,7 @@ def train_task(
         best_epoch = int(payload.get("best_epoch", -1))
         wait = int(payload.get("wait", 0))
         history = list(payload.get("history", []))
+        previous_wall_seconds = float(payload.get("cumulative_wall_seconds", sum(row["epoch_total_seconds"] for row in history)))
         _restore_rng(payload["rng_state"], train_loader)
         print(f"[MSTT] resume {resume_path} at epoch {start_epoch}", flush=True)
     atomic_write_json(run_dir / "resolved_config.json", saved_config)
@@ -507,6 +512,7 @@ def train_task(
             "best_epoch": best_epoch,
             "wait": wait,
             "history": history,
+            "cumulative_wall_seconds": previous_wall_seconds + time.perf_counter() - process_start,
             "rng_state": _rng_state(train_loader),
             "config": saved_config,
             "task": run.task.name,
@@ -589,6 +595,8 @@ def train_task(
         clock.mark_train_end()
         if not history:
             raise ReimplementationError("no epochs were run")
+        if patience is None and [row["epoch"] for row in history] != list(range(epochs)):
+            raise ReimplementationError("early stopping disabled but the complete epoch history is missing")
         expected_best = min(history, key=lambda item: (item["selection_value"], item["epoch"]))["epoch"]
         payload = load_checkpoint(run_dir / "best_checkpoint.pt", map_location=run.device)
         if int(payload["epoch"]) != int(expected_best):
@@ -599,19 +607,11 @@ def train_task(
         if abs(run.selection_value(val_metrics) - float(payload["best_metric"])) > 1e-4 * max(1.0, abs(best_value)):
             raise ReimplementationError("reloaded best checkpoint does not reproduce its validation metric")
         _save_split(run, "validation", val_metrics, val_packed, bool(cfg["save_validation_predictions"]))
-        if run.device.type == "cuda":
-            torch.cuda.synchronize(run.device)
-        test_start = time.perf_counter()
-        test_metrics, test_packed = run.evaluate(model, "test", limit)
-        if run.device.type == "cuda":
-            torch.cuda.synchronize(run.device)
-        test_seconds = time.perf_counter() - test_start
-        _save_split(run, "test", test_metrics, test_packed, bool(cfg["save_test_predictions"]))
-        expected = {split: int(run.package["sample_counts"][split]) for split in ("validation", "test")}
-        if not smoke:
-            for split, metrics in (("validation", val_metrics), ("test", test_metrics)):
-                if metrics["sample_count"] != expected[split]:
-                    raise ReimplementationError(f"{split} evaluated {metrics['sample_count']} != {expected[split]}")
+        expected_validation = int(run.package["sample_counts"]["validation"])
+        if not smoke and val_metrics["sample_count"] != expected_validation:
+            raise ReimplementationError(
+                f"validation evaluated {val_metrics['sample_count']} != {expected_validation}"
+            )
         clock.mark_experiment_end()
         metadata = build_run_metadata(
             model=MODEL_NAME,
@@ -639,7 +639,6 @@ def train_task(
                 "smoke": smoke,
                 "early_stopped": early_stopped,
                 "epochs_in_history": len(history),
-                "test_inference_sec": test_seconds,
                 "code_version": CODE_VERSION,
                 "graph": {key: value for key, value in run.graph_info.items() if key != "node_ids"},
                 "data_file_sha256": data_sha,
@@ -653,9 +652,14 @@ def train_task(
                 "selection_prediction": "final",
                 "effective_selection_metric": "val_mae" if cfg.get("conservation_mode", "none") != "none" else cfg["selection_metric"],
                 "embedding": model.embedding_summary(),
+                "architecture": model.architecture_summary(),
                 "spatial": model.spatial_summary(),
             },
         )
+        metadata["total_epochs_executed"] = len(history)
+        metadata["total_experiment_wall_time_sec"] += previous_wall_seconds
+        for key in ("peak_gpu_memory_allocated_mb", "peak_gpu_memory_reserved_mb"):
+            metadata[key] = max([metadata.get(key) or 0.0] + [row.get(key) or 0.0 for row in history])
         atomic_write_json(run_dir / "run_metadata.json", metadata)
     except Exception as exc:
         atomic_write_json(run_dir / "run_metadata.json", {"status": "failed", "reason": repr(exc), "task": run.task.name, "penetration": run.rate})
@@ -666,7 +670,7 @@ def train_task(
     merge_summary(output_root, [summary])
     print(
         f"[MSTT] done {run.task.name} {run.rate} best_epoch={best_epoch} "
-        f"test_mae={test_metrics['mae']:.5f} test_wape={test_metrics['wape']:.3f}",
+        f"val_mae={val_metrics['mae']:.5f} val_wape={val_metrics['wape']:.3f}",
         flush=True,
     )
     return summary
@@ -706,8 +710,9 @@ def summary_from_disk(run_dir: Path) -> dict[str, Any]:
     run_dir = Path(run_dir)
     meta = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
     val = json.loads((run_dir / "validation_metrics.json").read_text(encoding="utf-8"))
-    test = json.loads((run_dir / "test_metrics.json").read_text(encoding="utf-8"))
-    channels = test.get("channels", [])
+    test_path = run_dir / "test_metrics.json"
+    test = json.loads(test_path.read_text(encoding="utf-8")) if test_path.is_file() else None
+    channels = [] if test is None else test.get("channels", [])
     row = {
         "task": meta.get("task"),
         "rate": meta.get("penetration"),
@@ -729,9 +734,11 @@ def summary_from_disk(run_dir: Path) -> dict[str, Any]:
         "run_dir": run_dir.as_posix(),
     }
     row.update(flat_core(val, [], "val"))
-    row.update(flat_core(test, channels, "test"))
+    if test is not None:
+        row.update(flat_core(test, channels, "test"))
     row.update(conservation_settings(meta))
-    for prefix, metrics in (("val", val), ("test", test)):
+    present = [("val", val)] if test is None else [("val", val), ("test", test)]
+    for prefix, metrics in present:
         for key, value in metrics.items():
             if key.startswith(("conservation_", "raw_", "negative_", "correction_", "projection_")):
                 row[f"{prefix}_{key}"] = value

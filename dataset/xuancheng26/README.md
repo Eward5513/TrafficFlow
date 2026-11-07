@@ -143,6 +143,26 @@ python3 generate_r_level_full_flow.py \
   --workers 29
 ```
 
+## 额外的 p05 测试采样
+
+`generate_sampling_seed_tests.py` 只处理 3 秒批次的测试集。它从 `window_data/split_manifest.json` 读取 5 个测试日，不改训练、验证、全量标签或归一化。五套观测都在 `sampling_seeds/seed_<id>/`，sampling seed 分别是 42、43、44、45、46。原来的测试车辆名单、p05 部分流量和 `p05/test/<date>/` 窗口在 `seed_42`，旧目录里的这些测试路径已经去掉。这个种子只决定抽哪些车，和模型初始化、训练 shuffle 用的 training seed 不是一回事。
+
+每天的派生种子是 `SHA256(f"{sampling_seed}_{date}")` 的前 8 字节。候选车仍是当天 `depart >= 0` 的车辆，按字符串排序后用这个派生种子打乱，p05 取前 `int(车辆数 * 0.05)` 辆。同一天的 4 个新种子各扫一遍同一份 `fcd_data_3s` FCD，四状态和窗口都来自这同一批车。窗口仍是 5 分钟、同日 12 步、标签为最后一步的全量状态。归一化直接引用原来的 `state_normalization.json`，不重新拟合。
+
+```bash
+cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
+python3 generate_sampling_seed_tests.py --dates 2023_04_26 --workers 1
+python3 generate_sampling_seed_tests.py --workers 32 --skip-complete
+```
+
+新数据在 `training_data_3s/sampling_seeds/seed_<id>/`，42 到 46 五个种子结构相同。总清单是 `sampling_seeds/sampling_manifest.json`，核对结果是 `sampling_seeds/validation_report.json`。评估某一套时，把状态窗口的数据根指到该种子的 `window_data`。这个目录里的 `split_manifest.json`、`state_normalization.json`、训练集、验证集和其他渗透率都链回原文件，只有 `p05/test/<date>/` 是该种子自己的测试观测。例如原来的第 1 套：
+
+```text
+/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/sampling_seeds/seed_42/window_data
+```
+
+五套测试观测要分别计算 MAE，再对这五个 MAE 取平均。不要先把五份输入或预测平均后再算一次 MAE。
+
 ## 3. M-level（Movement）数据
 
 M-level 只做 3 秒批次，三个脚本默认就读 `fcd_data_3s/`、`xuancheng_tls_3s.net.xml`、`night_peak_3s.add.xml`，写到 `training_data_3s/`。它们不改 R-level 文件，只读 `graph/r_graph.npz` 做映射核对，读 R-level 全量总数写进 summary 作对照。

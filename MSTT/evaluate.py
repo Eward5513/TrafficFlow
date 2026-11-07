@@ -7,7 +7,8 @@ Rebuilds data and model from ``resolved_config.json``, loads
 ``best_checkpoint.pt`` (or ``--checkpoint``), and writes
 ``reeval/<split>_metrics.json`` inside the run directory. Stored official
 metrics are never overwritten; the report lists the largest difference
-against them.
+against them. The p05 test split is no longer under ``window_data``; score
+those five sampling seeds with ``MSTT/eval_sampling_mean.py``.
 """
 
 from __future__ import annotations

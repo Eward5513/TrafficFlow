@@ -18,6 +18,20 @@ from torch import nn
 FUSION_MODES = ("add", "concat")
 
 
+def resolve_embedding_dims(d_model, base_dim=None, adaptive_dim=None, *, adaptive=False, fusion="add"):
+    """Resolve base/table/backbone widths without changing legacy additive models."""
+    if fusion not in FUSION_MODES:
+        raise ValueError(f"unknown adaptive fusion {fusion!r}")
+    base = int(d_model if base_dim is None else base_dim)
+    table = int(base if adaptive_dim is None else adaptive_dim)
+    output = base + table if adaptive and fusion == "concat" else base
+    if base < 1 or table < 1 or output != int(d_model):
+        raise ValueError(f"embedding base={base}, adaptive={table}, fusion={fusion}, enabled={adaptive} != backbone={d_model}")
+    if adaptive and fusion == "add" and base != table:
+        raise ValueError("add adaptive embedding requires equal base and table widths")
+    return base, table
+
+
 class InputEmbedding(nn.Module):
     def __init__(
         self,

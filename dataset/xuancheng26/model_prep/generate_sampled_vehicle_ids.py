@@ -105,8 +105,13 @@ def load_eligible_ids(path: Path) -> list[str]:
     return sorted(found)
 
 
-def daily_seed(date_label: str) -> int:
-    digest = hashlib.sha256(f"{GLOBAL_SEED}_{date_label}".encode("utf-8")).digest()
+def daily_seed(date_label: str, global_seed: int = GLOBAL_SEED) -> int:
+    """Derive one day's shuffle seed from a sampling seed and the date label.
+
+    ``global_seed`` is the sampling seed, not a model-training seed. The
+    default remains 42, so existing callers keep the original permutation.
+    """
+    digest = hashlib.sha256(f"{int(global_seed)}_{date_label}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big")
 
 

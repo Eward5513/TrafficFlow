@@ -27,9 +27,9 @@ from MSTT.model.rope import RotaryEmbedding
 
 
 class AttentionOutputGate(nn.Module):
-    def __init__(self, d_model: int) -> None:
+    def __init__(self, d_model: int, out_dim: int | None = None) -> None:
         super().__init__()
-        self.proj = nn.Linear(d_model, d_model, bias=True)
+        self.proj = nn.Linear(d_model, d_model if out_dim is None else int(out_dim), bias=True)
 
     def forward(self, x: torch.Tensor, attention: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(self.proj(x)) * attention
@@ -49,19 +49,27 @@ class TemporalSelfAttention(nn.Module):
         rope_base: float = 10000.0,
         use_gated_attention: bool = False,
         norm_eps: float = 1e-6,
+        head_dim: int | None = None,
     ) -> None:
         super().__init__()
-        if d_model % num_heads != 0:
-            raise ValueError("d_model must be divisible by num_heads")
         self.num_heads = int(num_heads)
-        self.head_dim = d_model // num_heads
+        self.d_model = int(d_model)
+        if head_dim is None:
+            if d_model % num_heads != 0:
+                raise ValueError("d_model must be divisible by num_heads")
+            self.head_dim = d_model // num_heads
+        else:
+            if int(head_dim) < 1:
+                raise ValueError("head_dim must be positive")
+            self.head_dim = int(head_dim)
+        self.inner_dim = self.num_heads * self.head_dim
         self.attention_dropout = float(attention_dropout)
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        self.qkv = nn.Linear(d_model, 3 * self.inner_dim, bias=False)
+        self.out_proj = nn.Linear(self.inner_dim, d_model, bias=False)
         self.q_norm = nn.RMSNorm(self.head_dim, eps=norm_eps) if use_qk_norm else None
         self.k_norm = nn.RMSNorm(self.head_dim, eps=norm_eps) if use_qk_norm else None
         self.rope = RotaryEmbedding(self.head_dim, rope_base) if use_rope else None
-        self.gate = AttentionOutputGate(d_model) if use_gated_attention else None
+        self.gate = AttentionOutputGate(d_model, self.inner_dim) if use_gated_attention else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, steps, nodes, width = x.shape
@@ -79,11 +87,11 @@ class TemporalSelfAttention(nn.Module):
             dropout_p=self.attention_dropout if self.training else 0.0,
             is_causal=False,
         )
-        attention = attention.transpose(1, 2).reshape(batch * nodes, steps, width)
+        attention = attention.transpose(1, 2).reshape(batch * nodes, steps, self.inner_dim)
         if self.gate is not None:
             attention = self.gate(seq, attention)
         out = self.out_proj(attention)
-        return out.view(batch, nodes, steps, width).permute(0, 2, 1, 3)
+        return out.view(batch, nodes, steps, self.d_model).permute(0, 2, 1, 3)
 
 
 def _edge_attention_chunk(
@@ -174,12 +182,20 @@ class SparseSpatialAttention(nn.Module):
         chunk_size: int | None = 64,
         use_checkpoint: bool = True,
         norm_eps: float = 1e-6,
+        head_dim: int | None = None,
     ) -> None:
         super().__init__()
-        if d_model % num_heads != 0:
-            raise ValueError("d_model must be divisible by num_heads")
         self.num_heads = int(num_heads)
-        self.head_dim = d_model // num_heads
+        self.d_model = int(d_model)
+        if head_dim is None:
+            if d_model % num_heads != 0:
+                raise ValueError("d_model must be divisible by num_heads")
+            self.head_dim = d_model // num_heads
+        else:
+            if int(head_dim) < 1:
+                raise ValueError("head_dim must be positive")
+            self.head_dim = int(head_dim)
+        self.inner_dim = self.num_heads * self.head_dim
         self.num_nodes = int(graph.num_nodes)
         self.attention_dropout = float(attention_dropout)
         self.chunk_size = chunk_size
@@ -187,14 +203,14 @@ class SparseSpatialAttention(nn.Module):
         self.register_buffer("src", graph.src.clone(), persistent=False)
         self.register_buffer("dst", graph.dst.clone(), persistent=False)
         self.register_buffer("edge_type", graph.edge_type.clone(), persistent=False)
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        self.qkv = nn.Linear(d_model, 3 * self.inner_dim, bias=False)
+        self.out_proj = nn.Linear(self.inner_dim, d_model, bias=False)
         self.q_norm = nn.RMSNorm(self.head_dim, eps=norm_eps) if use_qk_norm else None
         self.k_norm = nn.RMSNorm(self.head_dim, eps=norm_eps) if use_qk_norm else None
         self.edge_type_bias = (
             nn.Parameter(torch.zeros(graph.num_edge_types, self.num_heads)) if use_edge_type_bias else None
         )
-        self.gate = AttentionOutputGate(d_model) if use_gated_attention else None
+        self.gate = AttentionOutputGate(d_model, self.inner_dim) if use_gated_attention else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, steps, nodes, width = x.shape
@@ -216,7 +232,7 @@ class SparseSpatialAttention(nn.Module):
             chunk_size=self.chunk_size,
             use_checkpoint=self.use_checkpoint,
         )
-        attention = attention.reshape(batch, steps, nodes, width)
+        attention = attention.reshape(batch, steps, nodes, self.inner_dim)
         if self.gate is not None:
             attention = self.gate(x, attention)
         return self.out_proj(attention)
@@ -279,23 +295,31 @@ class GlobalSpatialAttention(nn.Module):
         chunk_size: int | None = None,
         use_checkpoint: bool = False,
         norm_eps: float = 1e-6,
+        head_dim: int | None = None,
     ) -> None:
         super().__init__()
-        if d_model % num_heads != 0:
-            raise ValueError("d_model must be divisible by num_heads")
         if use_edge_type_bias:
             raise ValueError("global spatial attention has no graph edges; set use_edge_type_bias=False")
         self.num_heads = int(num_heads)
-        self.head_dim = d_model // num_heads
+        self.d_model = int(d_model)
+        if head_dim is None:
+            if d_model % num_heads != 0:
+                raise ValueError("d_model must be divisible by num_heads")
+            self.head_dim = d_model // num_heads
+        else:
+            if int(head_dim) < 1:
+                raise ValueError("head_dim must be positive")
+            self.head_dim = int(head_dim)
+        self.inner_dim = self.num_heads * self.head_dim
         self.num_nodes = int(graph.num_nodes)
         self.attention_dropout = float(attention_dropout)
         self.chunk_size = chunk_size
         self.use_checkpoint = bool(use_checkpoint)
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        self.qkv = nn.Linear(d_model, 3 * self.inner_dim, bias=False)
+        self.out_proj = nn.Linear(self.inner_dim, d_model, bias=False)
         self.q_norm = nn.RMSNorm(self.head_dim, eps=norm_eps) if use_qk_norm else None
         self.k_norm = nn.RMSNorm(self.head_dim, eps=norm_eps) if use_qk_norm else None
-        self.gate = AttentionOutputGate(d_model) if use_gated_attention else None
+        self.gate = AttentionOutputGate(d_model, self.inner_dim) if use_gated_attention else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, steps, nodes, width = x.shape
@@ -313,7 +337,7 @@ class GlobalSpatialAttention(nn.Module):
             chunk_size=self.chunk_size,
             use_checkpoint=self.use_checkpoint,
         )
-        attention = attention.transpose(1, 2).reshape(batch, steps, nodes, width)
+        attention = attention.transpose(1, 2).reshape(batch, steps, nodes, self.inner_dim)
         if self.gate is not None:
             attention = self.gate(x, attention)
         return self.out_proj(attention)
