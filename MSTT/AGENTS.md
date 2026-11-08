@@ -23,10 +23,20 @@ Input [B, 12, N, C]
   output [B, N, C_out]
 ```
 
-`num_layers` is 1. `attention_order` is `TS`. `ffn_placement` is
-`after_spatial`. `validate_config` rejects anything else. QK-Norm, temporal
+`num_layers` is 1. The default `attention_layout` is `factorized_ts`:
+`attention_order` is `TS` and `ffn_placement` is `after_spatial`.
+`validate_config` rejects any other factorized stack. QK-Norm, temporal
 RoPE, and pre-RMSNorm stay on. Sparse spatial attention remains registered in
 `model/attention.py::SPATIAL_ATTENTION` and is not the default.
+
+`attention_layout=joint_st` is the authorized single-run alternative. It
+removes the separate temporal and spatial sublayers. One centered 3-step
+joint attention reads every road at `t-1`, `t`, and `t+1` (the two existing
+steps at either end of the window; the missing step is not copied), applies
+one softmax over that time-major key set, then the same SwiGLU, flatten
+head, and conservation projection. QK-Norm and temporal RoPE stay on the real
+time index `0..11`. The default config remains `factorized_ts`. The joint
+experiment config is `configs/joint_st3_projected.json`.
 
 ## Adding a module
 

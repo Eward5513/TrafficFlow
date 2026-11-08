@@ -26,10 +26,19 @@ class RotaryEmbedding(nn.Module):
         angles = torch.cat((angles, angles), dim=-1)
         return angles.cos().to(dtype), angles.sin().to(dtype)
 
+    def rotate_time(self, x: torch.Tensor) -> torch.Tensor:
+        """Rotate the second-to-last axis as positions ``0 .. T-1``.
+
+        Leading axes share those positions. A road index must not be placed on
+        this axis: it is a time offset inside the observed window, not a
+        flattened time-by-node coordinate.
+        """
+        cos, sin = self.cos_sin(int(x.shape[-2]), x.device, x.dtype)
+        return apply_rotary(x, cos, sin)
+
     def forward(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """``q``/``k`` [..., T, head_dim] with the step axis second to last."""
-        cos, sin = self.cos_sin(int(q.shape[-2]), q.device, q.dtype)
-        return apply_rotary(q, cos, sin), apply_rotary(k, cos, sin)
+        return self.rotate_time(q), self.rotate_time(k)
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:

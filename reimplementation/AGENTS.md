@@ -3,7 +3,7 @@
 Shared training infrastructure for spatiotemporal traffic models lives here.
 Model-specific mathematics stay inside each model directory (`stgcn/`,
 `dcrnn/`, `graph_wavenet/`, `stsgcn/`, `stfgnn/`, `pdformer/`, `stid/`,
-`staeformer/`, `s2s_gcn_lstm/`, `tlast/`).
+`staeformer/`, `s2s_gcn_lstm/`, `tlast/`, `asttn/`, `stjgcn/`).
 
 Rules:
 
@@ -31,9 +31,11 @@ See `reimplementation/stgcn/AGENTS.md`, `reimplementation/stgcn/README.md`,
 `reimplementation/stsgcn/AGENTS.md`, `reimplementation/stfgnn/AGENTS.md`,
 `reimplementation/pdformer/AGENTS.md`, `reimplementation/stid/AGENTS.md`,
 `reimplementation/staeformer/AGENTS.md`,
-`reimplementation/s2s_gcn_lstm/AGENTS.md`, and
-`reimplementation/tlast/AGENTS.md`.
+`reimplementation/s2s_gcn_lstm/AGENTS.md`,
+`reimplementation/tlast/AGENTS.md`,
+`reimplementation/asttn/AGENTS.md`, and
+`reimplementation/stjgcn/AGENTS.md`.
 DCRNN, Graph WaveNet, STSGCN, STFGNN, PDFormer, STID, STAEformer,
-Seq2seq GCN-LSTM, and TLAST have separate experiment directories; do not
+Seq2seq GCN-LSTM, TLAST, ASTTN, and STJGCN have separate experiment directories; do not
 write one model's outputs into another.
 STID, STAEformer, and TLAST do not use a road adjacency matrix.

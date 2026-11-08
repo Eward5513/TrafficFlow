@@ -24,6 +24,7 @@ MSTT/
 │   ├── embedding.py
 │   ├── adaptive_embedding.py
 │   ├── attention.py
+│   ├── joint_attention.py
 │   ├── transformer_block.py
 │   ├── ffn.py
 │   ├── rope.py
@@ -95,6 +96,23 @@ instead of replacing it. Pass an empty `--output-root` for another copy.
 
 Soft and projected conservation are All2All only. They add a loss term or a
 differentiable projection. They do not change the TSF block.
+
+## Joint 3-step attention
+
+`configs/joint_st3_projected.json` keeps the projected All2All backbone and
+replaces T then S with one joint attention. For each of the 12 steps, the
+N road queries attend once to every road in the centered 3-step window.
+The first step uses times 0 and 1, the last uses times 10 and 11, and no
+boundary token is repeated. RoPE uses the original time index. The FFN
+width stays 176, the loss stays `final MAE + 0.5 * raw MAE`, and the
+checkpoint is the mean validation inflow MAE over seeds 42–46.
+
+```bash
+python MSTT/train.py --config MSTT/configs/joint_st3_projected.json \
+  --task All2All --penetration p05 --gpu 1
+```
+
+Results go to `training_results_3s/MSTT/joint_st3_projected/in_all__out_all/p05/seed_42/`.
 
 ## Historical results
 

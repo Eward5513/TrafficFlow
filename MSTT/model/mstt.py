@@ -18,8 +18,9 @@ from MSTT.model.embedding import InputEmbedding, resolve_embedding_dims
 from MSTT.model.ffn import SwiGLU
 from MSTT.model.graph import SpatialGraph
 from MSTT.model.head import PredictionHead
+from MSTT.model.joint_attention import JointSTAttention
 from MSTT.model.conservation import ConservationProjection
-from MSTT.model.transformer_block import MSTTBlock
+from MSTT.model.transformer_block import JointSTBlock, MSTTBlock
 
 
 @dataclass
@@ -60,6 +61,11 @@ class MSTTConfig:
     adaptive_embedding_fusion: str = "concat"
     ffn_placement: str = "after_spatial"
     attention_order: str = "TS"
+    attention_layout: str = "factorized_ts"
+    joint_temporal_window: int = 3
+    joint_temporal_alignment: str = "centered"
+    joint_query_chunk: int = 256
+    joint_checkpoint: bool = True
     steps_per_day: int = 288
     norm_eps: float = 1e-6
     head_type: str = "flatten"
@@ -90,15 +96,24 @@ class MSTT(nn.Module):
         self.graph_direction = None if graph is None else str(graph.direction)
         self.graph_edges = None if graph is None else int(graph.num_edges)
         if graph is None:
-            raise ValueError(f"spatial_attention={config.spatial_attention!r} needs a SpatialGraph")
+            raise ValueError("MSTT needs a SpatialGraph to check the node count")
         if int(graph.num_nodes) != int(config.num_nodes):
             raise ValueError(f"graph has {graph.num_nodes} nodes, config {config.num_nodes}")
         base_dim, adaptive_dim = resolve_embedding_dims(
             config.d_model, config.base_embedding_dim, config.adaptive_embedding_dim,
             adaptive=config.use_adaptive_embedding, fusion=config.adaptive_embedding_fusion,
         )
-        if config.num_layers != 1 or config.attention_order != "TS" or config.ffn_placement != "after_spatial":
-            raise ValueError("MSTT requires one T→S→FFN block")
+        if config.num_layers != 1:
+            raise ValueError("MSTT has exactly one block")
+        layout = str(config.attention_layout)
+        if layout == "factorized_ts":
+            if config.attention_order != "TS" or config.ffn_placement != "after_spatial":
+                raise ValueError("factorized_ts requires one T→S→FFN block")
+        elif layout == "joint_st":
+            if config.joint_temporal_alignment != "centered" or int(config.joint_temporal_window) % 2 != 1:
+                raise ValueError("joint_st requires a centered odd temporal window")
+        else:
+            raise ValueError(f"unknown attention_layout {layout!r}")
         temporal_heads = config.num_heads if config.temporal_num_heads is None else int(config.temporal_num_heads)
         spatial_heads = config.num_heads if config.spatial_num_heads is None else int(config.spatial_num_heads)
         self.embedding = InputEmbedding(
@@ -116,40 +131,61 @@ class MSTT(nn.Module):
             tod_dim=config.tod_embedding_dim,
             dow_dim=config.dow_embedding_dim,
         )
-        self.blocks = nn.ModuleList(
-        MSTTBlock(
-            config.d_model,
-            temporal=TemporalSelfAttention(
+        if layout == "factorized_ts":
+            block = MSTTBlock(
                 config.d_model,
-                temporal_heads,
-                attention_dropout=config.attention_dropout,
-                use_qk_norm=config.use_qk_norm,
-                use_rope=config.use_rope,
-                rope_base=config.rope_base,
-                use_gated_attention=config.use_gated_attention,
+                temporal=TemporalSelfAttention(
+                    config.d_model,
+                    temporal_heads,
+                    attention_dropout=config.attention_dropout,
+                    use_qk_norm=config.use_qk_norm,
+                    use_rope=config.use_rope,
+                    rope_base=config.rope_base,
+                    use_gated_attention=config.use_gated_attention,
+                    norm_eps=config.norm_eps,
+                    head_dim=config.attention_head_dim,
+                ),
+                spatial=build_spatial_attention(
+                    config.spatial_attention,
+                    d_model=config.d_model,
+                    num_heads=spatial_heads,
+                    graph=graph,
+                    attention_dropout=config.attention_dropout,
+                    use_qk_norm=config.use_qk_norm,
+                    use_gated_attention=config.use_gated_attention,
+                    use_edge_type_bias=config.use_edge_type_bias,
+                    chunk_size=config.spatial_chunk_size,
+                    use_checkpoint=config.spatial_checkpoint,
+                    norm_eps=config.norm_eps,
+                    head_dim=config.attention_head_dim,
+                ),
+                ffn=SwiGLU(config.d_model, config.ffn_hidden_dim),
+                dropout=config.dropout,
                 norm_eps=config.norm_eps,
-                head_dim=config.attention_head_dim,
-            ),
-            spatial=build_spatial_attention(
-                config.spatial_attention,
-                d_model=config.d_model,
-                num_heads=spatial_heads,
-                graph=graph,
-                attention_dropout=config.attention_dropout,
-                use_qk_norm=config.use_qk_norm,
-                use_gated_attention=config.use_gated_attention,
-                use_edge_type_bias=config.use_edge_type_bias,
-                chunk_size=config.spatial_chunk_size,
-                use_checkpoint=config.spatial_checkpoint,
+            )
+        else:
+            block = JointSTBlock(
+                config.d_model,
+                joint=JointSTAttention(
+                    config.d_model,
+                    temporal_heads,
+                    window=int(config.joint_temporal_window),
+                    alignment=str(config.joint_temporal_alignment),
+                    query_chunk=int(config.joint_query_chunk),
+                    use_checkpoint=bool(config.joint_checkpoint),
+                    attention_dropout=config.attention_dropout,
+                    use_qk_norm=config.use_qk_norm,
+                    use_rope=config.use_rope,
+                    rope_base=config.rope_base,
+                    use_gated_attention=config.use_gated_attention,
+                    norm_eps=config.norm_eps,
+                    head_dim=config.attention_head_dim,
+                ),
+                ffn=SwiGLU(config.d_model, config.ffn_hidden_dim),
+                dropout=config.dropout,
                 norm_eps=config.norm_eps,
-                head_dim=config.attention_head_dim,
-            ),
-            ffn=SwiGLU(config.d_model, config.ffn_hidden_dim),
-            dropout=config.dropout,
-            norm_eps=config.norm_eps,
-        )
-        for _ in range(config.num_layers)
-        )
+            )
+        self.blocks = nn.ModuleList([block])
         self.head = PredictionHead(
             config.d_model,
             config.input_window,
@@ -206,27 +242,63 @@ class MSTT(nn.Module):
 
     def architecture_summary(self) -> dict[str, Any]:
         ffns = [module for module in self.modules() if isinstance(module, SwiGLU)]
-        temporal_count = spatial_count = 1
-        block_order = ["T", "S", "FFN"]
-        return {
+        layout = str(self.config.attention_layout)
+        summary = {
             "embedding": self.embedding_summary(),
+            "attention_layout": layout,
             "d_model": self.head.norm.normalized_shape[0],
-            "temporal_attention_count": temporal_count,
-            "spatial_attention_count": spatial_count,
-            "temporal_num_heads": int(self.blocks[0].temporal.num_heads),
-            "spatial_num_heads": int(self.blocks[0].spatial.num_heads),
-            "temporal_head_dim": int(self.blocks[0].temporal.head_dim),
-            "spatial_head_dim": int(self.blocks[0].spatial.head_dim),
-            "attention_inner_dim": int(self.blocks[0].temporal.inner_dim),
             "temporal_causal_mask": False,
-            "block_order": block_order,
             "independent_ffn_count": len(ffns),
             "ffn_hidden_dims": [ffn.w_gate.out_features for ffn in ffns],
             "total_parameters": self.parameter_count(),
         }
+        if layout == "joint_st":
+            joint = self.blocks[0].joint
+            summary.update(
+                joint_attention_count=1,
+                temporal_attention_count=0,
+                spatial_attention_count=0,
+                joint_num_heads=int(joint.num_heads),
+                joint_head_dim=int(joint.head_dim),
+                attention_inner_dim=int(joint.inner_dim),
+                joint_temporal_window=int(joint.window),
+                joint_temporal_alignment=str(joint.alignment),
+                joint_boundary="crop_valid_times_no_token_repeat",
+                joint_spatial_scope="all_nodes_including_self",
+                block_order=["JointST", "FFN"],
+            )
+            return summary
+        summary.update(
+            joint_attention_count=0,
+            temporal_attention_count=1,
+            spatial_attention_count=1,
+            temporal_num_heads=int(self.blocks[0].temporal.num_heads),
+            spatial_num_heads=int(self.blocks[0].spatial.num_heads),
+            temporal_head_dim=int(self.blocks[0].temporal.head_dim),
+            spatial_head_dim=int(self.blocks[0].spatial.head_dim),
+            attention_inner_dim=int(self.blocks[0].temporal.inner_dim),
+            block_order=["T", "S", "FFN"],
+        )
+        return summary
 
     def spatial_summary(self) -> dict[str, Any]:
-        """Which spatial attention was built and what restricts its keys."""
+        """Which attention mixes roads, and what restricts its keys."""
+        if str(self.config.attention_layout) == "joint_st":
+            joint = self.blocks[0].joint
+            return {
+                "type": "joint_st",
+                "graph_mask": False,
+                "keys_per_query": "N times the valid centered window",
+                "time_window": int(joint.window),
+                "alignment": str(joint.alignment),
+                "boundary": "crop_valid_times_no_token_repeat",
+                "spatial_scope": "all_nodes_including_self",
+                "includes_self": True,
+                "causal_mask": False,
+                "query_chunk": int(joint.query_chunk),
+                "checkpoint": bool(joint.use_checkpoint),
+                "stored_spatial_attention_used": False,
+            }
         name = self.config.spatial_attention
         if name == "global":
             return {

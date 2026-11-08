@@ -1,6 +1,7 @@
 """Checkpoint evaluation adapters; model-specific mathematics remain in each engine."""
 from __future__ import annotations
 from pathlib import Path
+import numpy as np
 import torch
 from data_root import CODE_ROOT as PROJECT_ROOT
 from reimplementation.common.data.r_only_npz_dataset import build_dataloader, loss_scale
@@ -126,6 +127,30 @@ def build_predictor(name: str, config: dict, device: torch.device):
         def predict(batch, _model=model, _config=config, _mean=None, _std=None):
             mean, std = read_state_target_scaler(Path(_config["data_root"]), _config.get("target_type", "inflow"))
             return predict_batch(_model, batch, _config, mean, std)
+
+    elif name == "asttn":
+        from reimplementation.asttn.engine import build_model as build_asttn
+        from reimplementation.asttn.engine import collect_data_info as asttn_info
+        from reimplementation.asttn.engine import predict_batch as asttn_predict
+
+        info = asttn_info(Path(config["data_root"]), config, project_root=PROJECT_ROOT)
+        model = build_asttn(config, info["spatial_embedding"]).to(device)
+
+        def predict(batch, _model=model, _config=config):
+            return asttn_predict(_model, batch, _config)
+
+    elif name == "stjgcn":
+        from reimplementation.stjgcn.engine import build_model as build_stjgcn
+        from reimplementation.stjgcn.engine import collect_data_info as stjgcn_info
+        from reimplementation.stjgcn.engine import predict_batch as stjgcn_predict
+
+        info = stjgcn_info(Path(config["data_root"]), config, project_root=PROJECT_ROOT)
+        model = build_stjgcn(config).to(device)
+        adjacency_fw = torch.from_numpy(np.asarray(info["A_fw"], dtype=np.float32)).to(device)
+        adjacency_bw = torch.from_numpy(np.asarray(info["A_bw"], dtype=np.float32)).to(device)
+
+        def predict(batch, _model=model, _config=config, _fw=adjacency_fw, _bw=adjacency_bw):
+            return stjgcn_predict(_model, batch, _config, _fw, _bw)
 
     elif name == "staeformer":
         from reimplementation.staeformer.engine import build_model, assemble_batch_payload, model_kwargs_from_payload, _day_args

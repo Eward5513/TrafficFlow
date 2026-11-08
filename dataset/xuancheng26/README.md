@@ -116,6 +116,8 @@ python3 run_fcd_simulations_3s.py --smoke-test
    - `generate_undirected_center_distance.py`
    - `generate_stfgnn_temporal_adjacency.py`（只用训练日的全量流量）
    - `generate_pdformer_relations.py`（只用训练日的全量流量）
+   - `generate_asttn_node2vec.py`（静态 R 图、种子 42、128 维 node2vec，写到 `graph/asttn/`）
+   - `generate_stjgcn_predefined_graph.py`（有向中心距离上的 PeMSD7 预定义图，写到 `graph/stjgcn/`）
 8. `generate_training_support_files.py`：节点表、校验报告和各模型配置。
 9. `prepare_rf_features.py`：随机森林的辅助特征。它不训练模型。
 10. `run_all_models_training.py`：调用 `reimplementation/` 里的训练脚本。

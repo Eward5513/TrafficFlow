@@ -28,6 +28,8 @@ MODEL_NAMES = (
     "staeformer",
     "s2s_gcn_lstm",
     "tlast",
+    "asttn",
+    "stjgcn",
     "MSTT",
     "RF",
 )

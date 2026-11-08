@@ -27,6 +27,8 @@ ocr -> analysis/road_network + analysis/matching
  \-> reimplementation/staeformer
  \-> reimplementation/s2s_gcn_lstm
  \-> reimplementation/tlast
+ \-> reimplementation/asttn
+ \-> reimplementation/stjgcn
  \-> MSTT (new backbone, not a baseline port; see MSTT/AGENTS.md)
  ```
 

@@ -116,6 +116,11 @@ MODEL_DEFAULTS: dict[str, Any] = {
     "adaptive_embedding_fusion": "add",
     "ffn_placement": "after_spatial",
     "attention_order": "TS",
+    "attention_layout": "factorized_ts",
+    "joint_temporal_window": 3,
+    "joint_temporal_alignment": "centered",
+    "joint_query_chunk": 256,
+    "joint_checkpoint": True,
     "steps_per_day": 288,
     "norm_eps": 1e-6,
     "head_type": "flatten",
@@ -128,6 +133,11 @@ MODEL_DEFAULTS: dict[str, Any] = {
 # Fill them in before rebuilding an old model from its resolved_config.json.
 LEGACY_DEFAULTS: dict[str, Any] = {
     "attention_order": "TS",
+    "attention_layout": "factorized_ts",
+    "joint_temporal_window": 3,
+    "joint_temporal_alignment": "centered",
+    "joint_query_chunk": 256,
+    "joint_checkpoint": True,
     "temporal_num_heads": None, "spatial_num_heads": None,
     "attention_head_dim": None,
     "base_embedding_dim": None, "adaptive_embedding_dim": None,
@@ -218,6 +228,8 @@ _OPTIONAL_INT_KEYS = {"ffn_hidden_dim", "max_train_batches", "max_eval_batches",
                       "temporal_num_heads", "spatial_num_heads", "attention_head_dim"}
 _CHOICES = {
     "attention_order": ("TS",),
+    "attention_layout": ("factorized_ts", "joint_st"),
+    "joint_temporal_alignment": ("centered",),
     "adaptive_embedding_fusion": ("add", "concat"),
     "ffn_placement": ("after_spatial",),
     "conservation_mode": ("none", "soft", "projected"),
@@ -278,7 +290,19 @@ def resolve_ffn_hidden_dim(d_model: int, value: int | None) -> int:
 
 def validate_config(config: Mapping[str, Any]) -> None:
     if int(config["num_layers"]) != 1:
-        raise ValueError("MSTT has exactly one TSF block")
+        raise ValueError("MSTT has exactly one block")
+    layout = str(config.get("attention_layout", "factorized_ts"))
+    if layout == "factorized_ts":
+        if config["attention_order"] != "TS" or config["ffn_placement"] != "after_spatial":
+            raise ValueError("factorized_ts requires attention_order=TS and ffn_placement=after_spatial")
+    elif layout == "joint_st":
+        window = int(config["joint_temporal_window"])
+        if window < 1 or window % 2 == 0:
+            raise ValueError("joint_temporal_window must be a positive odd integer")
+        if int(config["joint_query_chunk"]) < 1:
+            raise ValueError("joint_query_chunk must be positive")
+        if str(config["joint_temporal_alignment"]) != "centered":
+            raise ValueError("joint_temporal_alignment must be centered")
     for key, choices in _CHOICES.items():
         if str(config.get(key, MODEL_DEFAULTS.get(key))) not in choices:
             raise ValueError(f"{key}={config[key]!r} not in {choices}")

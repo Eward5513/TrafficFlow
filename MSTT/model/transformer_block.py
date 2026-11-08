@@ -1,16 +1,44 @@
-"""Pre-RMSNorm spatio-temporal block.
+"""Pre-RMSNorm blocks.
 
-```text
-H = H + Dropout(TemporalAttention(RMSNorm_t(H)))
-H = H + Dropout(SpatialAttention(RMSNorm_s(H)))
-H = H + Dropout(SwiGLU(RMSNorm_f(H)))
-```
+``MSTTBlock`` is the default T, then S, then SwiGLU stack.
+``JointSTBlock`` replaces those two attention sublayers with one joint window.
 """
 
 from __future__ import annotations
 
 import torch
 from torch import nn
+
+
+class JointSTBlock(nn.Module):
+    """One joint space-time attention sublayer, then the original SwiGLU.
+
+    ```text
+    H = H + Dropout(JointSTAttention(RMSNorm(H)))
+    H = H + Dropout(SwiGLU(RMSNorm(H)))
+    ```
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        *,
+        joint: nn.Module,
+        ffn: nn.Module,
+        dropout: float = 0.0,
+        norm_eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        self.joint_norm = nn.RMSNorm(d_model, eps=norm_eps)
+        self.joint = joint
+        self.ffn_norm = nn.RMSNorm(d_model, eps=norm_eps)
+        self.ffn = ffn
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        hidden = hidden + self.dropout(self.joint(self.joint_norm(hidden)))
+        hidden = hidden + self.dropout(self.ffn(self.ffn_norm(hidden)))
+        return hidden
 
 
 class MSTTBlock(nn.Module):
