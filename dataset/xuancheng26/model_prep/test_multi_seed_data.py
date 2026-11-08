@@ -8,7 +8,7 @@ import numpy as np
 
 import multi_seed_common as common
 import generate_multi_seed_flow_data as flow
-import generate_sampled_vehicle_ids as sampling
+import vehicle_sampling as sampling
 
 
 class MultiSeedTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class MultiSeedTests(unittest.TestCase):
         self.assertIsNone(common.historical(root, 43, "p10", "test", "2023_04_26", "window"))
         self.assertIsNone(common.historical(root, 43, "p05", "train", "2023_04_01", "window"))
         source = common.historical(root, 43, "p05", "test", "2023_04_26", "window")
-        self.assertIn("seed_43/window_data/p05/test", str(source))
+        self.assertIsNone(source)
 
     def test_pending_rate_gaps_match_original_event_traversal(self):
         with tempfile.TemporaryDirectory() as directory:

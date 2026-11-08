@@ -17,6 +17,8 @@ from analysis_lib import (
     LEGACY_ROOT,
     MODELS,
     PHASE3S_DATA,
+    PHASE3S_DATA_RETIRED,
+    PHASE3S_FLAT_NORMALIZATION,
     PHASE3S_ROOT,
     RATE_RE,
     RATES,
@@ -246,9 +248,12 @@ def scan_seed(model: str, root_name: str, seed_dir: Path, model_dir: Path) -> di
     if config is not None:
         data_root = str(config.get("data_root") or "")
         normalization = str(config.get("normalization") or config.get("state_normalization") or "")
-    expected_root = LEGACY_DATA.as_posix() if root_name == "legacy" else PHASE3S_DATA.as_posix()
-    if data_root and data_root != expected_root:
-        reasons.append(f"data_root {data_root} is not {expected_root}")
+    if root_name == "legacy":
+        expected_roots = {LEGACY_DATA.as_posix()}
+    else:
+        expected_roots = {PHASE3S_DATA.as_posix(), PHASE3S_DATA_RETIRED.as_posix()}
+    if data_root and data_root not in expected_roots:
+        reasons.append(f"data_root {data_root} is not one of {sorted(expected_roots)}")
     include = "yes" if not reasons and kind["family"] != "nonstandard" else "no"
     return {
         "Model": model,
@@ -557,7 +562,7 @@ def protocol_issues(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
 def scaler_fingerprint() -> dict[str, Any]:
     paths = {
         "legacy_normalization": LEGACY_DATA / "normalization.json",
-        "phase3s_normalization": PHASE3S_DATA / "normalization.json",
+        "phase3s_normalization": PHASE3S_FLAT_NORMALIZATION,
         "phase3s_state_normalization": PHASE3S_DATA / "state_normalization.json",
         "legacy_split": LEGACY_DATA / "split_manifest.json",
         "phase3s_split": PHASE3S_DATA / "split_manifest.json",

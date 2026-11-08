@@ -63,7 +63,7 @@ def summarize(output_root: Path) -> None:
     from MSTT.trainer import merge_summary, run_is_complete, summary_from_disk
 
     rows = []
-    for meta in sorted(output_root.glob("p*/*/seed_*/run_metadata.json")):
+    for meta in sorted(output_root.glob("in_*__out_*/p*/seed_*/run_metadata.json")):
         if run_is_complete(meta.parent):
             rows.append(summary_from_disk(meta.parent))
     merged = merge_summary(output_root, rows) if rows else []

@@ -1,8 +1,6 @@
-"""Optional multi-state windows under ``{rate}/{split}/{date}/{state}.npz``.
+"""Aligned canonical dated state windows; channels and scaler semantics are shared.
 
-Omitting ``--input-type`` and ``--target-type`` keeps the legacy flat
-``{rate}/{split}.npz`` inflow task. Passing either flag reads the dated
-files and does not replace the legacy normalization or NPZ paths.
+All model entry points default to seed42 training and five-seed evaluation.
 """
 
 from __future__ import annotations
@@ -52,18 +50,31 @@ def channel_count(kind: str) -> int:
 
 
 def add_state_type_arguments(parser) -> None:
+    parser.add_argument("--sampling-root", type=Path, default=None)
+    parser.add_argument("--model-seed", type=int, default=None)
+    parser.add_argument("--train-sampling-seed", type=int, default=42)
+    parser.add_argument("--evaluation-sampling-seeds", type=int, nargs="+", default=[42,43,44,45,46])
     parser.add_argument("--input-type", dest="input_type", choices=STATE_TYPES, default=None)
     parser.add_argument("--target-type", dest="target_type", choices=STATE_TYPES, default=None)
 
 
 def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[str, Any]:
-    """Apply explicit state flags. No-op when both flags are omitted."""
+    """Resolve canonical sampling paths and task channels (inflow defaults)."""
     input_flag = getattr(args, "input_type", None)
     target_flag = getattr(args, "target_type", None)
-    if input_flag is None and target_flag is None:
-        return config
-    input_type = input_flag or "inflow"
-    target_type = target_flag or "inflow"
+    from reimplementation.common.data.sampling_seeds import configure_sampling
+    config = dict(config)
+    for key in ("sampling_root", "model_seed", "train_sampling_seed", "evaluation_sampling_seeds"):
+        if getattr(args, key, None) is not None:
+            config[key] = str(getattr(args, key)) if key == "sampling_root" else getattr(args, key)
+    if getattr(args, "seed", None) is not None and getattr(args, "model_seed", None) is None:
+        config["model_seed"] = args.seed
+    if getattr(args, "data_root", None) is not None:
+        from data_root import sampling_root_from_window
+        config["sampling_root"] = str(sampling_root_from_window(args.data_root))
+    config = configure_sampling(config, model_name=model_name)
+    input_type = input_flag or config.get("input_type") or "inflow"
+    target_type = target_flag or config.get("target_type") or "inflow"
     if model_name in _INCOMPATIBLE_ALL and (input_type == "all" or target_type == "all"):
         raise ReimplementationError(_INCOMPATIBLE_ALL[model_name])
     config["input_type"] = input_type
@@ -200,7 +211,7 @@ class AlignedStateWindowDataset(Dataset):
         for day in days:
             directory = self.data_root / self.rate / split / day
             incoming = load_npz(directory / f"{input_type}.npz")
-            outgoing = load_npz(directory / f"{target_type}.npz")
+            outgoing = incoming if input_type == target_type else load_npz(directory / f"{target_type}.npz")
             _assert_same_windows(directory, incoming, outgoing)
             if int(incoming["x"].shape[-1]) != input_channels:
                 raise ReimplementationError(
@@ -279,21 +290,14 @@ def open_split_dataset(
     num_nodes: int | None = None,
     expected_count: int | None = None,
 ) -> Dataset:
-    """Legacy flat NPZ when state flags are absent; dated files otherwise."""
-    from reimplementation.common.data.r_only_npz_dataset import ROnlyNPZDataset
+    """Read the canonical dated package; training is restricted to sampling42."""
+    from data_root import sampling_root_from_window
+    sampling_root_from_window(data_root)
+    if split == "train" and Path(data_root).parent.parent.name != "seed_42":
+        raise ReimplementationError("training uses sampling seed42 only")
 
     steps = int(n_his if n_his is not None else _history_steps(config))
     nodes = int(num_nodes if num_nodes is not None else config["num_nodes"])
-    if not state_types_selected(config):
-        return ROnlyNPZDataset(
-            Path(data_root) / rate_tag(rate) / f"{split}.npz",
-            n_his=steps,
-            num_nodes=nodes,
-            input_channels=int(config.get("input_channels", 1)),
-            output_channels=int(config.get("output_channels", 1)),
-            output_steps=_output_steps(config),
-            expected_count=expected_count,
-        )
     return AlignedStateWindowDataset(
         Path(data_root),
         rate,

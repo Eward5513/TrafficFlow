@@ -1,13 +1,7 @@
-"""Train and validate one (task, penetration) pair of MSTT.
+"""Fixed-backbone MSTT: train sampling42; select and evaluate on five samplings.
 
-Protocol (shared with the 9-task baselines in ``training_results_3s``):
-
-- inputs: partial state of the chosen rate; labels: full state, same windows
-- 20 / 4 / 5 days -> 5540 / 1108 / 1385 windows, 12 steps, label = last step
-- loss and checkpoint selection on validation only
-- the p05 test split lives under ``sampling_seeds/`` and is scored afterwards
-  by ``MSTT/eval_sampling_mean.py``, not during training
-- metrics: shared ``traffic_metrics`` on the raw scale, per channel for All2All
+Each model keeps its own optimizer/loss. Validation selection uses the mean
+physical-scale MAE, and the restored best checkpoint evaluates all five test inputs.
 """
 
 from __future__ import annotations
@@ -25,6 +19,10 @@ from typing import Any, Iterable, Mapping
 
 import numpy as np
 import torch
+
+from data_root import sampling_run_results_dir
+from reimplementation.common.data.sampling_seeds import configure_sampling
+from reimplementation.common.sampling_evaluation import evaluate_sampling, sampling_history, save_sampling_outputs
 
 from MSTT import CODE_VERSION, MODEL_NAME
 from MSTT.config import (
@@ -69,11 +67,12 @@ from reimplementation.common.utils.reproducibility import seed_everything
 from reimplementation.common.utils.structured_logging import JsonlLogger
 
 BATCH_KEYS = ("x", "y", "y_raw", "day_index", "window_start_slot", "target_slot", "sample_index")
-REQUIRED_OUTPUTS = ("best_checkpoint.pt", "training_history.json", "validation_metrics.json")
+REQUIRED_OUTPUTS = ("best_checkpoint.pt", "last_checkpoint.pt", "training_history.json", "validation_sampling_metrics.json", "test_sampling_metrics.json")
 
 
 def run_directory(output_root: Path, rate: str, task: str, seed: int) -> Path:
-    return Path(output_root) / rate_tag(rate) / task / f"seed_{int(seed)}"
+    spec = task_spec(task)
+    return sampling_run_results_dir(output_root, spec.input_type, spec.target_type, rate_tag(rate), seed)
 
 
 def is_smoke(config: Mapping[str, Any]) -> bool:
@@ -210,6 +209,7 @@ class TaskRun:
     """Everything one (task, rate, seed) run needs, built once."""
 
     def __init__(self, config: Mapping[str, Any], *, task: str, rate: str, output_root: Path, splits=SPLITS) -> None:
+        config = configure_sampling(config)
         validate_config(config)
         validate_conservation_task(config, task_spec(task))
         self.config = dict(config)
@@ -276,20 +276,35 @@ class TaskRun:
     def build_model(self) -> MSTT:
         return MSTT(self.model_config, self.graph, target_mean=self.mean_y, target_std=self.std_y).to(self.device)
 
-    def evaluate(self, model: MSTT, split: str, limit: int | None = None) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    def evaluate(self, model: MSTT, split: str, limit: int | None = None):
+        if split not in self.loaders:
+            datasets = open_task_datasets(self.data_root, self.rate, self.task, n_his=self.n_his,
+                                         num_nodes=self.num_nodes, sample_counts=self.package["sample_counts"], splits=(split,))
+            self.loaders[split] = build_loader(datasets[split], batch_size=int(self.config["eval_batch_size"]),
+                                               shuffle=False, seed=self.seed, num_workers=int(self.config["num_workers"]))
+        def one(loader):
+            metrics, packed = self._evaluate_single(model, split, loader, limit)
+            packed["metrics"] = metrics
+            return packed
+        packed = evaluate_sampling(self.loaders[split], one)
+        metrics = packed["metrics"]
+        metrics.update(sampling_history(packed["sampling_metrics"]) if split == "validation" else {})
+        return metrics, packed
+
+    def _evaluate_single(self, model, split, loader, limit):
         model.eval()
         amp = str(self.config["amp"])
         mean, std = self.scaler_args()
         diagnostics = {}
         if self.task.name == "All2All":
             packed, diagnostics = collect_conservation_predictions(
-                _limited(self.loaders[split], limit),
+                _limited(loader, limit),
                 lambda batch: predict_with_aux(model, batch, amp=amp, device=self.device),
                 criterion=self.criterion, device=self.device,
             )
         else:
             packed = collect_split_predictions(
-                _limited(self.loaders[split], limit),
+                _limited(loader, limit),
                 lambda batch: predict(model, batch, amp=amp, device=self.device),
                 mean_y=mean, std_y=std, device=self.device,
             )
@@ -308,10 +323,15 @@ class TaskRun:
         return metrics, packed
 
     def selection_value(self, metrics: Mapping[str, Any]) -> float:
-        if self.config.get("conservation_mode", "none") != "none":
-            return float(metrics["mae"])
-        key = {"val_loss": "loss", "val_mae": "mae", "val_scaled_mae": "scaled_mae"}[str(self.config["selection_metric"])]
-        return float(metrics[key])
+        """Checkpoint rule. The training loss stays the mean raw MAE.
+
+        Four-channel inputs that predict inflow keep that loss, but the saved
+        epoch is the one with the smallest validation inflow MAE. After the
+        five-seed aggregation this is the mean of the five inflow MAEs.
+        """
+        if self.task.input_type == "all" and "inflow_mae" in metrics:
+            return float(metrics["inflow_mae"])
+        return float(metrics["mae"])
 
 
 def _rng_state(loader) -> dict[str, Any]:
@@ -398,6 +418,7 @@ def _write_history(run_dir: Path, history: list[dict[str, Any]]) -> None:
 
 
 def _save_split(run: TaskRun, split: str, metrics: dict[str, Any], packed: Mapping[str, np.ndarray], save_predictions: bool) -> None:
+    save_sampling_outputs(run.run_dir, split, packed)
     atomic_write_json(run.run_dir / f"{split}_metrics.json", metrics)
     if save_predictions:
         save_mstt_predictions(run.run_dir / f"{split}_predictions.npz", packed)
@@ -416,6 +437,8 @@ def train_task(
     validate_conservation_task(config, task_spec(task))
     output_root = conservation_output_root(config, output_root)
     planned_dir = run_directory(output_root, rate, task_spec(task).name, int(config["seed"]))
+    from reimplementation.common.data.sampling_seeds import protect_historical_results
+    protect_historical_results(planned_dir)
     stored_config = planned_dir / "resolved_config.json"
     if stored_config.is_file():
         stored = json.loads(stored_config.read_text(encoding="utf-8"))
@@ -566,6 +589,7 @@ def train_task(
                 **{f"train_{key}": value / max(train_samples, 1) for key, value in component_sums.items()},
                 "grad_norm_max": grad_norm_max,
                 "val_loss": val_metrics["loss"],
+                **{k: v for k, v in val_metrics.items() if k.startswith(("mean_validation_", "std_validation_", "validation_seed_"))},
                 **{f"val_{key}": val_metrics[key] for key in CORE + ("scaled_mae",)},
                 **{f"val_{name}_mae": val_metrics[f"{name}_mae"] for name in run.channel_names},
                 **{f"val_{key}": value for key, value in val_metrics.items()
@@ -583,9 +607,10 @@ def train_task(
             save_checkpoint(run_dir / "last_checkpoint.pt", checkpoint_payload(epoch))
             _write_history(run_dir, history)
             logger.log({"stage": "epoch", "task": run.task.name, "rate": run.rate, **row})
+            inflow_text = f" val_inflow={row['val_inflow_mae']:.5f}" if "val_inflow_mae" in row else ""
             print(
                 f"[MSTT] {run.task.name} {run.rate} epoch={epoch} lr={lr:.2e} train={row['train_loss']:.5f} "
-                f"val_loss={row['val_loss']:.5f} val_mae={row['val_mae']:.5f} "
+                f"val_loss={row['val_loss']:.5f} val_mae={row['val_mae']:.5f}{inflow_text} "
                 f"{'*' if improved else ''} {row['epoch_total_seconds']:.1f}s",
                 flush=True,
             )
@@ -612,6 +637,8 @@ def train_task(
             raise ReimplementationError(
                 f"validation evaluated {val_metrics['sample_count']} != {expected_validation}"
             )
+        test_metrics, test_packed = run.evaluate(model, "test", limit)
+        _save_split(run, "test", test_metrics, test_packed, bool(cfg["save_test_predictions"]))
         clock.mark_experiment_end()
         metadata = build_run_metadata(
             model=MODEL_NAME,
@@ -650,7 +677,10 @@ def train_task(
                 "batch_size": int(cfg["batch_size"]),
                 **conservation_settings(cfg),
                 "selection_prediction": "final",
-                "effective_selection_metric": "val_mae" if cfg.get("conservation_mode", "none") != "none" else cfg["selection_metric"],
+                "effective_selection_metric": (
+                    "val_inflow_mae" if run.task.input_type == "all" and "inflow" in run.task.output_channels
+                    else ("val_mae" if cfg.get("conservation_mode", "none") != "none" else cfg["selection_metric"])
+                ),
                 "embedding": model.embedding_summary(),
                 "architecture": model.architecture_summary(),
                 "spatial": model.spatial_summary(),

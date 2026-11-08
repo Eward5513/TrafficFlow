@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from data_root import xuancheng26_model_results_3s_dir, xuancheng26_training_3s_root
+from data_root import xuancheng26_model_results_3s_dir, xuancheng26_training_3s_root, xuancheng26_sampling_root, sampling_window_root
 
 STATE_CHANNELS = ("inflow", "outflow", "accumulation_start", "accumulation_end")
 RATES = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
@@ -167,7 +167,11 @@ TRAIN_DEFAULTS: dict[str, Any] = {
 }
 
 DATA_DEFAULTS: dict[str, Any] = {
-    "data_root": (xuancheng26_training_3s_root() / "window_data").as_posix(),
+    "sampling_root": str(xuancheng26_sampling_root()),
+    "model_seed": 42,
+    "train_sampling_seed": 42,
+    "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
+    "data_root": sampling_window_root(xuancheng26_sampling_root()).as_posix(),
     "graph_path": (xuancheng26_training_3s_root() / "graph" / "r_graph.npz").as_posix(),
     "r_nodes": (xuancheng26_training_3s_root() / "graph" / "r_nodes.csv").as_posix(),
     "output_root": xuancheng26_model_results_3s_dir("MSTT").as_posix(),
@@ -175,6 +179,11 @@ DATA_DEFAULTS: dict[str, Any] = {
     "target_mode": "last-observed-step",
 }
 
+
+# Frozen from the completed best experiment, including its nonstandard FFN width.
+_FROZEN = json.loads((Path(__file__).parent / "configs/default.json").read_text(encoding="utf-8"))
+MODEL_DEFAULTS.update({k: v for k, v in _FROZEN.items() if k in MODEL_DEFAULTS})
+TRAIN_DEFAULTS.update({k: v for k, v in _FROZEN.items() if k in TRAIN_DEFAULTS})
 
 def default_config() -> dict[str, Any]:
     return copy.deepcopy({**DATA_DEFAULTS, **MODEL_DEFAULTS, **TRAIN_DEFAULTS})
@@ -208,9 +217,9 @@ _OPTIONAL_INT_KEYS = {"ffn_hidden_dim", "max_train_batches", "max_eval_batches",
                       "base_embedding_dim", "adaptive_embedding_dim",
                       "temporal_num_heads", "spatial_num_heads", "attention_head_dim"}
 _CHOICES = {
-    "attention_order": ("TS", "ST", "TTFSSF"),
+    "attention_order": ("TS",),
     "adaptive_embedding_fusion": ("add", "concat"),
-    "ffn_placement": ("after_spatial", "after_each_attention", "after_type_group"),
+    "ffn_placement": ("after_spatial",),
     "conservation_mode": ("none", "soft", "projected"),
     "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
@@ -218,7 +227,7 @@ _CHOICES = {
     "embedding_fusion": ("add", "concat"),
     "loss": ("mae_raw", "huber_raw", "mse_raw"),
     "channel_balance": ("none", "target_std"),
-    "selection_metric": ("val_loss", "val_mae", "val_scaled_mae"),
+    "selection_metric": ("mean_validation_mae",),
     "amp": ("none", "bf16", "fp16"),
     "lr_scheduler": ("cosine", "none"),
 }
@@ -233,6 +242,9 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
         kwargs: dict[str, Any] = {"dest": key, "default": argparse.SUPPRESS}
         if key in _OPTIONAL_INT_KEYS:
             kwargs["type"] = _parse_optional_int
+        elif isinstance(value, list):
+            kwargs["type"] = int
+            kwargs["nargs"] = "+"
         elif isinstance(value, bool):
             kwargs["type"] = _parse_bool
         elif isinstance(value, int):
@@ -250,7 +262,10 @@ def overlay_args(config: dict[str, Any], args: argparse.Namespace) -> dict[str, 
     for key in default_config():
         if hasattr(args, key):
             config[key] = getattr(args, key)
-    return config
+    if hasattr(args, "seed") and not hasattr(args, "model_seed"):
+        config["model_seed"] = args.seed
+    from reimplementation.common.data.sampling_seeds import configure_sampling
+    return configure_sampling(config)
 
 
 def resolve_ffn_hidden_dim(d_model: int, value: int | None) -> int:
@@ -262,13 +277,8 @@ def resolve_ffn_hidden_dim(d_model: int, value: int | None) -> int:
 
 
 def validate_config(config: Mapping[str, Any]) -> None:
-    if config.get("attention_order", "TS") == "ST" and config.get("ffn_placement") != "after_each_attention":
-        raise ValueError("attention_order=ST requires ffn_placement=after_each_attention (SFTF)")
-    if config.get("attention_order") == "TTFSSF":
-        if config.get("ffn_placement") != "after_type_group" or int(config.get("num_layers", 0)) != 2:
-            raise ValueError("attention_order=TTFSSF requires num_layers=2 and ffn_placement=after_type_group")
-    elif config.get("ffn_placement") == "after_type_group":
-        raise ValueError("ffn_placement=after_type_group is only valid for attention_order=TTFSSF")
+    if int(config["num_layers"]) != 1:
+        raise ValueError("MSTT has exactly one TSF block")
     for key, choices in _CHOICES.items():
         if str(config.get(key, MODEL_DEFAULTS.get(key))) not in choices:
             raise ValueError(f"{key}={config[key]!r} not in {choices}")
@@ -281,8 +291,8 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if config.get("conservation_mode", "none") != "none":
         if config["loss"] != "mae_raw" or config["channel_balance"] != "none":
             raise ValueError("soft/projected requires unbalanced raw-scale MAE (mae_raw, channel_balance=none)")
-        if config["selection_metric"] not in ("val_loss", "val_mae"):
-            raise ValueError("soft/projected selects final raw-scale MAE; use val_mae or val_loss")
+        if config["selection_metric"] not in ("mean_validation_mae",):
+            raise ValueError("soft/projected selects mean_validation_mae")
         if config["embedding_fusion"] != "concat" or int(config["input_window"]) != 12:
             raise ValueError("soft/projected requires concat embeddings and a 12-step window")
         if config["spatial_attention"] not in ("sparse", "global"):

@@ -21,7 +21,6 @@ class MSTTBlock(nn.Module):
         temporal: nn.Module,
         spatial: nn.Module,
         ffn: nn.Module,
-        temporal_ffn: nn.Module | None = None,
         dropout: float = 0.0,
         norm_eps: float = 1e-6,
     ) -> None:
@@ -33,13 +32,9 @@ class MSTTBlock(nn.Module):
         self.ffn_norm = nn.RMSNorm(d_model, eps=norm_eps)
         self.ffn = ffn
         self.dropout = nn.Dropout(dropout)
-        self.temporal_ffn = temporal_ffn
-        self.temporal_ffn_norm = nn.RMSNorm(d_model, eps=norm_eps) if temporal_ffn is not None else None
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         hidden = hidden + self.dropout(self.temporal(self.temporal_norm(hidden)))
-        if self.temporal_ffn is not None:
-            hidden = hidden + self.dropout(self.temporal_ffn(self.temporal_ffn_norm(hidden)))
         hidden = hidden + self.dropout(self.spatial(self.spatial_norm(hidden)))
         hidden = hidden + self.dropout(self.ffn(self.ffn_norm(hidden)))
         return hidden

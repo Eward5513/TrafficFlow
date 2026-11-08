@@ -46,6 +46,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    from reimplementation.common.data.state_windows import apply_state_types, finalize_state_scaler
+    config = apply_state_types(config, args, model_name="stgcn")
     tag = rate_tag(args.rate)
     data_root = resolve_path(PROJECT_ROOT, args.data_root or config["data_root"])
     adjacency = resolve_path(PROJECT_ROOT, args.weighted_adjacency or config["weighted_adjacency"])
@@ -60,6 +62,7 @@ def main() -> None:
         num_nodes=int(config["num_nodes"]),
         rates=[tag],
     )
+    data_info = finalize_state_scaler(data_info, config, data_root)
     graph_info = validate_graph(
         adjacency,
         int(config["Ks"]),

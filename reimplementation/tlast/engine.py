@@ -1,8 +1,9 @@
 """Train one Xuancheng26 penetration with the released TLAST objective.
 
-Checkpoint selection uses raw-scale Huber (delta=2), the quantity the
-reference trainer minimizes. Test metrics are the shared MAE / RMSE /
-MAPE_nonzero / WAPE after the best checkpoint is reloaded.
+The training loss stays the reference Huber loss (delta=2). Checkpoint
+selection uses the mean raw-scale MAE across sampling seeds 42–46.
+Test metrics are the shared MAE / RMSE / MAPE_nonzero / WAPE after the
+best checkpoint is reloaded, reported per seed and as mean and sample std.
 """
 
 from __future__ import annotations
@@ -11,6 +12,9 @@ import fcntl
 import hashlib
 import json
 import time
+from reimplementation.common.data.sampling_seeds import sampling_rate_dir
+from reimplementation.common.sampling_evaluation import evaluate_sampling_predictor, sampling_history
+
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -71,10 +75,6 @@ def parameter_sha256(model: torch.nn.Module) -> str:
 
 def _move_batch(batch: Mapping[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     return {key: value.to(device) if torch.is_tensor(value) else value for key, value in batch.items()}
-
-
-def rate_directory(output_root: Path, rate: str, seed: int) -> Path:
-    return Path(output_root) / rate_tag(rate) / f"seed_{int(seed)}"
 
 
 def rate_is_complete(rate_dir: Path) -> bool:
@@ -354,7 +354,10 @@ def run_single_rate(
     data_info = finalize_state_scaler(data_info, config, data_root)
     tag = rate_tag(rate)
     seed = int(config["seed"])
-    rate_dir = rate_directory(output_root, tag, seed)
+    from data_root import sampling_run_results_dir
+    from reimplementation.common.data.sampling_seeds import protect_historical_results
+    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    protect_historical_results(rate_dir)
     if rate_is_complete(rate_dir) and not overwrite and resume_path is None:
         print(f"[tlast] stage=skip rate={tag} dir={rate_dir}", flush=True)
         return _completed_summary(rate_dir, tag)
@@ -372,7 +375,7 @@ def run_single_rate(
     std_y = loss_scale(data_info["std_y_full"])
     criterion = HuberRawLoss(mean_y, std_y, delta=float(config.get("huber_delta", AUTHOR_HUBER_DELTA)))
     start_epoch = 0
-    best_huber = float("inf")
+    best_mae = float("inf")
     train_hash = data_info["file_hashes"][f"{tag}/train.npz"]
     n_his = int(config.get("input_len", config.get("n_his", 12)))
     input_channels = int(config.get("input_channels", config.get("input_dim", 1)))
@@ -404,7 +407,7 @@ def run_single_rate(
         if scheduler is not None and payload.get("scheduler_state_dict"):
             scheduler.load_state_dict(payload["scheduler_state_dict"])
         start_epoch = int(payload.get("epoch", -1)) + 1
-        best_huber = float(payload.get("best_metric", best_huber))
+        best_mae = float(payload.get("best_metric", best_mae))
 
     def checkpoint_payload(epoch: int, metric: float) -> dict[str, Any]:
         return {
@@ -435,7 +438,7 @@ def run_single_rate(
     wait = 0
     best_epoch = -1
     if history:
-        best_epoch = min(history, key=lambda row: float(row["val_huber"]))["epoch"]
+        best_epoch = min(history, key=lambda row: float(row["val_mae"]))["epoch"]
     init_hash = parameter_sha256(model)
     param_count = trainable_parameter_count(model)
     reset_peak_memory(device)
@@ -465,38 +468,35 @@ def run_single_rate(
         if scheduler is not None:
             scheduler.step(epoch + 1)
         model.eval()
-        huber_sum = 0.0
-        mae_sum = 0.0
-        seen = 0
-        with torch.no_grad():
-            for batch in loaders_pack["loaders"]["validation"]:
-                batch = _move_batch(batch, device)
-                prediction = predict_batch(model, batch, config, mean_y, std_y)
-                huber = criterion(prediction, batch["y_raw"])
-                pred_raw = criterion.denormalize(prediction)
-                elements = int(prediction.numel())
-                huber_sum += float(huber.detach().cpu()) * elements
-                mae_sum += float(torch.abs(pred_raw - batch["y_raw"]).sum().detach().cpu())
-                seen += elements
-        val_huber = huber_sum / max(seen, 1)
-        val_mae = mae_sum / max(seen, 1)
+        def validation_predict(batch):
+            return predict_batch(model, batch, config, mean_y, std_y)
+        val_sampling = evaluate_sampling_predictor(
+            loaders_pack["loaders"]["validation"], validation_predict,
+            mean_y=loss_scale(data_info["mean_y_full"]), std_y=loss_scale(data_info["std_y_full"]), device=device,
+        )
+        val_mae = val_sampling["metrics"]["mae"]
+        val_huber = float(np.mean([
+            float(criterion(torch.from_numpy(p["y_pred_normalized"]).to(device),
+                            torch.from_numpy(p["y_raw"]).to(device)).detach().cpu())
+            for p in val_sampling["sampling_predictions"].values()
+        ]))
         history.append(
             {
                 "epoch": epoch,
                 "train_loss": loss_sum / max(loss_count, 1),
                 "val_huber": val_huber,
-                "val_mae": val_mae,
+                "val_mae": val_mae, **sampling_history(val_sampling["sampling_metrics"]),
                 "learning_rate": float(optimizer.param_groups[0]["lr"]),
             }
         )
-        if val_huber < best_huber:
-            best_huber = val_huber
+        if val_mae < best_mae:
+            best_mae = val_mae
             best_epoch = epoch
             wait = 0
-            save_checkpoint(rate_dir / "best_checkpoint.pt", checkpoint_payload(epoch, best_huber))
+            save_checkpoint(rate_dir / "best_checkpoint.pt", checkpoint_payload(epoch, best_mae))
         elif early and (epoch + 1) >= 50:
             wait += 1
-        save_checkpoint(rate_dir / "last_checkpoint.pt", checkpoint_payload(epoch, best_huber))
+        save_checkpoint(rate_dir / "last_checkpoint.pt", checkpoint_payload(epoch, best_mae))
         atomic_write_json(rate_dir / "training_history.json", history)
         logger.log(
             {
@@ -526,11 +526,11 @@ def run_single_rate(
     atomic_write_json(rate_dir / "training_history.json", history)
     if not history:
         raise ReimplementationError("TLAST training produced no epochs")
-    hist_best = min(history, key=lambda row: float(row["val_huber"]))
+    hist_best = min(history, key=lambda row: float(row["val_mae"]))
     ckpt = reload_best_checkpoint(model, rate_dir / "best_checkpoint.pt", device)
     if int(ckpt["epoch"]) != int(hist_best["epoch"]):
         raise ReimplementationError(
-            f"best checkpoint epoch {ckpt['epoch']} != history min-val-huber epoch {hist_best['epoch']}"
+            f"best checkpoint epoch {ckpt['epoch']} != history min-mean-validation-MAE epoch {hist_best['epoch']}"
         )
     best_epoch = int(ckpt["epoch"])
     counts = data_info["sample_counts"]
@@ -596,10 +596,10 @@ def run_single_rate(
         max_epochs=epochs,
         epochs_executed=epochs_this_process if epochs_this_process > 0 else len(history),
         best_epoch=best_epoch,
-        best_metric=float(best_huber),
+        best_metric=float(best_mae),
         early_stopping=early,
         early_stopping_patience=patience if early else None,
-        selection_metric="validation_huber_raw_delta_2",
+        selection_metric="mean_validation_mae",
         clock=clock,
         extra={
             "init_parameter_sha256": init_hash,
@@ -609,7 +609,7 @@ def run_single_rate(
                 "state_normalization_sha256", data_info["normalization_sha256"]
             ),
             "state_normalization_sha256": data_info.get("state_normalization_sha256"),
-            "checkpoint_monitor": "validation_huber_raw",
+            "checkpoint_monitor": "mean_validation_mae",
             "early_stopped": early_stopped,
             "weight_decay": float(config.get("weight_decay", 1e-4)),
             "max_grad_norm": float(config.get("max_grad_norm", 1.0)),
@@ -633,7 +633,7 @@ def run_single_rate(
         expected_test_count=int(counts["test"]),
         expected_val_count=int(counts["validation"]),
         n_his=n_his,
-        history_metric_key="val_huber",
+        history_metric_key="val_mae",
         history_rule="lt",
     )
     result = {
@@ -641,7 +641,7 @@ def run_single_rate(
         "skipped_existing": False,
         "rate": tag,
         "best_epoch": best_epoch,
-        "best_metric": float(best_huber),
+        "best_metric": float(best_mae),
         "early_stopped": early_stopped,
         "epochs": epochs,
         "total_epochs": len(history),
@@ -659,7 +659,7 @@ def run_single_rate(
         "test_negative_prediction_count": test_eval["metrics"].get("negative_prediction_count"),
         "test_negative_prediction_fraction": test_eval["metrics"].get("negative_prediction_fraction"),
         "did_not_use_test_for_selection": True,
-        "checkpoint_monitor": "validation_huber_raw",
+        "checkpoint_monitor": "mean_validation_mae",
         "target_mode": "last-observed-step",
         "train_wall_time_sec": metadata["train_wall_time_sec"],
         "average_epoch_time_sec": metadata["average_epoch_time_sec"],
@@ -716,7 +716,7 @@ def run_all_rates(
                 raise ReimplementationError(f"{summary.get('rate')} did not complete official test evaluation")
         except Exception as exc:
             mark_rate_failed(
-                rate_directory(output_root, rate, int(config["seed"])),
+                sampling_rate_dir(output_root, config, rate),
                 reason=str(exc),
             )
             raise

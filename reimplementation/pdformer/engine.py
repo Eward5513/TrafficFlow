@@ -9,6 +9,9 @@ from __future__ import annotations
 import hashlib
 import sys
 import time
+from reimplementation.common.data.sampling_seeds import sampling_rate_dir
+from reimplementation.common.sampling_evaluation import evaluate_sampling_predictor, sampling_history
+
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -185,7 +188,6 @@ def build_train_dataloader(
     split_counts: Mapping[str, int],
 ):
     tag = rate_tag(rate)
-    path = validate_train_npz_only(data_root / tag / "train.npz")
     dataset = open_split_dataset(
         data_root,
         tag,
@@ -234,34 +236,14 @@ def build_dataloaders(
 
 
 def collect_smoke_data_info(data_root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
-    """Read training NPZ and shared scaler metadata only. No validation/test."""
-    n_his = int(config.get("input_window", config.get("n_his", 12)))
-    manifest = load_json(data_root / "split_manifest.json")
-    normalization = load_json(data_root / "normalization.json")
-    mean_y, std_y = read_target_scaler(normalization)
-    counts = expected_split_counts(manifest)
-    node_ids = load_node_ids(data_root / "node_mapping.csv")
-    train_path = validate_train_npz_only(data_root / "p70" / "train.npz")
-    dataset = ROnlyNPZDataset(
-        train_path,
-        n_his=n_his,
-        num_nodes=int(config["num_nodes"]),
-        expected_count=int(counts["train"]),
-    )
-    recovered = invert_target(dataset.y[:8], mean_y, std_y)
-    if float(np.max(np.abs(recovered - dataset.y_raw[:8]))) > 1e-3:
-        raise ReimplementationError("mean_y_full/std_y_full does not recover y_raw")
-    return {
-        "sample_counts": counts,
-        "mean_y_full": mean_y,
-        "std_y_full": std_y,
-        "node_ids": node_ids,
-        "normalization_sha256": sha256_file(data_root / "normalization.json"),
-        "split_manifest_target_mode": manifest.get("target_mode"),
-        "all_days": [str(item) for item in manifest.get("all_days", [])],
-        "file_hashes": {"p70/train.npz": sha256_file(train_path)},
-        "did_not_read_validation_or_test": True,
-    }
+    from reimplementation.common.data.sampling_seeds import validate_sampling_package
+    info = validate_sampling_package(data_root, n_his=int(config.get("n_his", 12)),
+                                     num_nodes=int(config["num_nodes"]), rates=["p70"], splits=("train",))
+    info = finalize_state_scaler(info, config, data_root)
+    info["all_days"] = load_json(data_root / "split_manifest.json").get("all_days", [])
+    info["did_not_read_validation_or_test"] = True
+    info["did_not_read_adjacency"] = True
+    return info
 
 
 def collect_data_info(data_root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
@@ -273,25 +255,7 @@ def collect_data_info(data_root: Path, config: Mapping[str, Any]) -> dict[str, A
         rates=[rate_tag(item) for item in config["rates"]],
     )
     manifest = load_json(data_root / "split_manifest.json")
-    normalization = load_json(data_root / "normalization.json")
-    mean_y, std_y = read_target_scaler(normalization)
-    counts = expected_split_counts(manifest)
-    node_ids = load_node_ids(data_root / "node_mapping.csv")
-    data_info.update(
-        {
-            "sample_counts": counts,
-            "mean_y_full": mean_y,
-            "std_y_full": std_y,
-            "node_ids": node_ids,
-            "normalization_sha256": sha256_file(data_root / "normalization.json"),
-            "split_manifest_target_mode": manifest.get("target_mode"),
-            "all_days": [str(item) for item in manifest.get("all_days", [])],
-            "file_hashes": {
-                f"{tag}/train.npz": sha256_file(data_root / tag / "train.npz")
-                for tag in [rate_tag(item) for item in config["rates"]]
-            },
-        }
-    )
+    data_info["all_days"] = [day for split in SPLITS for day in manifest[split]]
     return data_info
 
 
@@ -515,7 +479,10 @@ def run_single_rate(
     seed = int(config["seed"])
     seed_everything(seed)
     device = resolve_device(str(config.get("device", "cpu")))
-    rate_dir = output_root / tag / f"seed_{seed}"
+    from data_root import sampling_run_results_dir
+    from reimplementation.common.data.sampling_seeds import protect_historical_results
+    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    protect_historical_results(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(rate_dir / "resolved_config.json", dict(config))
     loaders_pack = build_dataloaders(data_root, tag, config, data_info["sample_counts"])
@@ -528,7 +495,7 @@ def run_single_rate(
         delta=float(config.get("huber_delta", 2.0)),
     )
     start_epoch = 0
-    best_huber = float("inf")
+    best_mae = float("inf")
     best_epoch = -1
     wait = 0
     patience = int(config.get("patience", config.get("early_stopping_patience", 50)))
@@ -553,7 +520,7 @@ def run_single_rate(
         model.load_state_dict(payload["model_state_dict"])
         optimizer.load_state_dict(payload["optimizer_state_dict"])
         start_epoch = int(payload.get("epoch", -1)) + 1
-        best_huber = float(payload.get("best_metric", best_huber))
+        best_mae = float(payload.get("best_metric", best_mae))
 
     def checkpoint_payload(epoch: int, metric: float) -> dict[str, Any]:
         return {
@@ -595,39 +562,33 @@ def run_single_rate(
             optimizer.step()
             train_losses.append(float(loss.detach().cpu()))
         model.eval()
-        val_abs = []
-        val_huber_num = 0.0
-        val_huber_den = 0
-        with torch.no_grad():
-            for batch in loaders_pack["loaders"]["validation"]:
-                batch = _move_batch(batch, device)
-                model_x = assemble_batch_x(batch, config, **week).to(device)
-                pred = model(model_x)
-                pred_raw = invert_target(
-                    pred, loss_scale(data_info["mean_y_full"]), loss_scale(data_info["std_y_full"])
-                )
-                val_abs.append(torch.abs(pred_raw - batch["y_raw"]).mean().cpu())
-                huber = criterion(pred, batch["y_raw"])
-                n_elem = int(pred.numel())
-                val_huber_num += float(huber.detach().cpu()) * n_elem
-                val_huber_den += n_elem
-        val_mae = float(torch.stack(val_abs).mean()) if val_abs else float("inf")
-        val_huber = val_huber_num / max(val_huber_den, 1)
+        def validation_predict(batch):
+            return model(assemble_batch_x(batch, config, **week).to(device))
+        val_sampling = evaluate_sampling_predictor(
+            loaders_pack["loaders"]["validation"], validation_predict,
+            mean_y=loss_scale(data_info["mean_y_full"]), std_y=loss_scale(data_info["std_y_full"]), device=device,
+        )
+        val_mae = val_sampling["metrics"]["mae"]
+        val_huber = float(np.mean([
+            float(criterion(torch.from_numpy(p["y_pred_normalized"]).to(device),
+                            torch.from_numpy(p["y_raw"]).to(device)).detach().cpu())
+            for p in val_sampling["sampling_predictions"].values()
+        ]))
         history.append(
             {
                 "epoch": epoch,
                 "train_loss": float(np.mean(train_losses)),
-                "val_mae": val_mae,
+                "val_mae": val_mae, **sampling_history(val_sampling["sampling_metrics"]),
                 "val_huber": val_huber,
             }
         )
         last_path = rate_dir / "last_checkpoint.pt"
-        save_checkpoint(last_path, checkpoint_payload(epoch, best_huber))
-        if val_huber < best_huber:
-            best_huber = val_huber
+        save_checkpoint(last_path, checkpoint_payload(epoch, best_mae))
+        if val_mae < best_mae:
+            best_mae = val_mae
             best_epoch = epoch
             wait = 0
-            save_checkpoint(rate_dir / "best_checkpoint.pt", checkpoint_payload(epoch, best_huber))
+            save_checkpoint(rate_dir / "best_checkpoint.pt", checkpoint_payload(epoch, best_mae))
         else:
             wait += 1
         logger.log(
@@ -652,7 +613,7 @@ def run_single_rate(
     atomic_write_json(rate_dir / "training_history.json", history)
     if not history:
         raise ReimplementationError("PDFormer training produced no epochs")
-    hist_best = min(history, key=lambda row: float(row["val_huber"]))
+    hist_best = min(history, key=lambda row: float(row["val_mae"]))
     ckpt = reload_best_checkpoint(model, rate_dir / "best_checkpoint.pt", device)
     if int(ckpt["epoch"]) != int(hist_best["epoch"]):
         raise ReimplementationError(
@@ -713,10 +674,10 @@ def run_single_rate(
         max_epochs=epochs,
         epochs_executed=len(history),
         best_epoch=best_epoch,
-        best_metric=float(best_huber),
+        best_metric=float(best_mae),
         early_stopping=True,
         early_stopping_patience=patience,
-        selection_metric="validation_huber_delta_2",
+        selection_metric="mean_validation_mae",
         clock=clock,
         extra={
             "init_parameter_sha256": init_hash,
@@ -724,7 +685,7 @@ def run_single_rate(
             "graph_sha256": str(graph_info.get("graph_sha256", "")),
             "data_file_sha256": train_hash,
             "normalization_sha256": data_info["normalization_sha256"],
-            "checkpoint_monitor": "validation_huber_delta_2",
+            "checkpoint_monitor": "mean_validation_mae",
             "early_stopped": early_stopped,
             "early_stopping_stop_rule": "wait_eq_patience",
             "weight_decay": float(config.get("weight_decay", 0.05)),
@@ -741,14 +702,14 @@ def run_single_rate(
         expected_test_count=int(counts["test"]),
         expected_val_count=int(counts["validation"]),
         n_his=n_his,
-        history_metric_key="val_huber",
+        history_metric_key="val_mae",
         history_rule="lt",
     )
     result = {
         "status": "completed",
         "rate": tag,
         "best_epoch": best_epoch,
-        "best_metric": float(best_huber),
+        "best_metric": float(best_mae),
         "early_stopped": early_stopped,
         "epochs": epochs,
         "total_epochs": len(history),
@@ -765,7 +726,7 @@ def run_single_rate(
         "test_mape_nonzero": float(test_eval["metrics"]["mape_nonzero"]),
         "test_wape": float(test_eval["metrics"]["wape"]),
         "did_not_use_test_for_selection": True,
-        "checkpoint_monitor": "validation_huber_delta_2",
+        "checkpoint_monitor": "mean_validation_mae",
         "target_mode": "last-observed-step",
         "train_wall_time_sec": metadata["train_wall_time_sec"],
         "average_epoch_time_sec": metadata["average_epoch_time_sec"],
@@ -819,7 +780,7 @@ def run_all_rates(
                 raise ReimplementationError(f"{summary.get('rate')} did not complete official test evaluation")
         except Exception as exc:
             mark_rate_failed(
-                output_root / rate_tag(rate) / f"seed_{int(config['seed'])}",
+                sampling_rate_dir(output_root, config, rate),
                 reason=str(exc),
             )
             raise

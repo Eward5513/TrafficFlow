@@ -21,6 +21,9 @@ neighbors. ``k`` other roads are selected; the self-loop is added afterwards.
 
 from __future__ import annotations
 
+import prep_paths
+from prep_paths import sampling_window_root, sampling_partial_flow_root, sampled_vehicle_root
+
 import argparse
 import csv
 import hashlib
@@ -46,7 +49,7 @@ from reimplementation.stfgnn.model.dtw import constrained_dtw_distance
 import prep_paths
 
 TRAINING_ROOT = prep_paths.DEFAULT_TRAINING_ROOT
-WINDOW_ROOT = TRAINING_ROOT / "window_data"
+WINDOW_ROOT = sampling_window_root(TRAINING_ROOT / "sampling_seeds")
 FULL_ROOT = TRAINING_ROOT / "full_flow" / "r-level"
 R_GRAPH = TRAINING_ROOT / "graph" / "r_graph.npz"
 OUTPUT = TRAINING_ROOT / "config" / "stfgnn" / "temporal_adjacency.npy"
@@ -539,7 +542,7 @@ def main(argv: list[str] | None = None) -> int:
     prep_paths.bind(
         sys.modules[__name__],
         TRAINING_ROOT=root,
-        WINDOW_ROOT=root / "window_data",
+        WINDOW_ROOT=sampling_window_root(root / "sampling_seeds"),
         FULL_ROOT=root / "full_flow" / "r-level",
         R_GRAPH=root / "graph" / "r_graph.npz",
         OUTPUT=output,

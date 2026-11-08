@@ -6,8 +6,11 @@ and does not use a GPU or the road adjacency.
 - Read auxiliary features from `<training-root>/config/RF/`. The 3s root is
   `xuancheng26/training_data_3s`.
 - Do not rewrite partial flow, full flow, FCD, or other models' results.
-- Write runs under `<results-root>/in_<input>__out_<target>/<rate>/`.
-  Pass `--run-id` to nest a named experiment under that pair directory.
+- Train on sampling seed 42 partial flow. Validate and test seeds 42–46
+  separately, then average the raw metrics. Fit the feature scaler on seed 42
+  training rows only.
+- Write runs under `<results-root>/in_<input>__out_<target>/<rate>/seed_<model_seed>/`.
+  Pass `--run-id` only when nesting a named experiment beside that layout.
 - After predictions and metrics are saved, delete the fitted scaler, K-Means,
   forest, and LAD coefficients. Keep `model_config.json` and write
   `model_discarded.json` with file sizes and those parameters. Keep

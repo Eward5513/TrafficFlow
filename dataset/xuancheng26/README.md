@@ -105,11 +105,10 @@ python3 run_fcd_simulations_3s.py --smoke-test
 
 1. `generate_r_graph.py`：用 `xuancheng_tls_rebuilt.net.xml` 的真实连接做成有向路段图 `graph/r_graph.npz`。
 2. `generate_r_level_full_flow.py`：按 5 分钟写出 `inflow.csv`、`outflow.csv`、`accumulation_start.csv`、`accumulation_end.csv`。部分观测由 `generate_r_level_partial_flow.py` 用同样四个文件名写到各渗透率目录。
-3. `generate_sampled_vehicle_ids.py`：每个渗透率抽取实际出发的车辆。种子 42，低比例是高比例的前缀。
-4. `generate_r_level_partial_flow.py`：只用抽中的车辆再数一遍 5 分钟流量。
-5. `generate_r_level_windows.py`：切同一天内的 12 步窗口。目标仍是这 12 步的最后一步。它为四个状态和四通道 `all` 各写一份 NPZ，放在 `{rate}/{split}/{date}/` 下，不覆盖原来的 `{split}/{date}.npz` 和 `normalization.json`。训练脚本默认仍读旧的合并窗口；`--input-type` 和 `--target-type` 才读新文件。
-6. `merge_r_level_window_data.py`：按固定日期顺序拼成 train、validation、test。
-   `generate_r_level_sequence_targets.py`（可选，12→12 序列重建）：从全量 CSV 为每天写一份 `window_data/sequence_targets_12step/{split}/{date}.npz`（`full_raw [288,1406,4]` float32 原始计数，节点按 `r_graph.npz` 的 `edge_ids`）和 `sequence_manifest.json`。标签 `Y = full[s:s+12]`，与输入 12 步逐步对齐，不是预测；`X` 继续读已有窗口文件，不重写，也不为每个渗透率重复存标签。沿用 `state_normalization.json` 的 target scaler，不重新拟合。脚本逐日核对 7 个渗透率 × 5 个状态文件的旧 12→1 标签（`y_raw_seq[-1] == y_raw[0]`），只读旧文件并在运行前后比对其大小、mtime 和抽样哈希。支持 `--dates`、`--skip-complete`、`--verify-only`；已存在且与 CSV 不一致的文件需显式 `--overwrite` 才会替换。
+3. `generate_multi_seed_vehicle_sampling.py`：五个采样种子、七个渗透率的车辆名单。seed 42 复用已经核对过的历史名单。
+4. `generate_multi_seed_flow_data.py`：按这些名单写四状态 CSV 和 12→1 窗口。这是当前唯一的流量数据入口。
+5. `generate_r_level_partial_flow.py` 和 `generate_r_level_windows.py` 仍可供单种子核对，默认写到 `sampling_seeds/seed_42/flow/`。正式五种子数据不要靠它们重跑。
+6. `generate_r_level_sequence_targets.py`（可选，12→12 序列重建）：从全量 CSV 为每天写一份 `shared/sequence_targets_12step/{split}/{date}.npz`（`full_raw [288,1406,4]` float32 原始计数，节点按 `r_graph.npz` 的 `edge_ids`）和 `sequence_manifest.json`。标签 `Y = full[s:s+12]`，与输入 12 步逐步对齐，不是预测；`X` 继续读已有窗口文件，不重写，也不为每个渗透率重复存标签。沿用 `state_normalization.json` 的 target scaler，不重新拟合。脚本逐日核对 7 个渗透率 × 5 个状态文件的 12→1 标签（`y_raw_seq[-1] == y_raw[0]`），只读旧文件并在运行前后比对其大小、mtime 和抽样哈希。支持 `--dates`、`--skip-complete`、`--verify-only`；已存在且与 CSV 不一致的文件需显式 `--overwrite` 才会替换。
 7. 模型各自的图，都跟 `r_graph` 的节点顺序：
    - `generate_stgcn_weighted_adjacency.py`
    - `generate_dcrnn_directed_adjacency.py`（DCRNN 和 Graph WaveNet 共用）
@@ -126,10 +125,8 @@ cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
 
 python3 generate_r_graph.py
 python3 generate_r_level_full_flow.py --workers 29
-python3 generate_sampled_vehicle_ids.py --workers 29
-python3 generate_r_level_partial_flow.py --workers 29
-python3 generate_r_level_windows.py --workers 29
-python3 merge_r_level_window_data.py
+python3 generate_multi_seed_vehicle_sampling.py --workers 29
+python3 generate_multi_seed_flow_data.py --workers 24
 python3 generate_training_support_files.py
 python3 generate_r_level_sequence_targets.py --workers 6   # 默认 training_data_3s
 
@@ -143,32 +140,18 @@ python3 generate_r_level_full_flow.py \
   --workers 29
 ```
 
-## 额外的 p05 测试采样
+## 五种子全渗透率数据（3 秒批次）
 
-`generate_sampling_seed_tests.py` 只处理 3 秒批次的测试集。它从 `window_data/split_manifest.json` 读取 5 个测试日，不改训练、验证、全量标签或归一化。五套观测都在 `sampling_seeds/seed_<id>/`，sampling seed 分别是 42、43、44、45、46。原来的测试车辆名单、p05 部分流量和 `p05/test/<date>/` 窗口在 `seed_42`，旧目录里的这些测试路径已经去掉。这个种子只决定抽哪些车，和模型初始化、训练 shuffle 用的 training seed 不是一回事。
+当前唯一的车辆采样和流量入口是 `training_data_3s/sampling_seeds/`。
+训练只用 seed 42。验证和测试分别读取 42–46，再对每份指标取平均。
+不要读已经删除的 `training_data_3s/window_data`、`sampled_vehicle` 或 R-level `partial_flow`。
 
-每天的派生种子是 `SHA256(f"{sampling_seed}_{date}")` 的前 8 字节。候选车仍是当天 `depart >= 0` 的车辆，按字符串排序后用这个派生种子打乱，p05 取前 `int(车辆数 * 0.05)` 辆。同一天的 4 个新种子共用一次 `fcd_data_3s` FCD 扫描，四状态和窗口都来自这同一批车。窗口仍是 5 分钟、同日 12 步、标签为最后一步的全量状态。归一化直接引用原来的 `state_normalization.json`，不重新拟合。
 
-```bash
-cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
-python3 generate_sampling_seed_tests.py --dates 2023_04_26 --workers 1
-python3 generate_sampling_seed_tests.py --workers 32 --skip-complete
-```
-
-新数据在 `training_data_3s/sampling_seeds/seed_<id>/`，42 到 46 五个种子结构相同。总清单是 `sampling_seeds/sampling_manifest.json`，核对结果是 `sampling_seeds/validation_report.json`。评估某一套时，把状态窗口的数据根指到该种子的 `window_data`。这个目录里的 `split_manifest.json`、`state_normalization.json`、训练集、验证集和其他渗透率都链回原文件，只有 `p05/test/<date>/` 是该种子自己的测试观测。例如原来的第 1 套：
-
-```text
-/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/sampling_seeds/seed_42/window_data
-```
-
-五套测试观测要分别计算 MAE，再对这五个 MAE 取平均。不要先把五份输入或预测平均后再算一次 MAE。
-
-## 五种子全渗透率数据 v2（3 秒批次）
 
 新入口为两个独立阶段，默认通过 `data_root.py` 解析
 `xuancheng26/training_data_3s` 和 `xuancheng26/simulation_data/fcd_data_3s`，
 支持 `TRAFFICFLOW_DATA_ROOT`。不运行 SUMO、不训练模型，也不生成 Speed。
-日期以现有 `window_data/split_manifest.json` 为准：train 20 天、validation 4 天、test 5 天。
+日期以 `training_data_3s/shared/split_manifest.json` 为准：train 20 天、validation 4 天、test 5 天。
 五个采样种子 42–46、七档 p05/p10/p20/p30/p40/p50/p70，共 1015 组。
 
 ```text
@@ -183,14 +166,14 @@ training_data_3s/sampling_seeds/
     ├── flow/
     │   ├── partial_flow/<rate>/<date>/<state>.csv
     │   └── window_data/
-    │       ├── split_manifest.json
+    │       ├── split_manifest.json          # 链接到 training_data_3s/shared/
     │       ├── state_normalization.json
     │       ├── state_window_manifest.json
     │       ├── validation_summary.json
     │       ├── node_mapping.csv
     │       └── <rate>/<split>/<date>/{inflow,outflow,accumulation_start,accumulation_end,all}.npz
-    ├── partial_flow/  # 历史 p05 测试路径保留
-    └── window_data/   # 历史兼容路径保留，不能用作新种子的全档数据根
+    └── graph -> ../../graph
+training_data_3s/shared/                     # 五份种子共用的 scaler、manifest、节点表、12→12 标签
 ```
 
 `generate_multi_seed_vehicle_sampling.py` 只处理车辆身份。每日按字符串排序有效车辆，
@@ -217,10 +200,12 @@ Entry/Exit、到达补齐规则，读取缓冲为 16 MiB，不缓存完整轨迹
 
 全量 CSV 和图只引用权威 `training_data_3s/full_flow/r-level`、`training_data_3s/graph`，
 不在各 seed 下复制；NPZ 内保留读取接口要求的 `y/y_raw` 数组。
-seed 42 历史 CSV/NPZ，以及 43–46 的 p05 测试 CSV/NPZ，验证后通过文件级相对软链接复用。
-旧 `seed_*/window_data` 的 train/validation 和非 p05 档仍可能指向 seed 42，
-因此新实验统一指定 `seed_*/flow/window_data`，不需要 seed 42 或 test 特例。
-本阶段不更改模型 Dataset/DataLoader 或实验配置。
+五个种子的窗口元数据都链接到 `training_data_3s/shared/`，不各存一份 scaler。
+新实验只读 `seed_<id>/flow/window_data`、`seed_<id>/flow/partial_flow` 和
+`seed_<id>/sampled_vehicle`。旧的顶层 `window_data`、`sampled_vehicle`、
+R-level `partial_flow`，以及 `seed_*/window_data` 和 `seed_*/partial_flow`，
+在核对进新目录之后已经删除。`full_flow/`、`graph/`、`config/`、M/MR 流量和
+更早的 `xuancheng26/training_data/` 保留。
 
 从仓库根目录运行：
 

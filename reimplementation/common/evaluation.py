@@ -207,13 +207,13 @@ def evaluate_loader(
     expected_count: int,
     n_his: int = 12,
 ) -> dict[str, Any]:
-    packed = collect_split_predictions(
-        loader,
-        predict_fn,
-        mean_y=mean_y,
-        std_y=std_y,
-        device=device,
-    )
+    from reimplementation.common.data.sampling_seeds import is_sampling_loader
+    from reimplementation.common.sampling_evaluation import evaluate_sampling_predictor, save_sampling_outputs
+    if is_sampling_loader(loader):
+        packed = evaluate_sampling_predictor(loader, predict_fn, mean_y=mean_y, std_y=std_y, device=device)
+        save_sampling_outputs(Path(output_dir), split, packed)
+    else:
+        packed = collect_split_predictions(loader, predict_fn, mean_y=mean_y, std_y=std_y, device=device)
     saved = save_split_outputs(
         output_dir,
         split,
@@ -221,6 +221,10 @@ def evaluate_loader(
         expected_count=expected_count,
         n_his=n_his,
     )
+    if "sampling_metrics" in packed:
+        saved["metrics"] = packed["sampling_metrics"]["mean"]
+        saved["sampling_metrics"] = packed["sampling_metrics"]
+        atomic_write_json(Path(output_dir) / f"{split}_metrics.json", saved["metrics"])
     return saved
 
 

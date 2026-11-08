@@ -5,7 +5,7 @@
 三套结果分开比较：
 
 - 原始信号配时上的单通道 inflow。标签来自 `training_data/window_data`。
-- 3 秒相位仿真上的单通道 inflow。标签来自 `training_data_3s/window_data`。名称里的 3 秒指信号相位时长被对齐到 3 秒网格，时间聚合仍是 5 分钟、每天 288 个时间片。
+- 3 秒相位仿真上的单通道 inflow。标签来自 `training_data_3s/sampling_seeds/seed_42/flow/window_data`。名称里的 3 秒指信号相位时长被对齐到 3 秒网格，时间聚合仍是 5 分钟、每天 288 个时间片。历史审计 JSON 里仍记录迁移前的 `training_data_3s/window_data` 路径。
 - 同一套 3 秒相位仿真上的四状态实验。通道顺序是 inflow、outflow、accumulation_start、accumulation_end。
 
 请求中的日期是 2026-04-01 至 2026-04-29。两份 `split_manifest.json` 实际保存的是 2023-04-01 至 2023-04-30，缺 2023-04-09，共 29 天。训练 20 天、验证 4 天（04-22 至 04-25）、测试 5 天（04-26 至 04-30）。下文使用文件里的日期。

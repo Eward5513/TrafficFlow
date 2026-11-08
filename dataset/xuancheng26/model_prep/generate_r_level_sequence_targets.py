@@ -9,10 +9,10 @@ The 12->1 windows define ``X = partial[s:s+12]`` and ``Y = full[s+11]``. The
 ``{rate}/{split}/{date}/{state}.npz`` files. The full state does not depend on
 the penetration rate, so each date is stored once:
 
-    window_data/sequence_targets_12step/{split}/{date}.npz
+    shared/sequence_targets_12step/{split}/{date}.npz
         full_raw    float32 [288, 1406, 4]  raw counts, channel order CHANNELS,
                                             node order graph/r_graph.npz edge_ids
-    window_data/sequence_targets_12step/sequence_manifest.json
+    shared/sequence_targets_12step/sequence_manifest.json
 
 Windows are cut at read time: ``full_raw[s:s+12]`` for ``s = 0..276``. Files are
 written uncompressed so ``full_raw`` can be memory-mapped. Existing window NPZ,
@@ -21,6 +21,9 @@ sample of hashes are compared before and after every run.
 """
 
 from __future__ import annotations
+
+import prep_paths
+from prep_paths import sampling_window_root, sampling_partial_flow_root, sampled_vehicle_root
 
 import argparse
 import hashlib
@@ -83,10 +86,10 @@ SCALER_NOTE = (
 )
 
 TRAINING_ROOT = prep_paths.TRAINING_ROOT_3S
-WINDOW_ROOT = TRAINING_ROOT / "window_data"
+WINDOW_ROOT = sampling_window_root(TRAINING_ROOT / "sampling_seeds")
 FULL_ROOT = TRAINING_ROOT / "full_flow" / "r-level"
 GRAPH_PATH = TRAINING_ROOT / "graph" / "r_graph.npz"
-OUT_ROOT = WINDOW_ROOT / SEQUENCE_DIRNAME
+OUT_ROOT = TRAINING_ROOT / "shared" / SEQUENCE_DIRNAME
 
 
 def sha256_file(path: Path) -> str:
@@ -515,14 +518,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.verify_only and (args.skip_complete or args.overwrite):
         parser.error("--verify-only cannot be combined with --skip-complete or --overwrite")
     root = prep_paths.resolved(args.training_root)
-    window_root = root / "window_data"
+    window_root = sampling_window_root(root / "sampling_seeds")
     prep_paths.bind(
         sys.modules[__name__],
         TRAINING_ROOT=root,
         WINDOW_ROOT=window_root,
         FULL_ROOT=root / "full_flow" / "r-level",
         GRAPH_PATH=root / "graph" / "r_graph.npz",
-        OUT_ROOT=prep_paths.refuse_code_root(window_root / SEQUENCE_DIRNAME),
+        OUT_ROOT=prep_paths.refuse_code_root(root / "shared" / SEQUENCE_DIRNAME),
     )
     days = tuple(args.dates) if args.dates else ALL_DAYS
     unknown = sorted(set(days) - set(ALL_DAYS))

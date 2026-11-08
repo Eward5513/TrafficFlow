@@ -19,16 +19,14 @@ from pathlib import Path
 
 import numpy as np
 
-DATA_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26")
-TRAIN_ROOT = Path(
-    os.environ.get("XUANCHENG_RF_TRAINING_ROOT", str(DATA_ROOT / "training_data"))
-).expanduser().resolve()
+from data_root import (xuancheng26_training_3s_root, sampling_partial_flow_root,
+                       xuancheng26_sampling_root, SAMPLING_SEEDS)
+TRAIN_ROOT = Path(os.environ.get("XUANCHENG_RF_TRAINING_ROOT", str(xuancheng26_training_3s_root()))).expanduser().resolve()
 RF_ROOT = TRAIN_ROOT / "config" / "RF"
-PARTIAL_ROOT = TRAIN_ROOT / "partial_flow"
 FULL_ROOT = TRAIN_ROOT / "full_flow" / "r-level"
 NODES_PATH = TRAIN_ROOT / "graph" / "r_nodes.csv"
 GRAPH_PATH = TRAIN_ROOT / "graph" / "r_graph.npz"
-MANIFEST_PATH = TRAIN_ROOT / "window_data" / "split_manifest.json"
+MANIFEST_PATH = TRAIN_ROOT / "shared" / "split_manifest.json"
 RATES = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
 N_EDGES = 1406
 N_BINS = 288
@@ -196,7 +194,11 @@ def _load_speed(path: Path, edges: list[str], penetration: str, day_name: str, l
 
 
 class XuanchengRFData:
-    def __init__(self) -> None:
+    def __init__(self, sampling_seed: int = 42) -> None:
+        if sampling_seed not in SAMPLING_SEEDS:
+            raise DataError(f"unknown sampling seed {sampling_seed}")
+        self.sampling_seed = sampling_seed
+        self.partial_root = sampling_partial_flow_root(TRAIN_ROOT / "sampling_seeds", sampling_seed)
         self.edges = load_edges()
         self.lanes, self.speed_limit = load_static(self.edges)
         self.days = load_manifest()
@@ -242,7 +244,7 @@ class XuanchengRFData:
         label_states = STATES if target_type == "all" else (target_type,)
         observed = []
         for state in observed_states:
-            path = PARTIAL_ROOT / penetration / day_name / f"{state}.csv"
+            path = self.partial_root / penetration / day_name / f"{state}.csv"
             if not path.is_file():
                 raise DataError(f"missing {path}")
             observed.append(_load_flow(path, self.edges))

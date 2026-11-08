@@ -9,6 +9,9 @@ same names as the full states: ``inflow.csv``, ``outflow.csv``,
 
 from __future__ import annotations
 
+import prep_paths
+from prep_paths import sampling_window_root, sampling_partial_flow_root, sampled_vehicle_root
+
 import argparse
 import csv
 import os
@@ -26,8 +29,9 @@ import prep_paths
 FCD_ROOT = full.FCD_ROOT
 NET_FILE = full.NET_FILE
 FULL_ROOT = full.OUT_ROOT
-SAMPLED_ROOT = prep_paths.DEFAULT_TRAINING_ROOT / "sampled_vehicle"
-OUT_ROOT = prep_paths.DEFAULT_TRAINING_ROOT / "partial_flow"
+_TRAINING = prep_paths.DEFAULT_TRAINING_ROOT
+SAMPLED_ROOT = sampled_vehicle_root(_TRAINING / "sampling_seeds")
+OUT_ROOT = sampling_partial_flow_root(_TRAINING / "sampling_seeds")
 SUMMARY_PATH = OUT_ROOT / "generation_summary.csv"
 RATES = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
 SUMMARY_FIELDS = [
@@ -343,13 +347,13 @@ def main(argv: list[str] | None = None) -> int:
     fcd_root = prep_paths.resolved(args.fcd_root)
     net_file = prep_paths.resolved(args.net_file)
     full_root = root / "full_flow" / "r-level"
-    out_root = root / "partial_flow"
+    out_root = sampling_partial_flow_root(root / "sampling_seeds")
     prep_paths.bind(
         sys.modules[__name__],
         FCD_ROOT=fcd_root,
         NET_FILE=net_file,
         FULL_ROOT=full_root,
-        SAMPLED_ROOT=root / "sampled_vehicle",
+        SAMPLED_ROOT=sampled_vehicle_root(root / "sampling_seeds"),
         OUT_ROOT=out_root,
         SUMMARY_PATH=(
             out_root / "state_migration_summary.csv" if args.migrate_legacy else out_root / "generation_summary.csv"

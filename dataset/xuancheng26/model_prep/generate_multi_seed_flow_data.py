@@ -289,7 +289,7 @@ def validate_inputs(root, fcd, splits):
     if len(records) != 1015:
         raise RuntimeError("duplicate or missing stage-1 groups")
     common.unchanged([manifest["split_manifest"], *manifest["tripinfo_sources"]])
-    normalization = common.load_json(root / "window_data/state_normalization.json")
+    normalization = common.load_json(root / "shared/state_normalization.json")
     if normalization.get("fit_split") != "train" or normalization.get("training_days") != splits["train"]:
         raise RuntimeError("historical normalization does not use exactly the train split; refusing to change it")
     if normalization.get("channels") != list(common.CHANNELS) or normalization.get("formula") != "(value - mean) / std":
@@ -317,7 +317,7 @@ def publish_metadata(root, results, resources, protected, dates, all_dates):
                "csv_files": len(records) * 4, "npz_files": len(records) * 5,
                "fcd_scans_this_run": sum(r.get("fcd", {}).get("scans", 0) for r in results),
                "failures": failed, "protected_inputs": protected,
-               "scaler_source": common.signature(root / "window_data/state_normalization.json"),
+               "scaler_source": common.signature(root / "shared/state_normalization.json"),
                "shared_full_labels": str(root / "full_flow/r-level"), "shared_graph": str(root / "graph"),
                "label_storage": "Authoritative full CSVs and graph are shared; y/y_raw embedded only as required by legacy NPZ schema.",
                "layout": "seed_{sampling_seed}/flow/window_data/{rate}/{split}/{date}/{state}.npz",
@@ -335,19 +335,13 @@ def publish_metadata(root, results, resources, protected, dates, all_dates):
     for seed in common.SEEDS:
         dest = common.window_root(root, seed)
         for name in ("split_manifest.json", "state_normalization.json"):
-            common.link_existing(dest / name, root / "window_data" / name)
+            common.link_existing(dest / name, root / "shared" / name)
         for name in ("node_mapping.csv",):
-            source = root / "window_data" / name
+            source = root / "shared" / name
             if source.is_file():
                 common.link_existing(dest / name, source)
-        state_manifest = common.load_json(root / "window_data/state_window_manifest.json")
-        state_manifest.update(sampling_seed=seed, feature_family="flow", data_version=common.VERSION,
-                              normalization_sha256=payload["scaler_source"]["sha256"],
-                              vehicle_sampling_manifest=str(base / "vehicle_sampling_manifest_v2.json"))
-        common.write_report(dest / "state_window_manifest.json", state_manifest, root)
-        common.write_report(dest / "validation_summary.json", {
-            "overall_validation_passed": passed, "failures": failed, "verified_groups": len(records) // 5,
-            "sampling_seed": seed, "source_report": str(base / "flow_generation_validation_v2.json")}, root)
+        for name in ("state_window_manifest.json", "validation_summary.json"):
+            common.link_existing(dest / name, root / "shared" / name)
     return passed
 
 
@@ -372,7 +366,7 @@ def main():
         full.self_test()
         full.confirm_fcd_starts_at_zero(fcd, dates)
         protected = [common.signature(p) for p in (
-            root / "window_data/split_manifest.json", root / "window_data/state_normalization.json",
+            root / "shared/split_manifest.json", root / "shared/state_normalization.json",
             root / "graph/r_graph.npz", args.net_file,
             root / "sampling_seeds/vehicle_sampling_manifest_v2.json",
             root / "sampling_seeds/vehicle_sampling_validation_v2.json")]

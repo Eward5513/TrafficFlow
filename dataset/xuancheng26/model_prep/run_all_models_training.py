@@ -148,7 +148,7 @@ def verify_rate(rate_dir: Path) -> dict[str, object]:
     history = json.loads((rate_dir / "training_history.json").read_text(encoding="utf-8"))
     best_epoch = None
     if isinstance(history, list) and history:
-        key = "val_huber" if "val_huber" in history[0] else "val_mae" if "val_mae" in history[0] else None
+        key = "mean_validation_mae"
         if key is not None:
             best_epoch = min(history, key=lambda row: float(row[key])).get("epoch")
     return {"mae": float(metrics["mae"]), "rmse": float(metrics["rmse"]), "mape_nonzero": float(metrics["mape_nonzero"]), "best_epoch": best_epoch}
@@ -156,8 +156,11 @@ def verify_rate(rate_dir: Path) -> dict[str, object]:
 
 def run_rate(gpu: int, job: dict, rate: int) -> int:
     tag = rate_tag(rate)
-    result_dir = RESULTS / job["result"]
+    from data_root import task_results_dir
+    result_dir = task_results_dir(RESULTS / job["result"], "inflow", "inflow")
     rate_log_dir = result_dir / tag
+    from reimplementation.common.data.sampling_seeds import protect_historical_results
+    protect_historical_results(result_dir)
     rate_log_dir.mkdir(parents=True, exist_ok=True)
     success = rate_log_dir / "SUCCESS"
     if success.is_file():
@@ -185,7 +188,6 @@ def run_rate(gpu: int, job: dict, rate: int) -> int:
         str(rate),
         "--device",
         "cuda:0",
-        "--overwrite",
     ]
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)

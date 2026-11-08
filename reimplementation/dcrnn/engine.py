@@ -6,6 +6,9 @@ import hashlib
 import resource
 import sys
 import time
+from reimplementation.common.data.sampling_seeds import sampling_rate_dir
+from reimplementation.common.sampling_evaluation import sampling_epoch, sampling_history
+
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -235,6 +238,7 @@ def train_one_epoch(
 
 
 @torch.no_grad()
+@sampling_epoch
 def evaluate_one_epoch(
     model: DCRNNModel,
     loader,
@@ -480,7 +484,10 @@ def run_single_rate(
     seed = int(config["seed"])
     seed_everything(seed)
     device = resolve_device(str(config.get("device", "auto")))
-    rate_dir = output_root / tag / f"seed_{seed}"
+    from data_root import sampling_run_results_dir
+    from reimplementation.common.data.sampling_seeds import protect_historical_results
+    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    protect_historical_results(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(rate_dir / "resolved_config.json", dict(config))
     loaders_pack = build_dataloaders(data_root, tag, config, data_info["sample_counts"])
@@ -610,6 +617,7 @@ def run_single_rate(
             "training_mae_raw_nonzero": train_stats["training_mae_raw_nonzero"],
             "validation_loss": float(val_result["metrics"]["masked_mae_loss"]),
             "validation_mae_raw_all": val_mae,
+            **sampling_history(val_result["sampling_metrics"]),
             "validation_mae_raw_nonzero": float(val_result["metrics"]["mae_raw_nonzero"]),
             "validation_rmse_raw": float(val_result["metrics"]["rmse"]),
             "validation_mape_nonzero": float(val_result["metrics"]["mape_nonzero"]),
@@ -706,14 +714,14 @@ def run_single_rate(
         best_metric=best_metric,
         early_stopping=True,
         early_stopping_patience=patience,
-        selection_metric="validation_mae_raw_including_zero",
+        selection_metric="mean_validation_mae",
         clock=clock,
         extra={
             "init_parameter_sha256": init_hash,
             "code_version": CODE_VERSION,
             "graph_sha256": graph_info["graph_sha256"],
             "data_file_sha256": train_hash,
-            "checkpoint_monitor": "validation_mae_raw_all",
+            "checkpoint_monitor": "mean_validation_mae",
             "filter_type": config.get("filter_type"),
             "horizon": config.get("horizon"),
             "early_stopped": early_stopped,
@@ -869,7 +877,7 @@ def run_all_rates(
                 raise ReimplementationError(f"{rate_tag(rate)} did not reach status=completed")
         except Exception as exc:
             mark_rate_failed(
-                output_root / rate_tag(rate) / f"seed_{int(config['seed'])}",
+                sampling_rate_dir(output_root, config, rate),
                 reason=str(exc),
             )
             raise

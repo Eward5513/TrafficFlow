@@ -20,8 +20,6 @@ from MSTT.model.graph import SpatialGraph
 from MSTT.model.head import PredictionHead
 from MSTT.model.conservation import ConservationProjection
 from MSTT.model.transformer_block import MSTTBlock
-from MSTT.model.sftf_block import SFTFBlock
-from MSTT.model.ttfssf_block import TTFSSFBlock
 
 
 @dataclass
@@ -30,12 +28,12 @@ class MSTTConfig:
     in_channels: int
     out_channels: int
     input_window: int = 12
-    d_model: int = 64
+    d_model: int = 128
     num_heads: int = 4
     temporal_num_heads: int | None = None
     spatial_num_heads: int | None = None
     attention_head_dim: int | None = None
-    num_layers: int = 2
+    num_layers: int = 1
     ffn_hidden_dim: int = 176
     dropout: float = 0.1
     attention_dropout: float = 0.1
@@ -44,8 +42,8 @@ class MSTTConfig:
     use_rope: bool = True
     rope_base: float = 10000.0
     use_gated_attention: bool = False
-    spatial_attention: str = "sparse"
-    use_edge_type_bias: bool = True
+    spatial_attention: str = "global"
+    use_edge_type_bias: bool = False
     spatial_chunk_size: int | None = 64
     spatial_checkpoint: bool = True
     use_tod: bool = True
@@ -56,10 +54,10 @@ class MSTTConfig:
     node_embedding_dim: int = 16
     tod_embedding_dim: int = 8
     dow_embedding_dim: int = 8
-    use_adaptive_embedding: bool = False
-    base_embedding_dim: int | None = None
-    adaptive_embedding_dim: int | None = None
-    adaptive_embedding_fusion: str = "add"
+    use_adaptive_embedding: bool = True
+    base_embedding_dim: int | None = 64
+    adaptive_embedding_dim: int | None = 64
+    adaptive_embedding_fusion: str = "concat"
     ffn_placement: str = "after_spatial"
     attention_order: str = "TS"
     steps_per_day: int = 288
@@ -99,18 +97,8 @@ class MSTT(nn.Module):
             config.d_model, config.base_embedding_dim, config.adaptive_embedding_dim,
             adaptive=config.use_adaptive_embedding, fusion=config.adaptive_embedding_fusion,
         )
-        if config.ffn_placement not in ("after_spatial", "after_each_attention", "after_type_group"):
-            raise ValueError(f"unknown ffn_placement {config.ffn_placement!r}")
-        if config.attention_order not in ("TS", "ST", "TTFSSF"):
-            raise ValueError(f"unknown attention_order {config.attention_order!r}")
-        if config.attention_order == "ST" and config.ffn_placement != "after_each_attention":
-            raise ValueError("ST requires two independent FFNs (SFTF)")
-        if config.attention_order == "TTFSSF":
-            if config.num_layers != 2 or config.ffn_placement != "after_type_group":
-                raise ValueError("TTFSSF requires num_layers=2 and ffn_placement=after_type_group")
-        elif config.ffn_placement == "after_type_group":
-            raise ValueError("ffn_placement=after_type_group is only valid for attention_order=TTFSSF")
-        block_class = SFTFBlock if config.attention_order == "ST" else MSTTBlock
+        if config.num_layers != 1 or config.attention_order != "TS" or config.ffn_placement != "after_spatial":
+            raise ValueError("MSTT requires one T→S→FFN block")
         temporal_heads = config.num_heads if config.temporal_num_heads is None else int(config.temporal_num_heads)
         spatial_heads = config.num_heads if config.spatial_num_heads is None else int(config.spatial_num_heads)
         self.embedding = InputEmbedding(
@@ -128,81 +116,40 @@ class MSTT(nn.Module):
             tod_dim=config.tod_embedding_dim,
             dow_dim=config.dow_embedding_dim,
         )
-        if config.attention_order == "TTFSSF":
-            self.blocks = nn.ModuleList([
-                TTFSSFBlock(
-                    config.d_model,
-                    temporal=TemporalSelfAttention(
-                        config.d_model, temporal_heads,
-                        attention_dropout=config.attention_dropout, use_qk_norm=config.use_qk_norm,
-                        use_rope=config.use_rope, rope_base=config.rope_base,
-                        use_gated_attention=config.use_gated_attention, norm_eps=config.norm_eps,
-                        head_dim=config.attention_head_dim,
-                    ),
-                    temporal_2=TemporalSelfAttention(
-                        config.d_model, temporal_heads,
-                        attention_dropout=config.attention_dropout, use_qk_norm=config.use_qk_norm,
-                        use_rope=config.use_rope, rope_base=config.rope_base,
-                        use_gated_attention=config.use_gated_attention, norm_eps=config.norm_eps,
-                        head_dim=config.attention_head_dim,
-                    ),
-                    spatial=build_spatial_attention(
-                        config.spatial_attention, d_model=config.d_model, num_heads=spatial_heads, graph=graph,
-                        attention_dropout=config.attention_dropout, use_qk_norm=config.use_qk_norm,
-                        use_gated_attention=config.use_gated_attention, use_edge_type_bias=config.use_edge_type_bias,
-                        chunk_size=config.spatial_chunk_size, use_checkpoint=config.spatial_checkpoint,
-                        norm_eps=config.norm_eps, head_dim=config.attention_head_dim,
-                    ),
-                    spatial_2=build_spatial_attention(
-                        config.spatial_attention, d_model=config.d_model, num_heads=spatial_heads, graph=graph,
-                        attention_dropout=config.attention_dropout, use_qk_norm=config.use_qk_norm,
-                        use_gated_attention=config.use_gated_attention, use_edge_type_bias=config.use_edge_type_bias,
-                        chunk_size=config.spatial_chunk_size, use_checkpoint=config.spatial_checkpoint,
-                        norm_eps=config.norm_eps, head_dim=config.attention_head_dim,
-                    ),
-                    ffn_t=SwiGLU(config.d_model, config.ffn_hidden_dim),
-                    ffn_s=SwiGLU(config.d_model, config.ffn_hidden_dim),
-                    dropout=config.dropout,
-                    norm_eps=config.norm_eps,
-                )
-            ])
-        else:
-            self.blocks = nn.ModuleList(
-            block_class(
+        self.blocks = nn.ModuleList(
+        MSTTBlock(
+            config.d_model,
+            temporal=TemporalSelfAttention(
                 config.d_model,
-                temporal=TemporalSelfAttention(
-                    config.d_model,
-                    temporal_heads,
-                    attention_dropout=config.attention_dropout,
-                    use_qk_norm=config.use_qk_norm,
-                    use_rope=config.use_rope,
-                    rope_base=config.rope_base,
-                    use_gated_attention=config.use_gated_attention,
-                    norm_eps=config.norm_eps,
-                    head_dim=config.attention_head_dim,
-                ),
-                spatial=build_spatial_attention(
-                    config.spatial_attention,
-                    d_model=config.d_model,
-                    num_heads=spatial_heads,
-                    graph=graph,
-                    attention_dropout=config.attention_dropout,
-                    use_qk_norm=config.use_qk_norm,
-                    use_gated_attention=config.use_gated_attention,
-                    use_edge_type_bias=config.use_edge_type_bias,
-                    chunk_size=config.spatial_chunk_size,
-                    use_checkpoint=config.spatial_checkpoint,
-                    norm_eps=config.norm_eps,
-                    head_dim=config.attention_head_dim,
-                ),
-                ffn=SwiGLU(config.d_model, config.ffn_hidden_dim),
-                temporal_ffn=(SwiGLU(config.d_model, config.ffn_hidden_dim)
-                              if config.ffn_placement == "after_each_attention" else None),
-                dropout=config.dropout,
+                temporal_heads,
+                attention_dropout=config.attention_dropout,
+                use_qk_norm=config.use_qk_norm,
+                use_rope=config.use_rope,
+                rope_base=config.rope_base,
+                use_gated_attention=config.use_gated_attention,
                 norm_eps=config.norm_eps,
-            )
-            for _ in range(config.num_layers)
-            )
+                head_dim=config.attention_head_dim,
+            ),
+            spatial=build_spatial_attention(
+                config.spatial_attention,
+                d_model=config.d_model,
+                num_heads=spatial_heads,
+                graph=graph,
+                attention_dropout=config.attention_dropout,
+                use_qk_norm=config.use_qk_norm,
+                use_gated_attention=config.use_gated_attention,
+                use_edge_type_bias=config.use_edge_type_bias,
+                chunk_size=config.spatial_chunk_size,
+                use_checkpoint=config.spatial_checkpoint,
+                norm_eps=config.norm_eps,
+                head_dim=config.attention_head_dim,
+            ),
+            ffn=SwiGLU(config.d_model, config.ffn_hidden_dim),
+            dropout=config.dropout,
+            norm_eps=config.norm_eps,
+        )
+        for _ in range(config.num_layers)
+        )
         self.head = PredictionHead(
             config.d_model,
             config.input_window,
@@ -259,16 +206,8 @@ class MSTT(nn.Module):
 
     def architecture_summary(self) -> dict[str, Any]:
         ffns = [module for module in self.modules() if isinstance(module, SwiGLU)]
-        first = self.blocks[0]
-        if isinstance(first, TTFSSFBlock):
-            temporal_count = spatial_count = 2 * len(self.blocks)
-            block_order = list(first.execution_order)
-        elif isinstance(first, SFTFBlock):
-            temporal_count = spatial_count = len(self.blocks)
-            block_order = list(first.execution_order)
-        else:
-            temporal_count = spatial_count = len(self.blocks)
-            block_order = ["T", "FFN_T", "S", "FFN_S"] if first.temporal_ffn is not None else ["T", "S", "FFN"]
+        temporal_count = spatial_count = 1
+        block_order = ["T", "S", "FFN"]
         return {
             "embedding": self.embedding_summary(),
             "d_model": self.head.norm.normalized_shape[0],

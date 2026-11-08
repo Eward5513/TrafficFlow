@@ -201,7 +201,7 @@ def main() -> None:
     protected = [
         topology,
         r_nodes,
-        data_root / "normalization.json",
+        data_root / "state_normalization.json",
         PROJECT_ROOT / "reference" / "STSGCN" / "models" / "stsgcn.py",
         PROJECT_ROOT / "reference" / "STSGCN" / "utils.py",
         PROJECT_ROOT / "reimplementation" / "dcrnn" / "train_r_only_dcrnn.py",

@@ -41,6 +41,7 @@ from analysis_lib import (
     NODE_TABLE,
     OUT_ROOT,
     PHASE3S_DATA,
+    PHASE3S_DATASET_METADATA,
     RATE_PERCENT,
     RATES,
     STATES,
@@ -273,7 +274,7 @@ def load_calendar() -> list[dict[str, object]]:
 
 
 def load_nodes() -> tuple[list[dict[str, str]], str]:
-    metadata = read_json(PHASE3S_DATA / "dataset_metadata.json")
+    metadata = read_json(PHASE3S_DATASET_METADATA)
     legacy = read_json(LEGACY_DATA / "dataset_metadata.json")
     if metadata["node_order_sha256"] != legacy["node_order_sha256"]:
         raise RuntimeError("3-second and legacy node_order_sha256 differ")

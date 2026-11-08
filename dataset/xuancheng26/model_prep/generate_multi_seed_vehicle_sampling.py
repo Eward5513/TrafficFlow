@@ -9,8 +9,8 @@ import multiprocessing as mp
 import sys
 import traceback
 
-import generate_sampled_vehicle_ids as sampling
-from generate_sampling_seed_tests import read_ids
+import vehicle_sampling as sampling
+from vehicle_sampling import read_ids
 import generate_r_level_full_flow as full
 import multi_seed_common as common
 
@@ -89,7 +89,7 @@ def main():
     splits, dates = common.split_manifest(root)
     resources = common.resource_check(root, args.workers)
     with common.stage_lock(root):
-        protected = common.signature(root / "window_data/split_manifest.json")
+        protected = common.signature(root / "shared/split_manifest.json")
         CONTEXT.update(root=root, fcd=fcd, splits=splits)
         sampling.log(f"stage=vehicle_sampling resources={resources}")
         results = []

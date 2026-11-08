@@ -1,14 +1,6 @@
-"""Re-evaluate a finished MSTT run from its checkpoint, independent of training.
+"""Re-evaluate a finished fixed-backbone MSTT checkpoint on all five samplings.
 
-    python MSTT/evaluate.py --task All2All --penetration p30
-    python MSTT/evaluate.py --run-dir <.../MSTT/p30/All2All/seed_42> --splits validation test
-
-Rebuilds data and model from ``resolved_config.json``, loads
-``best_checkpoint.pt`` (or ``--checkpoint``), and writes
-``reeval/<split>_metrics.json`` inside the run directory. Stored official
-metrics are never overwritten; the report lists the largest difference
-against them. The p05 test split is no longer under ``window_data``; score
-those five sampling seeds with ``MSTT/eval_sampling_mean.py``.
+Reports and per-seed predictions go under the run's reeval directory.
 """
 
 from __future__ import annotations
@@ -42,6 +34,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 def main(argv=None) -> dict:
     args = parse_args(argv)
     from MSTT.trainer import TaskRun, run_directory, assert_conservation_checkpoint
+    from reimplementation.common.sampling_evaluation import save_sampling_outputs
     from MSTT.utils.conservation_evaluation import save_mstt_predictions
     from reimplementation.common.utils.atomic_io import atomic_write_json
     from reimplementation.common.utils.checkpoint import load_checkpoint
@@ -73,6 +66,7 @@ def main(argv=None) -> dict:
     report = {"run_dir": run_dir.as_posix(), "checkpoint_epoch": int(checkpoint["epoch"]), "splits": {}}
     for split in args.splits:
         metrics, packed = run.evaluate(model, split, config.get("max_eval_batches"))
+        save_sampling_outputs(run_dir / "reeval", split, packed)
         atomic_write_json(run_dir / "reeval" / f"{split}_metrics.json", metrics)
         if args.save_predictions:
             save_mstt_predictions(run_dir / "reeval" / f"{split}_predictions.npz", packed)

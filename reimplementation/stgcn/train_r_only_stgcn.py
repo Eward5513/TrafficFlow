@@ -121,7 +121,7 @@ def main() -> None:
     if output_root.exists() and any(output_root.iterdir()) and not args.overwrite and args.resume is None:
         raise ReimplementationError(f"{output_root} is not empty; pass --overwrite or --resume")
     output_root.mkdir(parents=True, exist_ok=True)
-    protected = [adjacency, r_nodes, data_root / "normalization.json"]
+    protected = [adjacency, r_nodes, data_root / "state_normalization.json"]
     before = {str(path): sha256_file(path) for path in protected if path.is_file()}
     atomic_write_json(
         output_root / "experiment_manifest.json",

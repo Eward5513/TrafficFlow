@@ -21,7 +21,12 @@ STATS = OUT_ROOT / "stats"
 LEGACY_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_results")
 PHASE3S_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s")
 LEGACY_DATA = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data/window_data")
-PHASE3S_DATA = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/window_data")
+PHASE3S_PACKAGE = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s")
+PHASE3S_DATA = PHASE3S_PACKAGE / "sampling_seeds/seed_42/flow/window_data"
+# Retired flat window root. Historical resolved_config.json still names it.
+PHASE3S_DATA_RETIRED = PHASE3S_PACKAGE / "window_data"
+PHASE3S_DATASET_METADATA = PHASE3S_PACKAGE / "dataset_metadata.json"
+PHASE3S_FLAT_NORMALIZATION = PHASE3S_PACKAGE / "shared/provenance/normalization.json"
 NODE_TABLE = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/graph/r_nodes.csv")
 
 MODELS = (

@@ -92,5 +92,5 @@ def save_mstt_predictions(path, packed):
     if "raw_pred_physical" not in packed:
         save_predictions_npz(path, packed)
     else:
-        atomic_write_npz(path, **packed)
+        atomic_write_npz(path, **{k: v for k, v in packed.items() if isinstance(v, np.ndarray)})
         verify_prediction_npz(path, expected_count=len(packed["pred_raw"]))

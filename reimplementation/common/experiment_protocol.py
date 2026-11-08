@@ -257,6 +257,9 @@ def write_prediction_npz(
     expected_count: int,
     n_his: int = 12,
 ) -> dict[str, Any]:
+    from reimplementation.common.sampling_evaluation import save_sampling_outputs
+    split = Path(path).stem.removesuffix("_predictions")
+    save_sampling_outputs(Path(path).parent, split, packed)
     payload = attach_prediction_aliases(packed)
     arrays: dict[str, Any] = {}
     for key in PREDICTION_ARRAY_KEYS:
@@ -318,6 +321,10 @@ def build_run_metadata(
         "penetration": tag,
         "penetration_rate": tag,
         "seed": int(seed),
+        "model_seed": int(seed),
+        "train_sampling_seed": 42,
+        "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
+        "checkpoint_selection": "mean_validation_mae",
         "parameter_count": int(parameter_count),
         "trainable_parameter_count": int(parameter_count),
         "training_loss": str(training_loss),

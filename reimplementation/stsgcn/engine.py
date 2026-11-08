@@ -11,6 +11,9 @@ import hashlib
 import resource
 import sys
 import time
+from reimplementation.common.data.sampling_seeds import sampling_rate_dir
+from reimplementation.common.sampling_evaluation import sampling_epoch, sampling_history
+
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -280,6 +283,7 @@ def train_one_epoch(
 
 
 @torch.no_grad()
+@sampling_epoch
 def evaluate_one_epoch(
     model: STSGCN,
     loader,
@@ -513,29 +517,9 @@ def run_p70_smoke(
 
 
 def collect_data_info(data_root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
-    manifest = load_json(data_root / "split_manifest.json")
-    normalization = load_json(data_root / "normalization.json")
-    data_report = load_json(data_root / "validation_summary.json")
-    if data_report.get("failures"):
-        raise ReimplementationError(f"data validation report has failures: {data_report['failures']}")
-    if data_report.get("overall_validation_passed") is False:
-        raise ReimplementationError("data validation report overall_validation_passed is false")
-    mean_y, std_y = read_target_scaler(normalization)
-    counts = expected_split_counts(manifest)
-    node_ids = load_node_ids(data_root / "node_mapping.csv")
-    return {
-        "sample_counts": counts,
-        "mean_y_full": mean_y,
-        "std_y_full": std_y,
-        "node_ids": node_ids,
-        "normalization_sha256": sha256_file(data_root / "normalization.json"),
-        "split_manifest_target_mode": manifest.get("target_mode"),
-        "data_validation_status": data_report.get("status"),
-        "file_hashes": {
-            f"{tag}/train.npz": sha256_file(data_root / tag / "train.npz")
-            for tag in [rate_tag(item) for item in config["rates"]]
-        },
-    }
+    from reimplementation.common.data.sampling_seeds import validate_sampling_package
+    return validate_sampling_package(data_root, n_his=int(config.get("n_his", 12)),
+                                     num_nodes=int(config["num_nodes"]), rates=[rate_tag(r) for r in config["rates"]])
 
 
 def run_single_rate(
@@ -554,7 +538,10 @@ def run_single_rate(
     seed = int(config["seed"])
     seed_everything(seed)
     device = resolve_device(str(config.get("device", "auto")))
-    rate_dir = output_root / tag / f"seed_{seed}"
+    from data_root import sampling_run_results_dir
+    from reimplementation.common.data.sampling_seeds import protect_historical_results
+    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    protect_historical_results(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(rate_dir / "resolved_config.json", dict(config))
     loaders_pack = build_dataloaders(data_root, tag, config, data_info["sample_counts"])
@@ -651,6 +638,7 @@ def run_single_rate(
             "epoch": epoch,
             "training_loss": train_stats["training_loss"],
             "validation_mae_raw": val_mae,
+            **sampling_history(val_packed["sampling_metrics"]),
             "validation_rmse_raw": val_packed["metrics"]["rmse"],
             "seconds": time.time() - t0,
             "is_best": improved,
@@ -706,14 +694,14 @@ def run_single_rate(
         best_metric=best_metric,
         early_stopping=False,
         early_stopping_patience=None,
-        selection_metric="validation_mae_raw_including_zero",
+        selection_metric="mean_validation_mae",
         clock=clock,
         extra={
             "init_parameter_sha256": init_hash,
             "code_version": CODE_VERSION,
             "graph_sha256": graph_info["graph_sha256"],
             "data_file_sha256": train_hash,
-            "checkpoint_monitor": "validation_mae_raw_all",
+            "checkpoint_monitor": "mean_validation_mae",
             "early_stopped": False,
             "huber_rho": float(config.get("huber_rho", 1.0)),
         },
@@ -831,7 +819,7 @@ def run_all_rates(
                 raise ReimplementationError(f"{rate_tag(rate)} did not reach status=completed")
         except Exception as exc:
             mark_rate_failed(
-                output_root / rate_tag(rate) / f"seed_{int(config['seed'])}",
+                sampling_rate_dir(output_root, config, rate),
                 reason=str(exc),
             )
             raise

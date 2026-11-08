@@ -9,6 +9,9 @@ of those steps. Legacy flat ``{split}/{date}.npz`` files and
 
 from __future__ import annotations
 
+import prep_paths
+from prep_paths import sampling_window_root, sampling_partial_flow_root, sampled_vehicle_root
+
 import argparse
 import json
 import multiprocessing as mp
@@ -23,10 +26,11 @@ import numpy as np
 
 import prep_paths
 
-PARTIAL_ROOT = prep_paths.DEFAULT_TRAINING_ROOT / "partial_flow"
-FULL_ROOT = prep_paths.DEFAULT_TRAINING_ROOT / "full_flow" / "r-level"
-GRAPH_PATH = prep_paths.DEFAULT_TRAINING_ROOT / "graph" / "r_graph.npz"
-OUT_ROOT = prep_paths.DEFAULT_TRAINING_ROOT / "window_data"
+_TRAINING = prep_paths.DEFAULT_TRAINING_ROOT
+PARTIAL_ROOT = sampling_partial_flow_root(_TRAINING / "sampling_seeds")
+FULL_ROOT = _TRAINING / "full_flow" / "r-level"
+GRAPH_PATH = _TRAINING / "graph" / "r_graph.npz"
+OUT_ROOT = sampling_window_root(_TRAINING / "sampling_seeds")
 RATES = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
 CHANNELS = ("inflow", "outflow", "accumulation_start", "accumulation_end")
 STATE_FILES = CHANNELS + ("all",)
@@ -463,10 +467,10 @@ def main(argv: list[str] | None = None) -> int:
     root = prep_paths.resolved(args.training_root)
     prep_paths.bind(
         sys.modules[__name__],
-        PARTIAL_ROOT=root / "partial_flow",
+        PARTIAL_ROOT=sampling_partial_flow_root(root / "sampling_seeds"),
         FULL_ROOT=root / "full_flow" / "r-level",
         GRAPH_PATH=root / "graph" / "r_graph.npz",
-        OUT_ROOT=root / "window_data",
+        OUT_ROOT=sampling_window_root(root / "sampling_seeds"),
     )
     prep_paths.publish_runtime(training_root=root)
     log(f"training_root={root}")

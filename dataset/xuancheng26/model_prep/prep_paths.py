@@ -16,16 +16,17 @@ ENV_FCD_ROOT = "XUANCHENG26_FCD_ROOT"
 ENV_NET_FILE = "XUANCHENG26_NET_FILE"
 ENV_TRAINING_ROOT = "XUANCHENG26_TRAINING_ROOT"
 
-DEFAULT_FCD_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/simulation_data/fcd_data")
-DEFAULT_NET_FILE = Path("/home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_rebuilt.net.xml")
-DEFAULT_TRAINING_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data")
-
-# The M-level scripts default to the 3-second signal batch.
-FCD_ROOT_3S = Path("/data5/tzhang174/TrafficFlow/xuancheng26/simulation_data/fcd_data_3s")
-NET_FILE_3S = Path("/home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_3s.net.xml")
-TLS_FILE_3S = Path("/home/tzhang174/TrafficFlow/dataset/xuancheng26/night_peak_3s.add.xml")
-TRAINING_ROOT_3S = Path("/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s")
+import sys
 CODE_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(CODE_ROOT))
+from data_root import data_root, xuancheng26_training_3s_root, sampling_window_root, sampling_partial_flow_root, sampled_vehicle_root
+DEFAULT_FCD_ROOT = data_root() / "xuancheng26/simulation_data/fcd_data_3s"
+DEFAULT_NET_FILE = CODE_ROOT / "dataset/xuancheng26/xuancheng_tls_3s.net.xml"
+DEFAULT_TRAINING_ROOT = xuancheng26_training_3s_root()
+FCD_ROOT_3S = DEFAULT_FCD_ROOT
+NET_FILE_3S = DEFAULT_NET_FILE
+TLS_FILE_3S = CODE_ROOT / "dataset/xuancheng26/night_peak_3s.add.xml"
+TRAINING_ROOT_3S = DEFAULT_TRAINING_ROOT
 
 
 def add_3s_path_arguments(
@@ -140,13 +141,13 @@ def init_partial_flow_worker() -> None:
     fcd_root = _env_path(ENV_FCD_ROOT)
     net_file = _env_path(ENV_NET_FILE)
     full_root = root / "full_flow" / "r-level"
-    out_root = root / "partial_flow"
+    out_root = sampling_partial_flow_root(root / "sampling_seeds")
     bind(full, FCD_ROOT=fcd_root, NET_FILE=net_file, OUT_ROOT=full_root)
     values = dict(
         FCD_ROOT=fcd_root,
         NET_FILE=net_file,
         FULL_ROOT=full_root,
-        SAMPLED_ROOT=root / "sampled_vehicle",
+        SAMPLED_ROOT=sampled_vehicle_root(root / "sampling_seeds"),
         OUT_ROOT=out_root,
         SUMMARY_PATH=out_root / "generation_summary.csv",
     )

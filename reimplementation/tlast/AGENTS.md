@@ -16,9 +16,10 @@ and is not used.
 
 ## Task
 
-Data is the 3-second-phase Xuancheng26 package:
+Data is the 3-second-phase Xuancheng26 package. Training reads sampling
+seed 42; validation and test read seeds 42–46:
 
-`/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/window_data`
+`.../training_data_3s/sampling_seeds/seed_<id>/flow/window_data`
 
 ```text
 X = partial state[s:s+12]
@@ -54,5 +55,6 @@ python3 reimplementation/tlast/train_r_only_tlast.py --input-type inflow --targe
 ```
 
 Results go to
-`/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/tlast/in_<input>__out_<target>/pXX/seed_42/`.
-Seed is 42. Test metrics are not used for checkpoint selection.
+`.../training_results_3s/tlast/in_<input>__out_<target>/pXX/seed_<model_seed>/`.
+The training loss stays Huber. The checkpoint is the lowest mean validation
+MAE across the five sampling seeds. Test is not used for selection.

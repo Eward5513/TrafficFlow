@@ -10,6 +10,9 @@ Geographic and semantic masks are not written. The model builds them at init.
 
 from __future__ import annotations
 
+import prep_paths
+from prep_paths import sampling_window_root, sampling_partial_flow_root, sampled_vehicle_root
+
 import argparse
 import hashlib
 import json
@@ -47,7 +50,7 @@ from tslearn.clustering import KShape
 import prep_paths
 
 TRAINING_ROOT = prep_paths.DEFAULT_TRAINING_ROOT
-WINDOW_ROOT = TRAINING_ROOT / "window_data"
+WINDOW_ROOT = sampling_window_root(TRAINING_ROOT / "sampling_seeds")
 FULL_ROOT = TRAINING_ROOT / "full_flow" / "r-level"
 GRAPH_DIR = TRAINING_ROOT / "graph"
 R_GRAPH = GRAPH_DIR / "r_graph.npz"
@@ -204,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     prep_paths.bind(
         sys.modules[__name__],
         TRAINING_ROOT=root,
-        WINDOW_ROOT=root / "window_data",
+        WINDOW_ROOT=sampling_window_root(root / "sampling_seeds"),
         FULL_ROOT=root / "full_flow" / "r-level",
         GRAPH_DIR=root / "graph",
         R_GRAPH=root / "graph" / "r_graph.npz",

@@ -198,7 +198,7 @@ python3 analysis/graph/build_r_graph.py
 
 ## 8. reimplementation/
 
-这里放各模型的 PyTorch 复现：层、损失、训练和评测。其中包括 `s2s_gcn_lstm`（Abdelraouf et al., 2023 的 12→1 适配，不是官方代码）。窗口 NPZ、normalization、节点表和模型图不在这里生成。宣城训练数据在 `xuancheng26/training_data/`，入口配置在该目录的 `config/<model>/r_only_<model>.json`。
+这里放各模型的 PyTorch 复现：层、损失、训练和评测。其中包括 `s2s_gcn_lstm`（Abdelraouf et al., 2023 的 12→1 适配，不是官方代码）和项目自己的 `MSTT/`。窗口 NPZ、normalization、节点表和模型图不在这里生成。3 秒相位的宣城数据在 `xuancheng26/training_data_3s/sampling_seeds/`，配置在 `training_data_3s/config/<model>/`。更早一批仍在 `xuancheng26/training_data/`。
 
 公共张量格式为 `[B,T,V,C]`。STGCN 读入已经算好的加权邻接，训练时再构造拉普拉斯 / Chebyshev。
 
@@ -368,9 +368,9 @@ sumo-gui -n analysis/road_network/net_tls.net.xml \
 
 Python 默认通过 `data_root.py` 解析（`TRAFFICFLOW_DATA_ROOT` 可覆盖数据盘）：
 
-- `training_data/r-only/` — 各模型共用的 NPZ、scaler、STGCN 邻接
-- `training_data/<model>/` — 仅该模型训练前需要的图/关系缓存
-- `training_results/<model>/<rate>/seed_42/` — 正式训练结果
-- R 节点表用 `training_data/r-only/node_mapping.csv`
+- `xuancheng26/training_data_3s/sampling_seeds/seed_42/flow/` — 3 秒相位训练输入
+- `xuancheng26/training_data_3s/shared/` — 五份采样共用的 scaler、划分和节点表
+- `xuancheng26/training_results_3s/<model>/in_<input>__out_<target>/<rate>/seed_<model_seed>/` — 新实验
+- `training_data/r-only/` 和 `xuancheng26/training_data/` — 更早的数据包，继续保留
 
 不要把脚本复制到数据盘，也不要把 checkpoint 或大型预处理文件写进 git 仓库。`run_simulations.py` 写出的 sumocfg 路径相对当天文件夹。

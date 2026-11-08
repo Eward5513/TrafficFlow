@@ -26,6 +26,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from data_root import sampling_root_from_window
+
+def shared_sequence_root(data_root):
+    return sampling_root_from_window(data_root).parent / "shared" / "sequence_targets_12step"
+
 from MSTT.config import STATE_CHANNELS, TASKS, TaskSpec, rate_tag, task_spec
 from reimplementation.common.data.r_only_npz_dataset import (
     SPLITS,
@@ -87,7 +92,7 @@ def _small_members(path: Path, keys: tuple[str, ...]) -> dict[str, np.ndarray]:
 
 
 def read_sequence_manifest(data_root: Path) -> dict[str, Any]:
-    manifest = load_json(Path(data_root) / SEQUENCE_DIRNAME / MANIFEST_NAME)
+    manifest = load_json(shared_sequence_root(data_root) / MANIFEST_NAME)
     if int(manifest.get("format_version", -1)) != FORMAT_VERSION or not manifest.get("complete"):
         raise ReimplementationError(f"{SEQUENCE_DIRNAME}/{MANIFEST_NAME} is not a complete v{FORMAT_VERSION} package")
     if tuple(manifest.get("channels", ())) != STATE_CHANNELS:
@@ -168,7 +173,7 @@ class SequenceStateWindowDataset(Dataset):
         window_dir = self.data_root / self.rate / self.split / day
         return (
             window_dir / f"{self.task.input_type}.npz",
-            self.data_root / SEQUENCE_DIRNAME / self.split / f"{day}.npz",
+            shared_sequence_root(self.data_root) / self.split / f"{day}.npz",
             window_dir / f"{self.task.target_type}.npz",
         )
 

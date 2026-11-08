@@ -48,11 +48,16 @@ config file.
 
 - Preserve existing user changes. The repository commonly contains modified
   configs, generated networks, simulation results, and experiment outputs.
-- Resolve data paths through `data_root.py`. Xuancheng26 prepared windows
-  stay at `xuancheng26/training_data/window_data/`.
-  `reimplementation/` does not generate datasets. Xuancheng26 training writes
-  `xuancheng26/training_results/<model>/<rate>/seed_<seed>/`. Never write those
-  artifacts under `CODE_ROOT`.
+- Resolve data paths through `data_root.py`. The earlier Xuancheng package
+  remains at `xuancheng26/training_data/`. The 3-second-phase package is
+  `xuancheng26/training_data_3s/`. Its only flow entry is
+  `training_data_3s/sampling_seeds/seed_<42..46>/flow/`. Shared scaler and
+  manifests are in `training_data_3s/shared/`. Train on sampling seed 42.
+  Validation and test score seeds 42–46 and select checkpoints by the mean
+  raw MAE. New 3-second results go to
+  `xuancheng26/training_results_3s/<model>/in_<input>__out_<target>/<rate>/seed_<model_seed>/`.
+  `reimplementation/` does not generate datasets. Never write those artifacts
+  under `CODE_ROOT`, and do not overwrite an existing result directory.
 - Keep ID-like values such as VINs, OSM IDs, SUMO edge IDs, junction IDs, and
   lane IDs as strings. Do not coerce them to integers.
 - Preserve deterministic seeds and stable output ordering. The default seed is

@@ -74,9 +74,8 @@ SUMMARY_FIELDS = [
 
 
 def r_partial_root(root: Path) -> Path:
-    """R-level partial rates sit directly under partial_flow/ in this project."""
-    nested = root / "partial_flow" / "r-level"
-    return nested if nested.is_dir() else root / "partial_flow"
+    """Canonical R-level seed42 input; M/MR assets retain their independent locations."""
+    return prep_paths.sampling_partial_flow_root(root / "sampling_seeds")
 
 
 def violations(left: dict[str, np.ndarray], right: dict[str, np.ndarray]) -> dict[str, int]:

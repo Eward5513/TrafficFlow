@@ -6,6 +6,9 @@ import hashlib
 import resource
 import sys
 import time
+from reimplementation.common.data.sampling_seeds import sampling_rate_dir
+from reimplementation.common.sampling_evaluation import sampling_epoch, sampling_history
+
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -97,6 +100,8 @@ def resolve_path(project_root: Path, value: str | Path) -> Path:
 
 
 def resolve_training_output(project_root: Path, value: str | Path, *, model_name: str) -> Path:
+    from reimplementation.common.data.sampling_seeds import protect_historical_results
+    protect_historical_results(resolve_repo_or_data_path(project_root, value))
     try:
         return assert_training_results_output(
             resolve_repo_or_data_path(project_root, value),
@@ -251,6 +256,7 @@ def train_one_epoch(
 
 
 @torch.no_grad()
+@sampling_epoch
 def evaluate_one_epoch(
     model: STGCN,
     loader,
@@ -513,7 +519,10 @@ def run_single_rate(
         raise ReimplementationError("AMP is not implemented in this faithful STGCN port")
     seed_everything(seed)
     device = resolve_device(str(config.get("device", "auto")))
-    rate_dir = output_root / tag / f"seed_{seed}"
+    from data_root import sampling_run_results_dir
+    from reimplementation.common.data.sampling_seeds import protect_historical_results
+    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    protect_historical_results(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(rate_dir / "resolved_config.json", dict(config))
     loaders_pack = build_dataloaders(data_root, tag, config, data_info["sample_counts"])
@@ -640,6 +649,7 @@ def run_single_rate(
             "train_regularization_loss": train_stats["regularization_loss"],
             "train_total_loss": train_stats["total_loss"],
             "validation_mae_raw": val_mae,
+            **sampling_history(val_result["sampling_metrics"]),
             "validation_rmse_raw": float(val_result["metrics"]["rmse"]),
             "validation_mape_nonzero": float(val_result["metrics"]["mape_nonzero"]),
             "validation_wape": float(val_result["metrics"]["wape"]),
@@ -660,6 +670,7 @@ def run_single_rate(
                 "device": str(device),
                 **train_stats,
                 "validation_mae_raw": val_mae,
+            **sampling_history(val_result["sampling_metrics"]),
                 "validation_rmse_raw": row["validation_rmse_raw"],
                 "learning_rate": lr,
                 "best_metric": best_metric,
@@ -731,14 +742,14 @@ def run_single_rate(
         best_metric=best_metric,
         early_stopping=False,
         early_stopping_patience=None,
-        selection_metric="validation_mae_raw_including_zero",
+        selection_metric="mean_validation_mae",
         clock=clock,
         extra={
             "init_parameter_sha256": init_hash,
             "code_version": CODE_VERSION,
             "graph_sha256": graph_info["graph_sha256"],
             "data_file_sha256": train_hash,
-            "checkpoint_monitor": "validation_mae_raw",
+            "checkpoint_monitor": "mean_validation_mae",
             "early_stopped": False,
             "rmsprop_alpha": float(config.get("rmsprop_alpha", 0.9)),
             "rmsprop_eps": float(config.get("rmsprop_eps", 1e-10)),
@@ -902,7 +913,7 @@ def run_all_rates(
                 raise ReimplementationError(f"{rate_tag(rate)} did not reach status=completed")
         except Exception as exc:
             mark_rate_failed(
-                output_root / rate_tag(rate) / f"seed_{int(config['seed'])}",
+                sampling_rate_dir(output_root, config, rate),
                 reason=str(exc),
             )
             raise

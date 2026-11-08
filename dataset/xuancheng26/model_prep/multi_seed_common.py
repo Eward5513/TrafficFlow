@@ -65,7 +65,7 @@ def unchanged(records):
 
 
 def split_manifest(root):
-    path = root / "window_data/split_manifest.json"
+    path = root / "shared/split_manifest.json"
     payload = load_json(path)
     splits = {key: payload[key] for key in ("train", "validation", "test")}
     dates = [day for days in splits.values() for day in days]
@@ -97,18 +97,8 @@ def window_path(root, seed, rate, split, day):
 
 
 def historical(root, seed, rate, split, day, kind):
-    """Only p05 test was moved; other legacy seed paths alias seed 42."""
-    if rate == "p05" and split == "test":
-        base = seed_root(root, seed)
-    elif seed == 42:
-        base = root
-    else:
-        return None
-    if kind == "vehicle":
-        return base / "sampled_vehicle" / rate / f"{day}.csv"
-    if kind == "flow":
-        return base / "partial_flow" / rate / day
-    return base / "window_data" / rate / split / day
+    """Canonical data has no historical fallback after the layout migration."""
+    return None
 
 
 def assert_output(path, root):

@@ -9,6 +9,9 @@ from __future__ import annotations
 import hashlib
 import sys
 import time
+from reimplementation.common.data.sampling_seeds import sampling_rate_dir
+from reimplementation.common.sampling_evaluation import evaluate_sampling_predictor, sampling_history
+
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -215,7 +218,6 @@ def build_train_dataloader(
     split_counts: Mapping[str, int],
 ) -> dict[str, Any]:
     tag = rate_tag(rate)
-    path = validate_train_npz_only(data_root / tag / "train.npz")
     dataset = open_split_dataset(
         data_root,
         tag,
@@ -264,34 +266,14 @@ def build_dataloaders(
 
 
 def collect_smoke_data_info(data_root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
-    n_his = int(config.get("input_len", config.get("n_his", 12)))
-    manifest = load_json(data_root / "split_manifest.json")
-    normalization = load_json(data_root / "normalization.json")
-    mean_y, std_y = read_target_scaler(normalization)
-    counts = expected_split_counts(manifest)
-    node_ids = load_node_ids(data_root / "node_mapping.csv")
-    train_path = validate_train_npz_only(data_root / "p70" / "train.npz")
-    dataset = ROnlyNPZDataset(
-        train_path,
-        n_his=n_his,
-        num_nodes=int(config["num_nodes"]),
-        expected_count=int(counts["train"]),
-    )
-    recovered = invert_target(dataset.y[:8], mean_y, std_y)
-    if float(np.max(np.abs(recovered - dataset.y_raw[:8]))) > 1e-3:
-        raise ReimplementationError("mean_y_full/std_y_full does not recover y_raw")
-    return {
-        "sample_counts": counts,
-        "mean_y_full": mean_y,
-        "std_y_full": std_y,
-        "node_ids": node_ids,
-        "normalization_sha256": sha256_file(data_root / "normalization.json"),
-        "split_manifest_target_mode": manifest.get("target_mode"),
-        "all_days": [str(item) for item in manifest.get("all_days", [])],
-        "file_hashes": {"p70/train.npz": sha256_file(train_path)},
-        "did_not_read_validation_or_test": True,
-        "did_not_read_adjacency": True,
-    }
+    from reimplementation.common.data.sampling_seeds import validate_sampling_package
+    info = validate_sampling_package(data_root, n_his=int(config.get("n_his", 12)),
+                                     num_nodes=int(config["num_nodes"]), rates=["p70"], splits=("train",))
+    info = finalize_state_scaler(info, config, data_root)
+    info["all_days"] = load_json(data_root / "split_manifest.json").get("all_days", [])
+    info["did_not_read_validation_or_test"] = True
+    info["did_not_read_adjacency"] = True
+    return info
 
 
 def collect_data_info(
@@ -486,7 +468,10 @@ def run_single_rate(
     seed = int(config["seed"])
     seed_everything(seed)
     device = resolve_device(str(config.get("device", "cpu")))
-    rate_dir = output_root / tag / f"seed_{seed}"
+    from data_root import sampling_run_results_dir
+    from reimplementation.common.data.sampling_seeds import protect_historical_results
+    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    protect_historical_results(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(rate_dir / "resolved_config.json", dict(config))
     loaders_pack = build_dataloaders(data_root, tag, config, data_info["sample_counts"])
@@ -561,18 +546,14 @@ def run_single_rate(
         if scheduler is not None:
             scheduler.step()
         model.eval()
-        val_abs = []
-        with torch.no_grad():
-            for batch in loaders_pack["loaders"]["validation"]:
-                batch = _move_batch(batch, device)
-                history_data = assemble_batch_history(batch, config, **day).to(device)
-                pred = model(history_data, **identity_kwargs(batch, config, day))
-                pred_raw = invert_target(
-                    pred, loss_scale(data_info["mean_y_full"]), loss_scale(data_info["std_y_full"])
-                )
-                val_abs.append(torch.abs(pred_raw - batch["y_raw"]).mean().cpu())
-        val_mae = float(torch.stack(val_abs).mean()) if val_abs else float("inf")
-        history.append({"epoch": epoch, "train_loss": float(np.mean(train_losses)), "val_mae": val_mae})
+        def validation_predict(batch):
+            return model(assemble_batch_history(batch, config, **day).to(device), **identity_kwargs(batch, config, day))
+        val_sampling = evaluate_sampling_predictor(
+            loaders_pack["loaders"]["validation"], validation_predict,
+            mean_y=loss_scale(data_info["mean_y_full"]), std_y=loss_scale(data_info["std_y_full"]), device=device,
+        )
+        val_mae = val_sampling["metrics"]["mae"]
+        history.append({"epoch": epoch, "train_loss": float(np.mean(train_losses)), "val_mae": val_mae, **sampling_history(val_sampling["sampling_metrics"])})
         save_checkpoint(rate_dir / "last_checkpoint.pt", checkpoint_payload(epoch, best_mae))
         if val_mae < best_mae:
             best_mae = val_mae
@@ -656,14 +637,14 @@ def run_single_rate(
         best_metric=float(best_mae),
         early_stopping=False,
         early_stopping_patience=None,
-        selection_metric="validation_mae_raw_including_zero",
+        selection_metric="mean_validation_mae",
         clock=clock,
         extra={
             "init_parameter_sha256": init_hash,
             "code_version": CODE_VERSION,
             "data_file_sha256": train_hash,
             "normalization_sha256": data_info["normalization_sha256"],
-            "checkpoint_monitor": "validation_mae_raw_all",
+            "checkpoint_monitor": "mean_validation_mae",
             "early_stopped": False,
             "weight_decay": float(config.get("weight_decay", 1e-4)),
             "max_grad_norm": float(config.get("max_grad_norm", 5.0)),
@@ -700,7 +681,7 @@ def run_single_rate(
         "test_mape_nonzero": float(test_eval["metrics"]["mape_nonzero"]),
         "test_wape": float(test_eval["metrics"]["wape"]),
         "did_not_use_test_for_selection": True,
-        "checkpoint_monitor": "validation_mae_raw_all",
+        "checkpoint_monitor": "mean_validation_mae",
         "target_mode": "last-observed-step",
         "train_wall_time_sec": metadata["train_wall_time_sec"],
         "average_epoch_time_sec": metadata["average_epoch_time_sec"],
@@ -752,7 +733,7 @@ def run_all_rates(
                 raise ReimplementationError(f"{summary.get('rate')} did not complete official test evaluation")
         except Exception as exc:
             mark_rate_failed(
-                output_root / rate_tag(rate) / f"seed_{int(config['seed'])}",
+                sampling_rate_dir(output_root, config, rate),
                 reason=str(exc),
             )
             raise

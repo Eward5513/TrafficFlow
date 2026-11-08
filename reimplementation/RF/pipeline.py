@@ -25,7 +25,7 @@ from reimplementation.RF.model import N_CLUSTERS, N_ESTIMATORS, RFEstimator
 RESULTS_ROOT = Path(
     os.environ.get(
         "XUANCHENG_RF_RESULTS_ROOT",
-        "/data5/tzhang174/TrafficFlow/xuancheng26/training_results/RF",
+        str(__import__("data_root").xuancheng26_model_results_3s_dir("RF")),
     )
 ).expanduser().resolve()
 CODE_ROOT = Path("/home/tzhang174/TrafficFlow")
@@ -94,7 +94,7 @@ def _outputs_ready(rate_dir: Path) -> bool:
     )
     if not all(path.is_file() and path.stat().st_size > 0 for path in required):
         return False
-    return any((rate_dir / "predictions").glob("*.npz"))
+    return all(any((rate_dir / "predictions" / f"seed_{seed}" / "test").glob("*.npz")) for seed in range(42,47))
 
 
 def _fitted_complete(rate_dir: Path, multi: bool) -> bool:
@@ -124,12 +124,9 @@ def _read_discard_record(rate_dir: Path) -> dict | None:
 
 
 def _complete(rate_dir: Path, multi: bool) -> bool:
-    """Finished means predictions and metrics exist, with or without the forest."""
-    if not _outputs_ready(rate_dir):
-        return False
-    if _fitted_complete(rate_dir, multi):
-        return True
-    return _read_discard_record(rate_dir) is not None
+    return (_outputs_ready(rate_dir) and _fitted_complete(rate_dir, multi)
+            and (rate_dir / "test_sampling_metrics.json").is_file()
+            and (rate_dir / "validation_sampling_metrics.json").is_file())
 
 
 def _json_default(value):
@@ -444,7 +441,7 @@ def _active_report(rate_dir: Path, days: list[str], multi: bool):
     pieces_t = []
     per_state = {state: ([], []) for state in STATES} if multi else None
     for day_name in days:
-        with np.load(rate_dir / "predictions" / f"{day_name}.npz") as payload:
+        with np.load(rate_dir / "predictions" / "seed_42" / "test" / f"{day_name}.npz") as payload:
             prediction = payload["prediction"]
             truth = payload["ground_truth"]
         if multi:
@@ -480,7 +477,7 @@ def _confirm_reload(
     multi = target_type == "all"
     cube, _target = data.day_cube(penetration, sample_day, input_type, target_type)
     recomputed = _predict_day(estimators, cube, multi)
-    with np.load(rate_dir / "predictions" / f"{sample_day}.npz") as payload:
+    with np.load(rate_dir / "predictions" / "seed_42" / "test" / f"{sample_day}.npz") as payload:
         saved = payload["prediction"]
     if not np.allclose(recomputed, saved, atol=1e-4, rtol=1e-4):
         raise RunError("reloaded model does not reproduce the saved test prediction")
@@ -490,8 +487,11 @@ def train_penetration(config: dict) -> None:
     penetration = str(config["penetration"])
     input_type, target_type, multi, heads = _task_types(config)
     rate_dir = Path(config["rate_dir"]) if config.get("rate_dir") else Path(config["run_dir"]) / penetration
+    from reimplementation.common.data.sampling_seeds import protect_historical_results
+    protect_historical_results(rate_dir)
     _assert_output(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
+    _write_payload(rate_dir / "resolved_config.json", {**config, "model_seed": int(config["seed"]), "train_sampling_seed": 42, "evaluation_sampling_seeds": [42,43,44,45,46], "checkpoint_selection": "mean_validation_mae"})
     log_path = rate_dir / "logs" / "train.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
@@ -502,21 +502,7 @@ def train_penetration(config: dict) -> None:
         try:
             log(f"start pid={os.getpid()} ppid={os.getppid()} n_jobs={config['n_jobs']}")
             if _complete(rate_dir, multi) and not config["force"] and not config["evaluate_only"]:
-                if _any_fitted(rate_dir, multi):
-                    discarded = _discard_fitted_models(
-                        rate_dir,
-                        multi,
-                        heads,
-                        input_type=input_type,
-                        target_type=target_type,
-                    )
-                    log(
-                        "SKIP removed fitted forest "
-                        f"bytes={discarded['total_bytes']} kept predictions"
-                    )
-                else:
-                    log("SKIP existing predictions; fitted forest already removed")
-                _write_status(rate_dir, "SKIP", time.perf_counter() - started, "")
+                log("SKIP completed five-sampling run")
                 return
             data = XuanchengRFData()
             if config["evaluate_only"]:
@@ -573,23 +559,27 @@ def train_penetration(config: dict) -> None:
                     encoding="utf-8",
                 )
             score_kwargs = {"input_type": input_type, "target_type": target_type}
-            log("validation")
-            validation = _score_split(
-                estimators, data, penetration, data.days["validation"], None, **score_kwargs
-            )
-            log(
-                f"val mae={validation['overall']['mae']:.6f} "
-                f"rmse={validation['overall']['rmse']:.6f} bias={validation['overall']['bias']:.6f}"
-            )
-            log("test")
-            test = _score_split(
-                estimators,
-                data,
-                penetration,
-                data.days["test"],
-                rate_dir / "predictions",
-                **score_kwargs,
-            )
+            from reimplementation.common.sampling_evaluation import aggregate_sampling_metrics
+            from data_root import SAMPLING_SEEDS
+            reports = {}
+            seed42 = {}
+            for split in ("validation", "test"):
+                per_seed = {}
+                for sampling_seed in SAMPLING_SEEDS:
+                    observed = XuanchengRFData(sampling_seed)
+                    scored = _score_split(estimators, observed, penetration, observed.days[split],
+                                          rate_dir / "predictions" / f"seed_{sampling_seed}" / split, **score_kwargs)
+                    flat = dict(scored["overall"])
+                    for state, metrics in scored.get("states", {}).items():
+                        flat.update({f"{state}_{key}": value for key, value in metrics.items() if isinstance(value, (int, float))})
+                    per_seed[str(sampling_seed)] = flat
+                    if sampling_seed == 42:
+                        seed42[split] = scored
+                reports[split] = aggregate_sampling_metrics(per_seed)
+                _write_payload(rate_dir / f"{split}_sampling_metrics.json", reports[split])
+            validation, test = seed42["validation"], seed42["test"]
+            validation["overall"].update(reports["validation"]["mean"])
+            test["overall"].update(reports["test"]["mean"])
             active_report = _active_report(rate_dir, data.days["test"], multi)
             metrics_dir = rate_dir / "metrics"
             metrics_dir.mkdir(parents=True, exist_ok=True)
@@ -622,15 +612,17 @@ def train_penetration(config: dict) -> None:
                 input_type,
                 target_type,
             )
-            discarded = _discard_fitted_models(
-                rate_dir,
-                multi,
-                heads,
-                input_type=input_type,
-                target_type=target_type,
-                estimators=estimators,
-            )
-            log(f"removed fitted forest bytes={discarded['total_bytes']} kept predictions")
+            import torch
+            checkpoint = {"model_name": "RF", "model_seed": int(config["seed"]),
+                          "train_sampling_seed": 42, "evaluation_sampling_seeds": list(SAMPLING_SEEDS),
+                          "model_paths": [str(path) for _, path in _head_dirs(rate_dir, multi, heads)],
+                          "checkpoint_selection": "single_fit_no_epoch_selection"}
+            torch.save(checkpoint, rate_dir / "best_checkpoint.pt")
+            torch.save(checkpoint, rate_dir / "last_checkpoint.pt")
+            _write_payload(rate_dir / "training_history.json", [{"fit": 0, "mean_validation_mae": reports["validation"]["mean"]["mae"]}])
+            _write_payload(rate_dir / "run_metadata.json", {**checkpoint, "status": "completed",
+                           "speed_features": "shared existing RF auxiliary features (fixed across Flow sampling seeds)",
+                           "scaler_fit": "seed42 training only", "optimizer": "RandomForest/KMeans/LAD"})
             elapsed = time.perf_counter() - started
             log(f"PASS seconds={elapsed:.1f} test_mae={test['overall']['mae']:.6f} rss_mib={_rss_mib()}")
             _write_status(rate_dir, "PASS", elapsed, "")

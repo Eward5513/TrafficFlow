@@ -54,7 +54,7 @@
   "loss": "mae_raw",
   "huber_delta": 1.0,
   "channel_balance": "none",
-  "selection_metric": "val_mae",
+  "selection_metric": "mean_validation_mae",
   "early_stop_patience": null,
   "clip_grad_norm": 5.0,
   "amp": "none",
@@ -64,5 +64,14 @@
   "save_validation_predictions": false,
   "max_train_batches": null,
   "max_eval_batches": null,
-  "attention_order": "TS"
+  "attention_order": "TS",
+  "model_seed": 42,
+  "train_sampling_seed": 42,
+  "evaluation_sampling_seeds": [
+    42,
+    43,
+    44,
+    45,
+    46
+  ]
 }

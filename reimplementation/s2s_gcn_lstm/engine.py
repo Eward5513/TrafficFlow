@@ -7,6 +7,9 @@ The test split is scored once after the best checkpoint is reloaded.
 from __future__ import annotations
 
 import hashlib
+from reimplementation.common.data.sampling_seeds import sampling_rate_dir
+from reimplementation.common.sampling_evaluation import evaluate_sampling_predictor, sampling_history
+
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -150,39 +153,16 @@ def collect_smoke_data_info(
     *,
     project_root: Path,
 ) -> dict[str, Any]:
-    manifest = load_json(data_root / "split_manifest.json")
-    normalization = load_json(data_root / "normalization.json")
-    if str(manifest.get("target_mode")) != "last-observed-step":
-        raise ReimplementationError("split manifest is not last-observed-step reconstruction")
-    if bool(normalization.get("used_test_to_fit")) or bool(normalization.get("used_validation_to_fit")):
-        raise ReimplementationError("normalization.json was not fit on training only")
-    mean_y, std_y = read_target_scaler(normalization)
-    counts = expected_split_counts(manifest)
+    from reimplementation.common.data.sampling_seeds import validate_sampling_package
+    info = validate_sampling_package(data_root, n_his=int(config.get("n_his", 12)),
+                                     num_nodes=int(config["num_nodes"]), rates=["p70"], splits=("train",))
+    info = finalize_state_scaler(info, config, data_root)
+    info["all_days"] = load_json(data_root / "split_manifest.json").get("all_days", [])
+    info["did_not_read_validation_or_test"] = True
     graph = _graph_payload(config, project_root=project_root)
-    window_ids = load_edge_ids(data_root / "node_mapping.csv")
-    assert_feature_order(window_ids, graph["node_ids"])
-    train_path = data_root / "p70" / "train.npz"
-    arrays = load_npz(train_path)
-    if not np.array_equal(arrays["target_slot"], arrays["window_start_slot"] + 11):
-        raise ReimplementationError("p70 train target is not the last observed slot")
-    recovered = invert_target(arrays["y"][:4], mean_y, std_y)
-    if float(np.max(np.abs(recovered - arrays["y_raw"][:4]))) > 1e-3:
-        raise ReimplementationError("mean_y_full/std_y_full does not recover y_raw")
-    return {
-        "sample_counts": counts,
-        "mean_y_full": mean_y,
-        "std_y_full": std_y,
-        "node_ids": window_ids,
-        "adjacency": graph["adjacency"],
-        "graph_sha256": _weight_sha256(graph),
-        "edge_weight": graph["edge_weight"],
-        "undirected_neighbor_count": graph["undirected_neighbor_count"],
-        "normalization_sha256": sha256_file(data_root / "normalization.json"),
-        "split_manifest_target_mode": manifest.get("target_mode"),
-        "file_hashes": {"p70/train.npz": sha256_file(train_path)},
-        "did_not_read_validation_or_test": True,
-        "did_not_use_gaussian_kernel": bool(graph["did_not_use_gaussian_kernel"]),
-    }
+    info.update(adjacency=graph["adjacency"], graph_sha256=_weight_sha256(graph), edge_weight=graph["edge_weight"],
+                undirected_neighbor_count=graph["undirected_neighbor_count"], did_not_use_gaussian_kernel=bool(graph["did_not_use_gaussian_kernel"]))
+    return info
 
 
 def collect_data_info(
@@ -246,15 +226,8 @@ def run_p70_smoke(
 ) -> dict[str, Any]:
     seed_everything(int(config["seed"]))
     device = torch.device("cpu")
-    dataset = ROnlyNPZDataset(
-        data_root / "p70" / "train.npz",
-        n_his=int(config.get("n_his", 12)),
-        num_nodes=int(config["num_nodes"]),
-        input_channels=1,
-        output_channels=1,
-        output_steps=1,
-        expected_count=int(data_info["sample_counts"]["train"]),
-    )
+    dataset = open_split_dataset(data_root, "p70", "train", config,
+                                 expected_count=int(data_info["sample_counts"]["train"]))
     loader = build_dataloader(
         dataset,
         batch_size=int(config["batch_size"]),
@@ -368,7 +341,10 @@ def run_single_rate(
     seed = int(config["seed"])
     seed_everything(seed)
     device = resolve_device(str(config.get("device", "cpu")))
-    rate_dir = output_root / tag / f"seed_{seed}"
+    from data_root import sampling_run_results_dir
+    from reimplementation.common.data.sampling_seeds import protect_historical_results
+    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    protect_historical_results(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(rate_dir / "resolved_config.json", dict(config))
     loaders = build_dataloaders(data_root, tag, config, data_info["sample_counts"])
@@ -461,13 +437,12 @@ def run_single_rate(
         if not train_losses:
             raise ReimplementationError("training loader produced zero batches")
         learning_rate = float(optimizer.param_groups[0]["lr"])
-        val_mae = _validation_mae(
-            model,
-            loaders["loaders"]["validation"],
-            mean_y=loss_scale(data_info["mean_y_full"]),
-            std_y=loss_scale(data_info["std_y_full"]),
-            device=device,
+        model.eval()
+        val_sampling = evaluate_sampling_predictor(
+            loaders["loaders"]["validation"], lambda batch: model(batch["x"]),
+            mean_y=loss_scale(data_info["mean_y_full"]), std_y=loss_scale(data_info["std_y_full"]), device=device,
         )
+        val_mae = val_sampling["metrics"]["mae"]
         scheduler.step(val_mae)
         improved = val_mae < best_mae
         if improved:
@@ -480,7 +455,7 @@ def run_single_rate(
             {
                 "epoch": epoch,
                 "train_loss": float(np.mean(train_losses)),
-                "val_mae": val_mae,
+                "val_mae": val_mae, **sampling_history(val_sampling["sampling_metrics"]),
                 "lr": learning_rate,
             }
         )
@@ -559,7 +534,7 @@ def run_single_rate(
         best_metric=float(best_mae),
         early_stopping=early_stop_enabled,
         early_stopping_patience=patience if early_stop_enabled else None,
-        selection_metric="validation_mae_raw_including_zero",
+        selection_metric="mean_validation_mae",
         clock=clock,
         extra={
             "model_label": MODEL_LABEL,
@@ -602,7 +577,7 @@ def run_single_rate(
         "test_mape_nonzero": float(test_eval["metrics"]["mape_nonzero"]),
         "test_wape": float(test_eval["metrics"]["wape"]),
         "did_not_use_test_for_selection": True,
-        "checkpoint_monitor": "validation_mae_raw_including_zero",
+        "checkpoint_monitor": "mean_validation_mae",
         "target_mode": "last-observed-step",
         "train_wall_time_sec": metadata["train_wall_time_sec"],
         "average_epoch_time_sec": metadata["average_epoch_time_sec"],
@@ -646,7 +621,7 @@ def run_all_rates(
                 resume_path=resume_path,
             )
         except Exception as exc:
-            mark_rate_failed(output_root / rate_tag(rate) / f"seed_{int(config['seed'])}", reason=str(exc))
+            mark_rate_failed(sampling_rate_dir(output_root, config, rate), reason=str(exc))
             raise
         summaries.append(summary)
         upsert_overall_summary(output_root / "overall_summary.json", summaries)

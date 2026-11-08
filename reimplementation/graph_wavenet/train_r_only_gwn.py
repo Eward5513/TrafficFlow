@@ -189,7 +189,7 @@ def main() -> None:
         adjacency,
         pickle_path,
         r_nodes,
-        data_root / "normalization.json",
+        data_root / "state_normalization.json",
         PROJECT_ROOT / "reference" / "Graph-WaveNet" / "model.py",
         PROJECT_ROOT / "reference" / "Graph-WaveNet" / "util.py",
         PROJECT_ROOT / "reference" / "dcrnn" / "model" / "dcrnn_cell.py",

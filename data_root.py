@@ -29,6 +29,7 @@ MODEL_NAMES = (
     "s2s_gcn_lstm",
     "tlast",
     "MSTT",
+    "RF",
 )
 
 # Old in-repo relative locations -> current disk layout. Existing files stay put.
@@ -190,7 +191,8 @@ def xuancheng26_training_3s_root() -> Path:
 
 def xuancheng26_model_config(model_name: str) -> Path:
     name = str(model_name).strip()
-    return xuancheng26_training_root() / "config" / name / f"r_only_{name}.json"
+    name = "gwn" if name == "graph_wavenet" else name
+    return xuancheng26_training_3s_root() / "config" / name / f"r_only_{name}.json"
 
 
 def r_graph_dir() -> Path:
@@ -325,3 +327,50 @@ def resolve_repo_or_data_path(project_root: Path, value: str | Path) -> Path:
     if posix.startswith(DATA_PREFIXES):
         return (data_root() / posix).resolve()
     return (Path(project_root) / path).resolve()
+
+
+SAMPLING_SEEDS = (42, 43, 44, 45, 46)
+TRAIN_SAMPLING_SEED = 42
+
+
+def xuancheng26_sampling_root() -> Path:
+    return xuancheng26_training_3s_root() / "sampling_seeds"
+
+
+def xuancheng26_shared_root() -> Path:
+    return xuancheng26_training_3s_root() / "shared"
+
+
+def sampling_seed_root(sampling_root: Path | str, sampling_seed: int) -> Path:
+    if int(sampling_seed) not in SAMPLING_SEEDS:
+        raise PathLayoutError(f"unknown sampling seed: {sampling_seed}")
+    return Path(sampling_root) / f"seed_{int(sampling_seed)}"
+
+
+def sampling_window_root(sampling_root: Path | str, sampling_seed: int = TRAIN_SAMPLING_SEED) -> Path:
+    return sampling_seed_root(sampling_root, sampling_seed) / "flow" / "window_data"
+
+
+def sampling_partial_flow_root(sampling_root: Path | str, sampling_seed: int = TRAIN_SAMPLING_SEED) -> Path:
+    return sampling_seed_root(sampling_root, sampling_seed) / "flow" / "partial_flow"
+
+
+def sampled_vehicle_root(sampling_root: Path | str, sampling_seed: int = TRAIN_SAMPLING_SEED) -> Path:
+    return sampling_seed_root(sampling_root, sampling_seed) / "sampled_vehicle"
+
+
+def sampling_root_from_window(window_root: Path | str) -> Path:
+    path = Path(window_root).absolute()
+    if path.name != "window_data" or path.parent.name != "flow" or path.parent.parent.name not in {f"seed_{s}" for s in SAMPLING_SEEDS}:
+        raise PathLayoutError(f"expected seed_<sampling_seed>/flow/window_data, got {path}")
+    return path.parents[2]
+
+
+def task_results_dir(output_root: Path | str, input_type: str, target_type: str) -> Path:
+    root = Path(output_root)
+    leaf = f"in_{input_type}__out_{target_type}"
+    return root if root.name == leaf else root / leaf
+
+
+def sampling_run_results_dir(output_root: Path | str, input_type: str, target_type: str, rate: str, model_seed: int) -> Path:
+    return task_results_dir(output_root, input_type, target_type) / str(rate) / f"seed_{int(model_seed)}"

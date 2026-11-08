@@ -11,6 +11,9 @@ kilometres per hour.
 
 from __future__ import annotations
 
+import prep_paths
+from prep_paths import sampling_window_root, sampling_partial_flow_root, sampled_vehicle_root
+
 import argparse
 import csv
 import gc
@@ -38,15 +41,15 @@ import generate_r_level_full_flow as full
 
 CODE_ROOT = Path("/home/tzhang174/TrafficFlow")
 DATA_ROOT = Path("/data5/tzhang174/TrafficFlow/xuancheng26")
-TRAIN_ROOT = DATA_ROOT / "training_data"
-FCD_ROOT = DATA_ROOT / "simulation_data" / "fcd_data"
-PARTIAL_ROOT = TRAIN_ROOT / "partial_flow"
+TRAIN_ROOT = prep_paths.DEFAULT_TRAINING_ROOT
+FCD_ROOT = prep_paths.DEFAULT_FCD_ROOT
+PARTIAL_ROOT = sampling_partial_flow_root(TRAIN_ROOT / "sampling_seeds")
 FULL_ROOT = TRAIN_ROOT / "full_flow" / "r-level"
-SAMPLED_ROOT = TRAIN_ROOT / "sampled_vehicle"
+SAMPLED_ROOT = sampled_vehicle_root(TRAIN_ROOT / "sampling_seeds")
 GRAPH_PATH = TRAIN_ROOT / "graph" / "r_graph.npz"
 NODES_PATH = TRAIN_ROOT / "graph" / "r_nodes.csv"
-MANIFEST_PATH = TRAIN_ROOT / "window_data" / "split_manifest.json"
-NET_FILE = CODE_ROOT / "dataset" / "xuancheng26" / "xuancheng_tls_rebuilt.net.xml"
+MANIFEST_PATH = sampling_window_root(TRAIN_ROOT / "sampling_seeds") / "split_manifest.json"
+NET_FILE = prep_paths.DEFAULT_NET_FILE
 DEFAULT_OUT = TRAIN_ROOT / "config" / "RF"
 N_BINS = full.N_BINS
 BIN_SECONDS = full.BIN_SECONDS
@@ -1395,12 +1398,12 @@ def main(argv: list[str] | None = None) -> int:
         FCD_ROOT = args.fcd_root.expanduser().resolve()
     if args.training_root is not None:
         TRAIN_ROOT = args.training_root.expanduser().resolve()
-        PARTIAL_ROOT = TRAIN_ROOT / "partial_flow"
+        PARTIAL_ROOT = sampling_partial_flow_root(TRAIN_ROOT / "sampling_seeds")
         FULL_ROOT = TRAIN_ROOT / "full_flow" / "r-level"
-        SAMPLED_ROOT = TRAIN_ROOT / "sampled_vehicle"
+        SAMPLED_ROOT = sampled_vehicle_root(TRAIN_ROOT / "sampling_seeds")
         GRAPH_PATH = TRAIN_ROOT / "graph" / "r_graph.npz"
         NODES_PATH = TRAIN_ROOT / "graph" / "r_nodes.csv"
-        MANIFEST_PATH = TRAIN_ROOT / "window_data" / "split_manifest.json"
+        MANIFEST_PATH = sampling_window_root(TRAIN_ROOT / "sampling_seeds") / "split_manifest.json"
         DEFAULT_OUT = TRAIN_ROOT / "config" / "RF"
     if args.net_file is not None:
         NET_FILE = args.net_file.expanduser().resolve()
