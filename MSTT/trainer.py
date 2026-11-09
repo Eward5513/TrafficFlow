@@ -71,9 +71,27 @@ BATCH_KEYS = ("x", "y", "y_raw", "day_index", "window_start_slot", "target_slot"
 REQUIRED_OUTPUTS = ("best_checkpoint.pt", "last_checkpoint.pt", "training_history.json", "validation_sampling_metrics.json", "test_sampling_metrics.json")
 
 
-def run_directory(output_root: Path, rate: str, task: str, seed: int) -> Path:
+def run_directory(output_root: Path, rate: str, task: str, seed: int, config: Mapping[str, Any] | None = None) -> Path:
     spec = task_spec(task)
-    return sampling_run_results_dir(output_root, spec.input_type, spec.target_type, rate_tag(rate), seed)
+    cfg = dict(config or {})
+    experiment = str(cfg.get("experiment_id") or "baseline")
+    mode = str(cfg.get("conservation_mode") or "none")
+    if mode != "none" and experiment == "baseline":
+        experiment = f"conservation_{mode}"
+    run_id = cfg.get("run_id")
+    if not run_id:
+        from data_root import new_run_id
+        run_id = new_run_id("MSTT", str(cfg.get("dataset_id") or "fixed_uniform"))
+        if isinstance(config, dict):
+            config["run_id"] = run_id
+    return sampling_run_results_dir(
+        output_root, spec.input_type, spec.target_type, rate_tag(rate), seed,
+        physical_version=cfg.get("physical_definition_version"),
+        dataset_id=str(cfg.get("dataset_id") or "") or None,
+        model_name="MSTT",
+        experiment_id=experiment,
+        run_id=str(run_id),
+    )
 
 
 def is_smoke(config: Mapping[str, Any]) -> bool:
@@ -252,7 +270,7 @@ class TaskRun:
         self.rate = rate_tag(rate)
         self.seed = int(config["seed"])
         self.output_root = Path(output_root)
-        self.run_dir = run_directory(self.output_root, self.rate, self.task.name, self.seed)
+        self.run_dir = run_directory(self.output_root, self.rate, self.task.name, self.seed, self.config)
         self.n_his = int(config["input_window"])
         self.num_nodes = int(config["num_nodes"])
         self.data_root = Path(config["data_root"])
@@ -481,7 +499,7 @@ def train_task(
     validate_conservation_task(config, task_spec(task))
     validate_value_embedding_task(config, task_spec(task))
     output_root = conservation_output_root(config, output_root)
-    planned_dir = run_directory(output_root, rate, task_spec(task).name, int(config["seed"]))
+    planned_dir = run_directory(output_root, rate, task_spec(task).name, int(config["seed"]), config)
     from reimplementation.common.data.sampling_seeds import protect_historical_results
     protect_historical_results(planned_dir)
     stored_config = planned_dir / "resolved_config.json"

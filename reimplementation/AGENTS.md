@@ -14,14 +14,12 @@ Rules:
   seed 42. Validation and test call `sampling_evaluation` once per seed
   42–46 and average the raw metrics. Each model keeps its own loss,
   optimizer, and training loop.
-- New results for `independent_fcd_v1` go to
-  `xuancheng26/training_results_3s/<model>/physical_independent_fcd_v1/datasets/<dataset_id>/in_<input>__out_<target>/<observation_key>/seed_<model_seed>/`.
-  Older runs remain at
-  `xuancheng26/training_results_3s/<model>/in_<input>__out_<target>/<rate>/seed_<model_seed>/`.
+- Xuancheng results go to
+  `xuancheng26/training_results_3s/datasets/<dataset_id>/physical_<version>/<model>/in_<input>__out_<target>/<observation_key>/<experiment_id>/seed_<model_seed>/<run_id>/`.
   `model_seed` initializes parameters. `dataset_id`, `train_sampling_seed`, and
   `evaluation_sampling_seeds` are written into the resolved config.
-  Existing result directories are protected. The older
-  `xuancheng26/training_data/` and `training_results/` trees stay in place.
+  A new `run_id` does not overwrite an existing run. The non-3s
+  `xuancheng26/training_data/` and `training_results/` trees have been removed.
   Never write artifacts under `CODE_ROOT`. See `data_root.py`.
 - Default `model_seed` is `42`. IDs stay strings. Paths are relative to the
   repository root or the data-disk root resolved by `data_root.py`.

@@ -47,10 +47,9 @@ new traffic input into `mstt.py`; add it beside `InputEmbedding`.
 
 ## Data and outputs
 
-- Train windows: `sampling_seeds/seed_42/flow/window_data/{rate}/{split}/{date}/{state}.npz`.
-  `sampling_seeds` is the fixed-uniform compatibility entry. Pass `--dataset-id`
-  to read `training_data_3s/datasets/<dataset_id>/` instead. `p10_p20` is that
-  dataset's observation key, not a numeric penetration.
+- Train windows: `training_data_3s/datasets/fixed_uniform/sampling_seeds/seed_42/flow/window_data/{rate}/{split}/{date}/{state}.npz`.
+  Pass `--dataset-id` to read another dataset under `training_data_3s/datasets/<dataset_id>/`.
+  `p10_p20` is that dataset's observation key, not a numeric penetration.
 - Validation and test: the same layout for seeds 42, 43, 44, 45, and 46.
   The fixed scaler, split manifest, and node order live in `training_data_3s/shared/`
   and are linked from each fixed seed. A variable dataset keeps its own input scaler.
@@ -58,15 +57,13 @@ new traffic input into `mstt.py`; add it beside `InputEmbedding`.
   traffic moves from road `u` to road `v`.
 - 12→12 labels, when needed, are `training_data_3s/shared/sequence_targets_12step/`.
   They are not the default 12→1 trainer.
-- New results for the current physical definition:
-  `training_results_3s/MSTT/physical_independent_fcd_v1/datasets/<dataset_id>/in_<input>__out_<target>/<observation_key>/seed_<model_seed>/`.
+- Results:
+  `training_results_3s/datasets/<dataset_id>/physical_<version>/MSTT/in_<input>__out_<target>/<observation_key>/<experiment_id>/seed_<model_seed>/<run_id>/`.
   `seed_<model_seed>` is the initialization seed. The config records
   `train_sampling_seed=42`, `evaluation_sampling_seeds=[42,43,44,45,46]`, and
-  `physical_definition_version`. A checkpoint from the cumsum labels is refused
-  on this data. Older result directories are not moved.
-- Historical result trees, including `ablation_100ep/` and earlier versions,
-  stay where they are. A directory whose resolved config is not the five-seed
-  protocol is protected from overwrite.
+  `physical_definition_version`. A new run gets its own `run_id` and does not
+  overwrite an existing one. Historical 3s runs that did not record a physical
+  version are under `legacy_unknown`.
 
 ## Protocol
 

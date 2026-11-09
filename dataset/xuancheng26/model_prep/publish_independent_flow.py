@@ -490,6 +490,10 @@ def mark_ready(root: Path, passed: bool, failures: list[str]) -> None:
 
 
 def main() -> int:
+    raise SystemExit(
+        "publish_independent_flow is retired. It required archive/cumsum_stock_v1, "
+        "which has been removed. Current windows are under training_data_3s/datasets."
+    )
     import argparse
     from data_root import data_root
 

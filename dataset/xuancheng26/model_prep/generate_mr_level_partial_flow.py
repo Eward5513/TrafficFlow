@@ -75,7 +75,7 @@ SUMMARY_FIELDS = [
 
 def r_partial_root(root: Path) -> Path:
     """Canonical R-level seed42 input; M/MR assets retain their independent locations."""
-    return prep_paths.sampling_partial_flow_root(root / "sampling_seeds")
+    return prep_paths.sampling_partial_flow_root(root / "datasets" / "fixed_uniform" / "sampling_seeds")
 
 
 def violations(left: dict[str, np.ndarray], right: dict[str, np.ndarray]) -> dict[str, int]:

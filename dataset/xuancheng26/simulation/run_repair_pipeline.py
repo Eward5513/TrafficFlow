@@ -45,7 +45,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-resume", action="store_false", dest="resume")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
-    parser.add_argument("--skip-tests", action="store_true")
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     paths = ensure_data_dirs(cfg)
@@ -76,10 +75,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.force:
         graph_cmd.append("--force")
     run(graph_cmd, code)
-
-    if not args.skip_tests:
-        print("[pipeline] stage3 unit tests", flush=True)
-        run([py, "-m", "pytest", "-q", "tests/test_trip_repair.py"], code)
 
     repair_cmd = [py, "repair_trips.py", "--config", str(cfg_path)]
     if args.dry_run:

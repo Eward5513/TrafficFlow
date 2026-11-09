@@ -262,15 +262,15 @@ def main() -> None:
         payload["code_version"] = CODE_VERSION
         print(json.dumps({k: payload[k] for k in ("status", "training_loss", "prediction_shape")}, indent=2))
         return
-    if output_root.exists() and any(output_root.iterdir()) and not args.overwrite and args.resume is None:
-        raise ReimplementationError(f"{output_root} is not empty; pass --overwrite or --resume")
     data_info = collect_data_info(data_root, config, project_root=PROJECT_ROOT)
-    output_root.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(output_root / "resolved_config.json", config)
-    atomic_write_json(output_root / "environment.json", {"code_version": CODE_VERSION, **runtime_roots()})
-    atomic_write_json(output_root / "source_code_manifest.json", source_manifest(SCRIPT_PATH.parent))
-    atomic_write_json(output_root / "original_hashes.json", original_hashes(PROJECT_ROOT))
-    logger = JsonlLogger(output_root / "training_log.jsonl")
+    from data_root import model_report_dir
+    metadata_root = model_report_dir('staeformer')
+    metadata_root.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(metadata_root / "resolved_config.json", config)
+    atomic_write_json(metadata_root / "environment.json", {"code_version": CODE_VERSION, **runtime_roots()})
+    atomic_write_json(metadata_root / "source_code_manifest.json", source_manifest(SCRIPT_PATH.parent))
+    atomic_write_json(metadata_root / "original_hashes.json", original_hashes(PROJECT_ROOT))
+    logger = JsonlLogger(metadata_root / "training_log.jsonl")
     try:
         result = run_all_rates(
             config,
@@ -280,7 +280,7 @@ def main() -> None:
             logger=logger,
             resume_path=args.resume,
         )
-        upsert_overall_summary(output_root / "overall_summary.json", result["rates"])
+        upsert_overall_summary(metadata_root / "overall_summary.json", result["rates"])
     finally:
         logger.close()
 

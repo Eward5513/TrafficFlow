@@ -141,13 +141,13 @@ def init_partial_flow_worker() -> None:
     fcd_root = _env_path(ENV_FCD_ROOT)
     net_file = _env_path(ENV_NET_FILE)
     full_root = root / "full_flow" / "r-level"
-    out_root = sampling_partial_flow_root(root / "sampling_seeds")
+    out_root = sampling_partial_flow_root(root / "datasets" / "fixed_uniform" / "sampling_seeds")
     bind(full, FCD_ROOT=fcd_root, NET_FILE=net_file, OUT_ROOT=full_root)
     values = dict(
         FCD_ROOT=fcd_root,
         NET_FILE=net_file,
         FULL_ROOT=full_root,
-        SAMPLED_ROOT=sampled_vehicle_root(root / "sampling_seeds"),
+        SAMPLED_ROOT=sampled_vehicle_root(root / "datasets" / "fixed_uniform" / "sampling_seeds"),
         OUT_ROOT=out_root,
         SUMMARY_PATH=out_root / "generation_summary.csv",
     )

@@ -50,7 +50,7 @@ from tslearn.clustering import KShape
 import prep_paths
 
 TRAINING_ROOT = prep_paths.DEFAULT_TRAINING_ROOT
-WINDOW_ROOT = sampling_window_root(TRAINING_ROOT / "sampling_seeds")
+WINDOW_ROOT = sampling_window_root(TRAINING_ROOT / "datasets" / "fixed_uniform" / "sampling_seeds")
 FULL_ROOT = TRAINING_ROOT / "full_flow" / "r-level"
 GRAPH_DIR = TRAINING_ROOT / "graph"
 R_GRAPH = GRAPH_DIR / "r_graph.npz"
@@ -207,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     prep_paths.bind(
         sys.modules[__name__],
         TRAINING_ROOT=root,
-        WINDOW_ROOT=sampling_window_root(root / "sampling_seeds"),
+        WINDOW_ROOT=sampling_window_root(root / "datasets" / "fixed_uniform" / "sampling_seeds"),
         FULL_ROOT=root / "full_flow" / "r-level",
         GRAPH_DIR=root / "graph",
         R_GRAPH=root / "graph" / "r_graph.npz",

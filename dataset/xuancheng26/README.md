@@ -89,7 +89,7 @@ python3 run_fcd_simulations_3s.py --smoke-test
 
 `night_peak.add.xml` 在 55000 秒切到 program 1，75000 秒切回 program 0。`build_tls_3s.py` 生成的 `night_peak_3s.add.xml` 把切入晚高峰改到 54900 秒，75000 秒切回不变。54900 能被 3 整除。
 
-`run_fcd_simulations_tmp.py` 用 `xuancheng_tls_tmp.net.xml` 再跑同一套 29 天。除路网和输出目录外，参数与 3 秒批次相同，包括 `night_peak_3s.add.xml` 和 refined 路线。配置写到 `fcd_configs_tmp/`，结果写到 `simulation_data/fcd_tmp/YYYY_MM_DD/`。它不改 `fcd_data_3s/` 里正在跑的那一批。
+当前全天仿真入口是 `run_fcd_simulations_3s.py`，路网是 `xuancheng_tls_3s.net.xml`。曾经单独存放的 `xuancheng_tls_tmp.net.xml` 与这份 3 秒路网逐字节相同，已经去掉，不再作为第二份路网加载。`fcd_data_3s/` 里已有批次的 `day_result.json` 仍记录当时写出的路径，那些记录不改。
 
 ## 2. model_prep：从仿真结果到模型输入
 
@@ -235,7 +235,7 @@ python dataset/xuancheng26/model_prep/generate_multi_seed_flow_data.py --workers
 
 M-level 只做 3 秒批次，三个脚本默认就读 `fcd_data_3s/`、`xuancheng_tls_3s.net.xml`、`night_peak_3s.add.xml`，写到 `training_data_3s/`。它们不改 R-level 文件，只读 `graph/r_graph.npz` 做映射核对，读 R-level 全量总数写进 summary 作对照。
 
-`fcd_data_3s/` 的 FCD 头写的是 `xuancheng_tls_tmp.net.xml` 和 `fcd_tmp/`。这两个路网文件逐字节相同，lane id 可以直接对上。
+`fcd_data_3s/` 的历史 `day_result.json` 写的是当时的 `xuancheng_tls_tmp.net.xml` 和 `fcd_tmp/`。那份路网与 `xuancheng_tls_3s.net.xml` 逐字节相同，代码现在只加载 3 秒路网。
 
 一个 Movement 是 `(junction, incoming real edge, outgoing real edge)`，ID 为 `M::<junction>::<in>::<out>`。同一三元组的所有 lane-level `<connection>` 合成一个节点，车道号、via 车道（含内部路口的第二段 via）、`tl`、`linkIndex`、`state` 按 lane connection 全部保留。节点按入边、再按出边在 R 图里的序号排序。`m_i -> m_j` 当且仅当 `out(m_i) == in(m_j)`，中间道路就是这条共享 edge，`free_flow_travel_time = 车道平均长度 / 车道平均限速`。
 

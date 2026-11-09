@@ -44,7 +44,7 @@ def main(argv=None) -> dict:
         if args.task is None or args.penetration is None:
             raise SystemExit("pass --run-dir or both --task and --penetration")
         root = args.output_root or Path(load_config(None)["output_root"])
-        run_dir = run_directory(root, rate_tag(args.penetration), args.task, args.seed)
+        run_dir = run_directory(root, rate_tag(args.penetration), args.task, args.seed, load_config(None))
     run_dir = Path(run_dir).resolve()
     raw = json.loads((run_dir / "resolved_config.json").read_text(encoding="utf-8"))
     saved = with_legacy_defaults(raw)
@@ -57,10 +57,14 @@ def main(argv=None) -> dict:
         config["value_embedding_mode"] = raw_model["value_embedding_mode"]
     if args.device is not None:
         config["device"] = args.device
-    output_root = run_dir.parents[2]
-    run = TaskRun(config, task=saved["task"], rate=saved["penetration"], output_root=output_root, splits=tuple(args.splits))
-    if run.run_dir != run_dir:
-        raise SystemExit(f"resolved run directory {run.run_dir} != {run_dir}")
+    from data_root import parse_canonical_run
+    identity = parse_canonical_run(run_dir)
+    config.update({key: value for key, value in identity.items() if value})
+    output_root = identity.get("results_root") or run_dir.parents[2]
+    run = TaskRun(config, task=saved["task"], rate=saved["penetration"], output_root=Path(output_root), splits=tuple(args.splits))
+    # --run-dir is the stored run. TaskRun may allocate a new id when the historical
+    # dataset label is not one of the current manifests.
+    run.run_dir = run_dir
     checkpoint = load_checkpoint(args.checkpoint or run_dir / "best_checkpoint.pt", map_location=run.device)
     assert_conservation_checkpoint(checkpoint, config, normalization_sha256=run.package["state_normalization_sha256"])
     if checkpoint.get("task") != run.task.name or checkpoint.get("penetration_rate") != run.rate:

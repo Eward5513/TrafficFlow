@@ -186,26 +186,26 @@ def main() -> None:
     for path in protected:
         if output_root == path or path in output_root.parents:
             raise ReimplementationError(f"refusing to write Seq2seq GCN-LSTM outputs into {path}")
-    if output_root.exists() and any(output_root.iterdir()) and not args.overwrite and args.resume is None:
-        raise ReimplementationError(f"{output_root} is not empty; pass --overwrite or --resume")
     data_info = collect_data_info(data_root, config, project_root=PROJECT_ROOT)
-    output_root.mkdir(parents=True, exist_ok=True)
+    from data_root import model_report_dir
+    metadata_root = model_report_dir('s2s_gcn_lstm')
+    metadata_root.mkdir(parents=True, exist_ok=True)
     serializable = {key: value for key, value in config.items()}
-    atomic_write_json(output_root / "resolved_config.json", serializable)
+    atomic_write_json(metadata_root / "resolved_config.json", serializable)
     atomic_write_json(
-        output_root / "environment.json",
+        metadata_root / "environment.json",
         {"code_version": CODE_VERSION, "model_label": MODEL_LABEL, "torch": torch.__version__, **runtime_roots()},
     )
-    atomic_write_json(output_root / "source_code_manifest.json", source_manifest(SCRIPT_PATH.parent))
+    atomic_write_json(metadata_root / "source_code_manifest.json", source_manifest(SCRIPT_PATH.parent))
     atomic_write_json(
-        output_root / "paper.json",
+        metadata_root / "paper.json",
         {
             "official_code": False,
             "model_label": MODEL_LABEL,
             "doi": "10.1109/TITS.2022.3168865",
         },
     )
-    logger = JsonlLogger(output_root / "training_log.jsonl")
+    logger = JsonlLogger(metadata_root / "training_log.jsonl")
     try:
         run_all_rates(
             config,

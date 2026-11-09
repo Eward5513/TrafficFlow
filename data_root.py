@@ -156,6 +156,14 @@ def xuancheng26_model_results_dir(model_name: str) -> Path:
     return xuancheng26_training_results_root() / name
 
 
+def model_report_dir(model_name: str) -> Path:
+    """Launch-level logs and summaries. They are not a second result root."""
+    name = str(model_name).strip()
+    if name not in MODEL_NAMES:
+        raise PathLayoutError(f"unknown model name for reports: {model_name!r}")
+    return xuancheng26_training_results_3s_root() / "reports" / name
+
+
 def xuancheng26_model_results_3s_dir(model_name: str) -> Path:
     name = str(model_name).strip()
     if name not in MODEL_NAMES:
@@ -184,8 +192,11 @@ def node_table() -> Path:
 
 
 def xuancheng26_training_root() -> Path:
-    """Xuancheng26 prepared windows, graph tables, and model configs."""
-    return data_root() / "xuancheng26" / "training_data"
+    """Retired non-3s Xuancheng package. Callers must use ``xuancheng26_training_3s_root``."""
+    raise PathLayoutError(
+        "xuancheng26/training_data is retired; use xuancheng26_training_3s_root() "
+        f"({xuancheng26_training_3s_root()})"
+    )
 
 
 def xuancheng26_training_3s_root() -> Path:
@@ -254,15 +265,21 @@ def assert_training_results_output(path: Path, *, model_name: str | None = None)
     resolved = Path(path).expanduser().resolve()
     assert_not_code_root_output(resolved, what="training_results")
     assert_not_source_data_output(resolved, what="training_results")
+    if _is_retired_xuancheng_result(resolved):
+        raise PathLayoutError(
+            "xuancheng26/training_results is retired; write Xuancheng runs under "
+            f"{xuancheng26_training_results_3s_root()}"
+        )
+    shanghai_results = (data_root() / "shanghai_sim" / "training_results").resolve()
     allowed_roots = (
         training_results_root().resolve(),
-        xuancheng26_training_results_root().resolve(),
+        shanghai_results,
         xuancheng26_training_results_3s_root().resolve(),
     )
     if not any(resolved == root or _is_relative_to(resolved, root) for root in allowed_roots):
         raise PathLayoutError(
-            "training output must be under "
-            f"{allowed_roots[0]}, {allowed_roots[1]}, or {allowed_roots[2]}, got {resolved}"
+            "training output must be under Shanghai training_results or "
+            f"{xuancheng26_training_results_3s_root()}, got {resolved}"
         )
     if _is_relative_to(resolved, training_data_root()):
         raise PathLayoutError(f"training_results must not be inside training_data: {resolved}")
@@ -272,15 +289,10 @@ def assert_training_results_output(path: Path, *, model_name: str | None = None)
     ):
         if prepared.exists() and _is_relative_to(resolved, prepared.resolve()):
             raise PathLayoutError(f"training_results must not be inside training_data: {resolved}")
-    if model_name is not None:
-        expected_dirs = (
-            model_training_results_dir(model_name).resolve(),
-            xuancheng26_model_results_dir(model_name).resolve(),
-            xuancheng26_model_results_3s_dir(model_name).resolve(),
-        )
-        if not any(resolved == expected or _is_relative_to(resolved, expected) for expected in expected_dirs):
+    if model_name is not None and not _is_shanghai_result(resolved):
+        if model_name not in resolved.parts and resolved.name != model_name:
             raise PathLayoutError(
-                f"{model_name} output must be under {expected_dirs[0]}, {expected_dirs[1]}, or {expected_dirs[2]}, got {resolved}"
+                f"{model_name} output path does not name that model: {resolved}"
             )
     return resolved
 
@@ -338,7 +350,8 @@ TRAIN_SAMPLING_SEED = 42
 
 
 def xuancheng26_sampling_root() -> Path:
-    return xuancheng26_training_3s_root() / "sampling_seeds"
+    """Fixed-uniform sampling tree. The old top-level ``sampling_seeds`` alias is retired."""
+    return xuancheng26_training_3s_root() / "datasets" / FIXED_DATASET_ID / "sampling_seeds"
 
 
 def xuancheng26_shared_root() -> Path:
@@ -391,9 +404,58 @@ def sampling_root_from_window(window_root: Path | str) -> Path:
 
 
 def task_results_dir(output_root: Path | str, input_type: str, target_type: str) -> Path:
+    """Task directory inside the canonical Xuancheng result tree.
+
+    ``output_root`` is a results root or a legacy ``<results>/<model>`` pointer.
+    The returned directory stops at the task leaf; the run id is not included.
+    """
     root = Path(output_root)
-    leaf = f"in_{input_type}__out_{target_type}"
-    return root if root.name == leaf else root / leaf
+    if _is_shanghai_result(root):
+        leaf = f"in_{input_type}__out_{target_type}"
+        return root if root.name == leaf else root / leaf
+    base, model = _xuancheng_result_base_and_model(root, None)
+    if model is None:
+        raise PathLayoutError(f"cannot infer model for task directory from {root}")
+    return (
+        base / "datasets" / FIXED_DATASET_ID / f"physical_{PHYSICAL_DEFINITION_VERSION}"
+        / model / f"in_{input_type}__out_{target_type}"
+    )
+
+
+def _is_shanghai_result(path: Path) -> bool:
+    return "shanghai_sim" in Path(path).parts
+
+
+def _is_retired_xuancheng_result(path: Path) -> bool:
+    parts = Path(path).parts
+    return "xuancheng26" in parts and "training_results" in parts and "training_results_3s" not in parts
+
+
+def _xuancheng_result_base_and_model(path: Path, model_name: str | None) -> tuple[Path, str | None]:
+    """Split a pointer into the 3s results root and the model name."""
+    raw = Path(path)
+    if _is_retired_xuancheng_result(raw):
+        raise PathLayoutError(
+            "xuancheng26/training_results is retired and is not a silent alias of training_results_3s: "
+            f"{raw}"
+        )
+    parts = raw.parts
+    model = str(model_name).strip() if model_name else None
+    if "training_results_3s" in parts:
+        index = parts.index("training_results_3s")
+        base = Path(*parts[: index + 1])
+        if model is None and index + 1 < len(parts) and parts[index + 1] in MODEL_NAMES:
+            model = parts[index + 1]
+        if model is None and "datasets" in parts[index + 1 :]:
+            tail = parts[index + 1 :]
+            for part in tail:
+                if part in MODEL_NAMES:
+                    model = part
+                    break
+        return base, model
+    if model is None and raw.name in MODEL_NAMES:
+        return raw.parent, raw.name
+    return raw, model
 
 
 def sampling_run_results_dir(
@@ -405,44 +467,78 @@ def sampling_run_results_dir(
     *,
     physical_version: str | None = None,
     dataset_id: str | None = None,
+    model_name: str | None = None,
+    experiment_id: str = "baseline",
+    run_id: str | None = None,
 ) -> Path:
-    """Fixed runs stay ``in_<in>__out_<out>/<rate>/seed_<model_seed>`` unless a physical version is set.
+    """Return one Xuancheng run directory, including experiment and run id.
 
-    With ``physical_version``, new runs go to
-    ``physical_<version>/datasets/<dataset_id>/in_<in>__out_<out>/<rate>/seed_<model_seed>``.
-    Existing result trees are not moved.
+    Layout::
+
+        <results_3s>/datasets/<dataset_id>/physical_<version>/<model>/
+            in_<input>__out_<target>/<observation_key>/<experiment_id>/
+            seed_<model_seed>/<run_id>/
+
+    Shanghai outputs keep the historical ``<model>/in_*__out_*/<rate>/seed_<seed>``
+    layout. A path under the retired non-3s Xuancheng result tree raises.
     """
     root = Path(output_root)
-    variable_leaf = f"in_{input_type}out{target_type}"
-    fixed_leaf = f"in_{input_type}__out_{target_type}"
-    if physical_version:
-        if root.name in {fixed_leaf, variable_leaf}:
-            root = root.parent
-        dataset = dataset_id or FIXED_DATASET_ID
-        if root.name == dataset and root.parent.name == "datasets":
-            root = root.parent.parent
-        elif root.name == "datasets":
-            root = root.parent
-        version_dir = f"physical_{physical_version}"
-        if version_dir in root.parts:
-            index = root.parts.index(version_dir)
-            base = Path(*root.parts[: index + 1])
-        else:
-            base = root / version_dir
-        if not (base.name == dataset and base.parent.name == "datasets"):
-            base = base / "datasets" / dataset
-        return base / fixed_leaf / str(rate) / f"seed_{int(model_seed)}"
-    if not physical_version:
-        if "datasets" in root.parts and (root.name == variable_leaf or root.parent.name == "datasets"):
-            parent = root if root.name == variable_leaf else root / variable_leaf
-            return parent / str(rate) / f"seed{int(model_seed)}"
-        parent = root if root.name == fixed_leaf else root / fixed_leaf
+    if _is_shanghai_result(root):
+        leaf = f"in_{input_type}__out_{target_type}"
+        parent = root if root.name == leaf else root / leaf
         return parent / str(rate) / f"seed_{int(model_seed)}"
-    raise PathLayoutError("sampling result path was not resolved")
+    if not run_id:
+        raise PathLayoutError("Xuancheng result directory requires run_id")
+    version = str(physical_version or PHYSICAL_DEFINITION_VERSION)
+    dataset = str(dataset_id or FIXED_DATASET_ID)
+    base, model = _xuancheng_result_base_and_model(root, model_name)
+    if model is None:
+        raise PathLayoutError(f"cannot infer model name from {root}")
+    if model not in MODEL_NAMES:
+        raise PathLayoutError(f"unknown model name for a result run: {model}")
+    return (
+        base / "datasets" / dataset / f"physical_{version}" / model
+        / f"in_{input_type}__out_{target_type}" / str(rate) / str(experiment_id)
+        / f"seed_{int(model_seed)}" / str(run_id)
+    )
 
 
 PHYSICAL_DEFINITION_VERSION = "independent_fcd_v1"
 FIXED_DATASET_ID = "fixed_uniform"
+
+
+def parse_canonical_run(path: Path | str) -> dict[str, str]:
+    """Read dataset, version, model, experiment, and run id out of a canonical run directory."""
+    raw = Path(path)
+    parts = raw.parts
+    if "datasets" not in parts:
+        return {}
+    index = parts.index("datasets")
+    tail = parts[index + 1 :]
+    # dataset / physical_* / model / task / key / experiment / seed_* / run_id
+    if len(tail) < 8:
+        return {}
+    version = tail[1]
+    if version.startswith("physical_"):
+        version = version[len("physical_") :]
+    return {
+        "results_root": str(Path(*parts[:index])),
+        "dataset_id": tail[0],
+        "physical_definition_version": version,
+        "model_name": tail[2],
+        "experiment_id": tail[5],
+        "run_id": tail[7],
+    }
+
+
+def new_run_id(model_name: str, dataset_id: str = FIXED_DATASET_ID) -> str:
+    """Unique id for one new training launch. Migration uses ``legacy_<hash>`` instead."""
+    import hashlib
+    from datetime import datetime
+
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    digest = hashlib.sha256(f"{model_name}|{dataset_id}|{stamp}|{os.getpid()}".encode()).hexdigest()[:8]
+    return f"{stamp}_{digest}"
 FIXED_OBSERVATION_KEYS = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
 _OBSERVATION_KEY = re.compile(r"^p\d+(?:p\d+)?_p\d+(?:p\d+)?$")
 
@@ -474,11 +570,7 @@ def variable_dataset_id(mode: str, p_min: float, p_max: float) -> str:
 
 
 def _fixed_sampling_root(training_root: Path) -> Path:
-    migrated = training_root / "datasets" / FIXED_DATASET_ID / "sampling_seeds"
-    legacy = training_root / "sampling_seeds"
-    if migrated.exists():
-        return migrated
-    return legacy
+    return training_root / "datasets" / FIXED_DATASET_ID / "sampling_seeds"
 
 
 def _infer_dataset_id(sampling_root: Path, training_root: Path) -> str | None:

@@ -122,38 +122,8 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
             config["input_dim"] = in_channels
         if "output_dim" in config:
             config["output_dim"] = out_channels
-    root = Path(str(config["output_root"]))
-    dataset_id = str(config.get("dataset_id") or "fixed_uniform")
-    version = config.get("physical_definition_version")
-    if version:
-        from data_root import sampling_run_results_dir
-
-        leaf = f"in_{input_type}__out_{target_type}"
-        sample = sampling_run_results_dir(
-            root, input_type, target_type, "p05", 0,
-            physical_version=str(version), dataset_id=dataset_id,
-        )
-        config["output_root"] = sample.parent.parent.as_posix()
-        if Path(config["output_root"]).name != leaf:
-            raise ReimplementationError(f"physical output root did not end in {leaf}")
-        return config
-    if dataset_id != "fixed_uniform":
-        from data_root import dataset_results_parent
-
-        leaf = f"in_{input_type}out{target_type}"
-        if not (root.name == leaf and root.parent.name == dataset_id and root.parent.parent.name == "datasets"):
-            if root.parent.name == "datasets" and root.name == dataset_id:
-                base = root
-            else:
-                base = dataset_results_parent(root, dataset_id)
-            root = base / leaf
-        config["output_root"] = root.as_posix()
-    else:
-        leaf = f"in_{input_type}__out_{target_type}"
-        # Keep the official model directory, and put each input/target pair in its
-        # own child so single-state runs and all-to-all never share checkpoints.
-        if root.name != leaf:
-            config["output_root"] = (root / leaf).as_posix()
+    # output_root stays the results pointer. sampling_rate_dir adds dataset,
+    # physical version, task, observation key, experiment, model seed, and run id once.
     return config
 
 

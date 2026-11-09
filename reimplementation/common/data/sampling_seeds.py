@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Mapping
 
 from data_root import (
-    SAMPLING_SEEDS, TRAIN_SAMPLING_SEED, dataset_results_parent, resolve_xuancheng_dataset,
+    SAMPLING_SEEDS, TRAIN_SAMPLING_SEED, new_run_id, resolve_xuancheng_dataset,
     sampling_window_root, sampling_root_from_window, sampling_run_results_dir,
 )
 from reimplementation.common.data.r_only_npz_dataset import (
@@ -38,6 +38,11 @@ def configure_sampling(config: Mapping, *, model_name: str | None = None) -> dic
                evaluation_sampling_seeds=list(seeds), sampling_root=str(root),
                dataset_id=spec["dataset_id"], observation_keys=list(spec["observation_keys"]),
                data_root=str(window), checkpoint_selection="mean_validation_mae")
+    if model_name:
+        cfg["model_name"] = str(model_name)
+    cfg.setdefault("experiment_id", "baseline")
+    if not cfg.get("run_id"):
+        cfg["run_id"] = new_run_id(str(cfg.get("model_name") or "model"), str(spec["dataset_id"]))
     if spec.get("schedule_sha256"):
         cfg["schedule_sha256"] = spec["schedule_sha256"]
     normalization = window / "state_normalization.json"
@@ -51,8 +56,6 @@ def configure_sampling(config: Mapping, *, model_name: str | None = None) -> dic
     for key, name in (("split_manifest", "split_manifest.json"), ("normalization", "state_normalization.json"),
                       ("data_validation", "validation_summary.json"), ("node_mapping", "node_mapping.csv")):
         cfg[key] = str(window / name)
-    if spec["dataset_id"] != "fixed_uniform" and cfg.get("output_root"):
-        cfg["output_root"] = str(dataset_results_parent(cfg["output_root"], str(spec["dataset_id"])))
     cfg.pop("explicit_path_keys", None)
     return cfg
 
@@ -153,7 +156,11 @@ def validate_sampling_package(root: Path, *, n_his: int, num_nodes: int, rates: 
 
 
 def sampling_rate_dir(output_root, config: Mapping, rate) -> Path:
-    """Result directory for one penetration. Never the pre-protocol ``<model>/pXX/seed_YY`` tree."""
+    """Canonical run directory for one observation key. Does not append another task/rate/seed layer."""
+    run_id = config.get("run_id")
+    if not run_id:
+        raise ValueError("config is missing run_id; configure_sampling must run before creating a result directory")
+    dataset_id = config.get("dataset_id")
     return sampling_run_results_dir(
         output_root,
         str(config.get("input_type") or "inflow"),
@@ -161,15 +168,26 @@ def sampling_rate_dir(output_root, config: Mapping, rate) -> Path:
         rate,
         int(config.get("model_seed", config.get("seed", 42))),
         physical_version=config.get("physical_definition_version"),
-        dataset_id=str(config.get("dataset_id") or "") or None,
+        dataset_id=str(dataset_id) if dataset_id else None,
+        model_name=str(config.get("model_name") or "") or None,
+        experiment_id=str(config.get("experiment_id") or "baseline"),
+        run_id=str(run_id),
     )
 
 
 def protect_historical_results(root: Path) -> None:
-    """An old task directory is research evidence even when --overwrite is given."""
+    """Refuse to reuse one completed run whose selection protocol is not the current one.
+
+    Child runs are separate directories. A shared model pointer is not itself a run,
+    so this check does not walk ``p*/seed_*``.
+    """
     root = Path(root)
-    for path in [root / 'resolved_config.json', *root.glob('p*/seed_*/resolved_config.json')]:
-        if path.is_file():
-            cfg = load_json(path)
-            if cfg.get('checkpoint_selection') != 'mean_validation_mae':
-                raise RuntimeError(f'historical result directory is protected: {root}; use an empty --output-root for the new protocol')
+    path = root / "resolved_config.json"
+    if not path.is_file():
+        return
+    cfg = load_json(path)
+    if cfg.get("checkpoint_selection") != "mean_validation_mae":
+        raise RuntimeError(
+            f"historical result directory is protected: {root}; "
+            "start a new run_id instead of overwriting it"
+        )

@@ -73,14 +73,16 @@ def main() -> None:
     assert_task_config(config)
     data_root = resolve_path(PROJECT_ROOT, config["data_root"])
     output_root = resolve_training_output(PROJECT_ROOT, config["output_root"], model_name="stjgcn")
-    output_root.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(output_root / "resolved_config.json", config)
+    from data_root import model_report_dir
+    metadata_root = model_report_dir('stjgcn')
+    metadata_root.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(metadata_root / "resolved_config.json", config)
     atomic_write_json(
-        output_root / "environment.json",
+        metadata_root / "environment.json",
         {"code_version": CODE_VERSION, **runtime_roots(), "python": sys.version, "torch": torch.__version__, "platform": platform.platform()},
     )
     data_info = collect_data_info(data_root, config, project_root=PROJECT_ROOT)
-    logger = JsonlLogger(output_root / "training_log.jsonl")
+    logger = JsonlLogger(metadata_root / "training_log.jsonl")
     try:
         run_all_rates(
             config,

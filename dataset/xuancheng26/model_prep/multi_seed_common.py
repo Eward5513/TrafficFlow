@@ -76,8 +76,18 @@ def split_manifest(root):
     return splits, sorted(dates)
 
 
+def sampling_base(root):
+    """Fixed-uniform seed tree. A dataset directory keeps its own ``sampling_seeds``."""
+    root = Path(root)
+    if root.name == "sampling_seeds":
+        return root
+    if (root / "dataset_manifest.json").is_file() and (root / "sampling_seeds").is_dir():
+        return root / "sampling_seeds"
+    return root / "datasets" / "fixed_uniform" / "sampling_seeds"
+
+
 def seed_root(root, seed):
-    return root / "sampling_seeds" / f"seed_{seed}"
+    return sampling_base(root) / f"seed_{seed}"
 
 
 def vehicle_path(root, seed, rate, day):
@@ -103,7 +113,7 @@ def historical(root, seed, rate, split, day, kind):
 
 def assert_output(path, root):
     """Never follow a legacy alias to write an original file."""
-    parent = (root / "sampling_seeds").resolve()
+    parent = sampling_base(root).resolve()
     if not Path(path).resolve().is_relative_to(parent):
         raise RuntimeError(f"output escapes sampling_seeds: {path}")
 

@@ -27,10 +27,10 @@ import numpy as np
 import prep_paths
 
 _TRAINING = prep_paths.DEFAULT_TRAINING_ROOT
-PARTIAL_ROOT = sampling_partial_flow_root(_TRAINING / "sampling_seeds")
+PARTIAL_ROOT = sampling_partial_flow_root(_TRAINING / "datasets" / "fixed_uniform" / "sampling_seeds")
 FULL_ROOT = _TRAINING / "full_flow" / "r-level"
 GRAPH_PATH = _TRAINING / "graph" / "r_graph.npz"
-OUT_ROOT = sampling_window_root(_TRAINING / "sampling_seeds")
+OUT_ROOT = sampling_window_root(_TRAINING / "datasets" / "fixed_uniform" / "sampling_seeds")
 RATES = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
 CHANNELS = ("inflow", "outflow", "accumulation_start", "accumulation_end")
 STATE_FILES = CHANNELS + ("all",)
@@ -474,10 +474,10 @@ def main(argv: list[str] | None = None) -> int:
     root = prep_paths.resolved(args.training_root)
     prep_paths.bind(
         sys.modules[__name__],
-        PARTIAL_ROOT=sampling_partial_flow_root(root / "sampling_seeds"),
+        PARTIAL_ROOT=sampling_partial_flow_root(root / "datasets" / "fixed_uniform" / "sampling_seeds"),
         FULL_ROOT=root / "full_flow" / "r-level",
         GRAPH_PATH=root / "graph" / "r_graph.npz",
-        OUT_ROOT=sampling_window_root(root / "sampling_seeds"),
+        OUT_ROOT=sampling_window_root(root / "datasets" / "fixed_uniform" / "sampling_seeds"),
     )
     prep_paths.publish_runtime(training_root=root)
     log(f"training_root={root}")

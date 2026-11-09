@@ -321,7 +321,7 @@ def publish_metadata(root, results, resources, protected, dates, all_dates):
                "label_storage": "Authoritative full CSVs and graph are shared; y/y_raw embedded only as required by legacy NPZ schema.",
                "layout": "seed_{sampling_seed}/flow/window_data/{rate}/{split}/{date}/{state}.npz",
                "channels": list(common.CHANNELS), "records": records}
-    base = root / "sampling_seeds"
+    base = common.sampling_base(root)
     if sorted(dates) != all_dates:
         # A smoke/retry subset must never replace the authoritative complete report.
         common.write_report(base / "flow_generation_subset_v2.json", payload, root)

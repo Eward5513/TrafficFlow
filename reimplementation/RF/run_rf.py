@@ -206,7 +206,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.audit_only:
         return 0
 
-    run_dir = _pair_dir(args.input_type, args.target_type, args.run_id)
+    from data_root import model_report_dir, new_run_id, sampling_run_results_dir
+    launch_id = args.run_id or new_run_id("RF", str(args.dataset_id or "fixed_uniform"))
+    experiment_id = "baseline" if int(args.n_clusters) == 50 else f"clusters_{int(args.n_clusters)}"
+    run_dir = model_report_dir("RF") / launch_id
     previous = run_dir / "experiment_config.json"
     if previous.is_file() and json.loads(previous.read_text()).get("evaluation_sampling_seeds") != [42,43,44,45,46]:
         raise RuntimeError(f"historical RF experiment protected: {run_dir}; use --run-id or an empty --results-root")
@@ -267,7 +270,14 @@ def main(argv: list[str] | None = None) -> int:
         config = {
             "penetration": rate,
             "run_dir": str(run_dir),
-            "rate_dir": str(run_dir / rate / f"seed_{args.seed}"),
+            "rate_dir": str(sampling_run_results_dir(
+                RESULTS_ROOT, args.input_type, args.target_type, rate, args.seed,
+                physical_version="independent_fcd_v1",
+                dataset_id=str(args.dataset_id or "fixed_uniform"),
+                model_name="RF",
+                experiment_id=experiment_id,
+                run_id=launch_id,
+            )),
             "input_type": args.input_type,
             "target_type": args.target_type,
             "seed": args.seed,

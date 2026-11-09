@@ -236,11 +236,11 @@ def main() -> None:
         print("[stsgcn] stage=smoke_testing discarded_model=yes did_not_write_experiments=yes", flush=True)
         return
 
-    if output_root.exists() and any(output_root.iterdir()) and not args.overwrite and args.resume is None:
-        raise ReimplementationError(f"{output_root} is not empty; pass --overwrite or --resume")
-    output_root.mkdir(parents=True, exist_ok=True)
+    from data_root import model_report_dir
+    metadata_root = model_report_dir('stsgcn')
+    metadata_root.mkdir(parents=True, exist_ok=True)
     atomic_write_json(
-        output_root / "experiment_manifest.json",
+        metadata_root / "experiment_manifest.json",
         {
             "model_name": "stsgcn",
             "framework": "pytorch",
@@ -259,10 +259,10 @@ def main() -> None:
             "resumed": args.resume is not None,
         },
     )
-    atomic_write_json(output_root / "resolved_config.json", config)
-    atomic_write_json(output_root / "original_to_migrated_mapping.json", ORIGINAL_TO_MIGRATED)
+    atomic_write_json(metadata_root / "resolved_config.json", config)
+    atomic_write_json(metadata_root / "original_to_migrated_mapping.json", ORIGINAL_TO_MIGRATED)
     atomic_write_json(
-        output_root / "environment.json",
+        metadata_root / "environment.json",
         {
             "python": sys.version.split()[0],
             "pytorch": torch.__version__,
@@ -276,8 +276,8 @@ def main() -> None:
             **runtime_roots(),
         },
     )
-    atomic_write_json(output_root / "source_code_manifest.json", source_manifest(PROJECT_ROOT / "reimplementation" / "stsgcn"))
-    logger = JsonlLogger(output_root / "training_log.jsonl")
+    atomic_write_json(metadata_root / "source_code_manifest.json", source_manifest(PROJECT_ROOT / "reimplementation" / "stsgcn"))
+    logger = JsonlLogger(metadata_root / "training_log.jsonl")
     print(
         f"[stsgcn] stage=scanning output_root={output_root.as_posix()} rates={config['rates']} device={config.get('device')}",
         flush=True,
@@ -298,9 +298,9 @@ def main() -> None:
         after = {str(path): sha256_file(path) for path in protected if path.is_file()}
         if before != after:
             raise ReimplementationError("protected input files changed during STSGCN run")
-        atomic_write_json(output_root / "data_runtime_validation.json", result["data_info"])
-        atomic_write_json(output_root / "graph_runtime_validation.json", result["graph_info"])
-        upsert_overall_summary(output_root / "overall_summary.json", result["rates"])
+        atomic_write_json(metadata_root / "data_runtime_validation.json", result["data_info"])
+        atomic_write_json(metadata_root / "graph_runtime_validation.json", result["graph_info"])
+        upsert_overall_summary(metadata_root / "overall_summary.json", result["rates"])
         logger.log({"stage": "completed", "model_name": "stsgcn", "status": "ok"})
         print("[stsgcn] stage=completed status=ok", flush=True)
     except Exception as exc:

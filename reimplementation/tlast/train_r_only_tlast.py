@@ -98,11 +98,13 @@ def _prepare(args: argparse.Namespace, *, input_type: str | None = None, target_
 
 
 def _run(config: dict[str, Any], data_root: Path, output_root: Path, args: argparse.Namespace) -> dict[str, Any]:
-    output_root.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(output_root / "resolved_config.json", config)
-    atomic_write_json(output_root / "environment.json", {"code_version": CODE_VERSION, **runtime_roots(), "python": sys.version, "torch": torch.__version__, "platform": platform.platform()})
+    from data_root import model_report_dir
+    metadata_root = model_report_dir('tlast')
+    metadata_root.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(metadata_root / "resolved_config.json", config)
+    atomic_write_json(metadata_root / "environment.json", {"code_version": CODE_VERSION, **runtime_roots(), "python": sys.version, "torch": torch.__version__, "platform": platform.platform()})
     data_info = collect_data_info(data_root, config, project_root=PROJECT_ROOT)
-    logger = JsonlLogger(output_root / "training_log.jsonl")
+    logger = JsonlLogger(metadata_root / "training_log.jsonl")
     try:
         result = run_all_rates(
             config,

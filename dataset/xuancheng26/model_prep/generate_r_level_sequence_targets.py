@@ -86,7 +86,7 @@ SCALER_NOTE = (
 )
 
 TRAINING_ROOT = prep_paths.TRAINING_ROOT_3S
-WINDOW_ROOT = sampling_window_root(TRAINING_ROOT / "sampling_seeds")
+WINDOW_ROOT = sampling_window_root(TRAINING_ROOT / "datasets" / "fixed_uniform" / "sampling_seeds")
 FULL_ROOT = TRAINING_ROOT / "full_flow" / "r-level"
 GRAPH_PATH = TRAINING_ROOT / "graph" / "r_graph.npz"
 OUT_ROOT = TRAINING_ROOT / "shared" / SEQUENCE_DIRNAME
@@ -518,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.verify_only and (args.skip_complete or args.overwrite):
         parser.error("--verify-only cannot be combined with --skip-complete or --overwrite")
     root = prep_paths.resolved(args.training_root)
-    window_root = sampling_window_root(root / "sampling_seeds")
+    window_root = sampling_window_root(root / "datasets" / "fixed_uniform" / "sampling_seeds")
     prep_paths.bind(
         sys.modules[__name__],
         TRAINING_ROOT=root,

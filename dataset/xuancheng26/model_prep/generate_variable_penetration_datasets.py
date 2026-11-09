@@ -214,7 +214,7 @@ def publish_ids(path: Path, vehicle_ids: list[str]) -> str:
 
 def fixed_nesting_ok(training_root: Path, date: str, seed: int, chosen: list[str], probability: float) -> dict:
     chosen_set = set(chosen)
-    root = training_root / "sampling_seeds" / f"seed_{seed}" / "sampled_vehicle"
+    root = training_root / "datasets" / "fixed_uniform" / "sampling_seeds" / f"seed_{seed}" / "sampled_vehicle"
     low = set(read_ids(root / "p10" / f"{date}.csv"))
     high = set(read_ids(root / "p20" / f"{date}.csv"))
     count = None

@@ -182,9 +182,9 @@ def main() -> None:
     dcrnn_output = PROJECT_ROOT / "reimplementation" / "dcrnn" / "experiments" / "r_only"
     if output_root.resolve() == dcrnn_output.resolve():
         raise ReimplementationError("GWN output_root must not be the DCRNN experiment directory")
-    if output_root.exists() and any(output_root.iterdir()) and not args.overwrite and args.resume is None:
-        raise ReimplementationError(f"{output_root} is not empty; pass --overwrite or --resume")
-    output_root.mkdir(parents=True, exist_ok=True)
+    from data_root import model_report_dir
+    metadata_root = model_report_dir('graph_wavenet')
+    metadata_root.mkdir(parents=True, exist_ok=True)
     protected = [
         adjacency,
         pickle_path,
@@ -196,7 +196,7 @@ def main() -> None:
     ]
     before = {str(path): sha256_file(path) for path in protected if path.is_file()}
     atomic_write_json(
-        output_root / "experiment_manifest.json",
+        metadata_root / "experiment_manifest.json",
         {
             "model_name": "graph_wavenet",
             "framework": "pytorch",
@@ -217,10 +217,10 @@ def main() -> None:
             "did_not_write_dcrnn_outputs": True,
         },
     )
-    atomic_write_json(output_root / "resolved_config.json", config)
-    atomic_write_json(output_root / "original_to_migrated_mapping.json", ORIGINAL_TO_MIGRATED)
+    atomic_write_json(metadata_root / "resolved_config.json", config)
+    atomic_write_json(metadata_root / "original_to_migrated_mapping.json", ORIGINAL_TO_MIGRATED)
     atomic_write_json(
-        output_root / "environment.json",
+        metadata_root / "environment.json",
         {
             "python": sys.version.split()[0],
             "pytorch": torch.__version__,
@@ -236,8 +236,8 @@ def main() -> None:
             **runtime_roots(),
         },
     )
-    atomic_write_json(output_root / "source_code_manifest.json", source_manifest(PROJECT_ROOT / "reimplementation"))
-    logger = JsonlLogger(output_root / "training_log.jsonl")
+    atomic_write_json(metadata_root / "source_code_manifest.json", source_manifest(PROJECT_ROOT / "reimplementation"))
+    logger = JsonlLogger(metadata_root / "training_log.jsonl")
     print(
         f"[gwn] stage=scanning output_root={output_root.as_posix()} rates={config['rates']} device={config.get('device')}",
         flush=True,
@@ -259,12 +259,12 @@ def main() -> None:
         after = {str(path): sha256_file(path) for path in protected if path.is_file()}
         if before != after:
             raise ReimplementationError("protected input files changed during Graph WaveNet run")
-        atomic_write_json(output_root / "data_runtime_validation.json", result["data_info"])
-        atomic_write_json(output_root / "graph_runtime_validation.json", result["graph_info"])
+        atomic_write_json(metadata_root / "data_runtime_validation.json", result["data_info"])
+        atomic_write_json(metadata_root / "graph_runtime_validation.json", result["graph_info"])
         if result.get("smoke") is not None:
-            atomic_write_json(output_root / "smoke_test.json", result["smoke"])
-            atomic_write_json(output_root / "model_runtime_validation.json", result["smoke"].get("shape_info") or {})
-        atomic_write_json(output_root / "overall_summary.json", result["rates"])
+            atomic_write_json(metadata_root / "smoke_test.json", result["smoke"])
+            atomic_write_json(metadata_root / "model_runtime_validation.json", result["smoke"].get("shape_info") or {})
+        atomic_write_json(metadata_root / "overall_summary.json", result["rates"])
         summary_rows = []
         for row in result["rates"]:
             summary_rows.append(
@@ -288,7 +288,7 @@ def main() -> None:
                 }
             )
         atomic_write_csv_rows(
-            output_root / "overall_summary.csv",
+            metadata_root / "overall_summary.csv",
             [
                 "rate",
                 "status",

@@ -22,12 +22,12 @@ def main(argv=None):
     p.add_argument('--write-configs',action='store_true',help='Update only existing default model configs; never historical run configs.')
     p.add_argument('--rates',nargs='+',default=['p05','p10','p20','p30','p40','p50','p70'])
     args=p.parse_args(argv);root=args.training_root
-    win=sampling_window_root(root/'sampling_seeds')
+    win=sampling_window_root(root/'datasets'/'fixed_uniform'/'sampling_seeds')
     info=validate_sampling_package(win,n_his=12,num_nodes=1406,rates=args.rates)
     models=[]
     for path in sorted((root/'config').glob('*/r_only_*.json')):
         cfg=json.loads(path.read_text());name=cfg['model_name']
-        cfg=configure_sampling({**cfg,'sampling_root':str(root/'sampling_seeds')})
+        cfg=configure_sampling({**cfg,'sampling_root':str(root/'datasets'/'fixed_uniform'/'sampling_seeds')})
         cfg.update(input_type=cfg.get('input_type','inflow'),target_type=cfg.get('target_type','inflow'),
                    output_root=str(xuancheng26_model_results_3s_dir(name)),checkpoint_monitor='mean_validation_mae',
                    dataset_metadata=str(root/'shared/state_window_manifest.json'))

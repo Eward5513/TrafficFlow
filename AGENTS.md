@@ -53,18 +53,19 @@ config file.
 - Resolve data paths through `data_root.py`. The earlier Xuancheng package
   remains at `xuancheng26/training_data/`. The 3-second-phase package is
   `xuancheng26/training_data_3s/`. Fixed penetrations live in
-  `training_data_3s/datasets/fixed_uniform/sampling_seeds/`; `sampling_seeds`
-  remains a compatibility symlink to that directory. Shared split, node order,
-  and the shared target scaler stay in `training_data_3s/shared/`. The current
-  four road states are `independent_fcd_v1`: events for inflow/outflow and FCD
-  boundary snapshots for accumulation. The retired cumsum stock is
-  `archive/cumsum_stock_v1/`. Variable-penetration datasets are
+  `training_data_3s/datasets/fixed_uniform/sampling_seeds/`. There is no
+  top-level `sampling_seeds` alias. Shared split, node order, and the shared
+  target scaler stay in `training_data_3s/shared/`. The current four road
+  states are `independent_fcd_v1`: events for inflow/outflow and FCD boundary
+  snapshots for accumulation. Variable-penetration datasets are
   `training_data_3s/datasets/<dataset_id>/` and carry their own input scaler.
   Train on sampling seed 42. Validation and test score seeds 42–46 and select
   checkpoints by the mean raw MAE. `sampling_seed`, `schedule_seed`, and
-  `model_seed` are different. New 3-second results go to
-  `training_results_3s/<model>/physical_independent_fcd_v1/datasets/<dataset_id>/in_<input>__out_<target>/<observation_key>/seed_<model_seed>/`.
-  Older result directories stay where they are.
+  `model_seed` are different. Results go to
+  `training_results_3s/datasets/<dataset_id>/physical_<version>/<model>/in_<input>__out_<target>/<observation_key>/<experiment_id>/seed_<model_seed>/<run_id>/`.
+  The non-3s `xuancheng26/training_data` and `training_results` trees are gone.
+  Do not recreate them. Historical runs that lack a recorded physical version
+  live under `dataset_id=legacy_unknown` and `physical_legacy_unknown`.
   `reimplementation/` does not generate datasets. Never write those artifacts
   under `CODE_ROOT`, and do not overwrite an existing result directory.
 - Keep ID-like values such as VINs, OSM IDs, SUMO edge IDs, junction IDs, and
