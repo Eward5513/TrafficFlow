@@ -14,7 +14,6 @@ from typing import Any
 
 import torch
 
-from reimplementation.common.data.r_only_npz_dataset import rate_tag
 from reimplementation.common.data.state_windows import add_state_type_arguments, apply_state_types
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.evaluation import upsert_overall_summary
@@ -58,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--normalization", type=Path, default=None)
     parser.add_argument("--split-manifest", dest="split_manifest", type=Path, default=None)
     parser.add_argument("--output-root", dest="output_root", type=Path, default=None)
-    parser.add_argument("--rates", type=int, nargs="+", default=None)
+    parser.add_argument("--rates", nargs="+", default=None, help="fixed pXX/integer, or a dataset observation key such as p10_p20")
     parser.add_argument("--in-steps", dest="in_steps", type=int, default=None)
     parser.add_argument("--out-steps", dest="out_steps", type=int, default=None)
     parser.add_argument("--n-his", dest="n_his", type=int, default=None)
@@ -140,7 +139,12 @@ def overlay(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     if args.use_mixed_proj is not None:
         config["use_mixed_proj"] = bool(args.use_mixed_proj)
     if args.rates is not None:
-        config["rates"] = [rate_tag(item) for item in args.rates]
+        from reimplementation.common.data.sampling_seeds import tag_configured_rates
+        config["rates"] = tag_configured_rates(
+            args.rates,
+            dataset_id=getattr(args, "dataset_id", None),
+            sampling_root=getattr(args, "sampling_root", None),
+        )
     return config
 
 

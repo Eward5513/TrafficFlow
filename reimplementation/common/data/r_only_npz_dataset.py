@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -23,15 +25,58 @@ NPZ_KEYS = (
 )
 RATE_TAGS = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
 SPLITS = ("train", "validation", "test")
+_OBSERVATION_KEY = re.compile(r"^p\d+(?:p\d+)?_p\d+(?:p\d+)?$")
+_ALLOWED_KEYS: contextvars.ContextVar[tuple[str, ...] | None] = contextvars.ContextVar(
+    "xuancheng_observation_keys",
+    default=None,
+)
 
 
-def rate_tag(rate: int | str) -> str:
-    if isinstance(rate, str):
-        text = rate.strip()
-        if text.startswith("p"):
-            return f"p{int(text[1:]):02d}"
-        return f"p{int(text):02d}"
-    return f"p{int(rate):02d}"
+def bind_observation_keys(keys: tuple[str, ...] | list[str] | None) -> None:
+    """Remember the selected dataset's observation keys for later path checks."""
+    _ALLOWED_KEYS.set(None if keys is None else tuple(str(item) for item in keys))
+
+
+def rate_tag(rate: int | str, *, allowed: tuple[str, ...] | list[str] | None = None) -> str:
+    """Fixed penetrations stay the seven ``pXX`` tags.
+
+    A range such as ``p10_p20`` is accepted only when the selected dataset
+    manifest declares it. It is never parsed with ``int``.
+    """
+    if allowed is None:
+        allowed = _ALLOWED_KEYS.get()
+    allowed_set = None if allowed is None else {str(item) for item in allowed}
+    text = str(rate).strip()
+    if re.fullmatch(r"p?\d+", text):
+        number = int(text[1:] if text.startswith("p") else text)
+        tag = f"p{number:02d}"
+        if tag not in RATE_TAGS:
+            raise ValueError(f"penetration {text!r} is not one of {RATE_TAGS}")
+        if allowed_set is not None and tag not in allowed_set:
+            raise ValueError(f"penetration {tag} is not declared for this dataset")
+        return tag
+    if _OBSERVATION_KEY.fullmatch(text):
+        if text in RATE_TAGS or allowed_set is None or text not in allowed_set:
+            raise ValueError(
+                f"observation key {text} is not a fixed penetration; "
+                "select the dataset manifest that declares it"
+            )
+        return text
+    raise ValueError(f"invalid penetration or observation key: {text!r}")
+
+
+def declared_observation_keys(data_root: Path) -> tuple[str, ...]:
+    """Keys a window directory is allowed to open. Missing manifest means the fixed seven."""
+    path = Path(data_root) / "state_window_manifest.json"
+    if path.is_file():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        rates = payload.get("rates")
+        if rates:
+            keys = tuple(str(item) for item in rates)
+            for key in keys:
+                rate_tag(key, allowed=keys)
+            return keys
+    return RATE_TAGS
 
 
 def load_json(path: Path) -> dict[str, Any]:

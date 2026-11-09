@@ -319,3 +319,18 @@ python3 generate_mr_level_partial_flow.py --training-root /data5/tzhang174/Traff
 ```
 
 原来那一批的训练结果在 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results/`。3 秒这批的配置把 `output_root` 指到 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/`，`run_all_models_training.py` 也读 `training_data_3s` 并写到这个新目录。
+
+## 6. 数据集身份与波动渗透率
+
+固定七档在 `training_data_3s/datasets/fixed_uniform/sampling_seeds/`。顶层 `sampling_seeds` 是指向它的兼容软链接，原来的相对元数据链接在下移两层后已按真实目标重写。`full_flow/`、`graph/`、`shared/` 和历史训练结果没有改内容。
+
+波动渗透率每次只建一个 `dataset_id`。本次生成的是 `variable_day_p10_p20`（每天一个 `U(0.10, 0.20)` 目标）和 `variable_2h_p10_p20`（每 7200 秒一个目标，整条 trip 由出发时刻决定）。目录里的 `p10_p20` 只是观测标识。日程种子是 `schedule_seed`，车辆排列种子是 `sampling_seed`，模型初始化是 `model_seed`。
+
+```bash
+cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
+python3 migrate_xuancheng_training_datasets.py --execute
+python3 generate_variable_penetration_datasets.py --config configs/variable_p10_p20.json --execute --workers 24
+python3 audit_variable_penetration.py --dataset-id variable_day_p10_p20 --dataset-id variable_2h_p10_p20 --recount --publish-ready
+```
+
+其它范围只改配置里的 `p_min`、`p_max` 和 `dataset_id`，例如 `0.125` 到 `0.175` 会得到 `variable_day_p12p5_p17p5`。不要把 `p10_p20` 交给 `int()`。固定集结果目录保持 `in_<input>__out_<target>/<rate>/seed_<model_seed>/`；波动集预留 `datasets/<dataset_id>/in_<input>out<target>/<observation_key>/seed<model_seed>/`。

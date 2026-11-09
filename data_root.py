@@ -10,7 +10,9 @@ SUMO ``sumocfg`` paths stay relative to each config file.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from pathlib import Path
 
 CODE_ROOT = Path(__file__).resolve().parent
@@ -375,4 +377,164 @@ def task_results_dir(output_root: Path | str, input_type: str, target_type: str)
 
 
 def sampling_run_results_dir(output_root: Path | str, input_type: str, target_type: str, rate: str, model_seed: int) -> Path:
-    return task_results_dir(output_root, input_type, target_type) / str(rate) / f"seed_{int(model_seed)}"
+    """Fixed runs stay ``in_<in>__out_<out>/<rate>/seed_<model_seed>``.
+
+    A variable dataset reserves
+    ``datasets/<dataset_id>/in_<in>out<out>/<observation_key>/seed<model_seed>``.
+    """
+    root = Path(output_root)
+    variable_leaf = f"in_{input_type}out{target_type}"
+    fixed_leaf = f"in_{input_type}__out_{target_type}"
+    if "datasets" in root.parts and (root.name == variable_leaf or root.parent.name == "datasets"):
+        parent = root if root.name == variable_leaf else root / variable_leaf
+        return parent / str(rate) / f"seed{int(model_seed)}"
+    parent = root if root.name == fixed_leaf else root / fixed_leaf
+    return parent / str(rate) / f"seed_{int(model_seed)}"
+
+
+FIXED_DATASET_ID = "fixed_uniform"
+FIXED_OBSERVATION_KEYS = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
+_OBSERVATION_KEY = re.compile(r"^p\d+(?:p\d+)?_p\d+(?:p\d+)?$")
+
+
+def _percent_token(probability: float) -> str:
+    scaled = float(probability) * 100.0
+    text = f"{scaled:.8f}".rstrip("0").rstrip(".")
+    if not text or text.startswith("-"):
+        raise PathLayoutError(f"invalid probability for an observation key: {probability}")
+    return text.replace(".", "p")
+
+
+def observation_key(p_min: float, p_max: float) -> str:
+    """Range id such as ``p10_p20``. Decimal bounds use a ``p`` in place of the dot."""
+    low = float(p_min)
+    high = float(p_max)
+    if not (0.0 < low < high <= 1.0):
+        raise PathLayoutError(f"expected 0 < p_min < p_max <= 1, got {p_min}, {p_max}")
+    return f"p{_percent_token(low)}_p{_percent_token(high)}"
+
+
+def variable_dataset_id(mode: str, p_min: float, p_max: float) -> str:
+    if mode not in {"day", "2h"}:
+        raise PathLayoutError(f"unknown variable mode: {mode}")
+    return f"variable_{mode}_{observation_key(p_min, p_max)}"
+
+
+def _fixed_sampling_root(training_root: Path) -> Path:
+    migrated = training_root / "datasets" / FIXED_DATASET_ID / "sampling_seeds"
+    legacy = training_root / "sampling_seeds"
+    if migrated.exists():
+        return migrated
+    return legacy
+
+
+def _infer_dataset_id(sampling_root: Path, training_root: Path) -> str | None:
+    if (
+        sampling_root.name == "sampling_seeds"
+        and sampling_root.parent.parent.name == "datasets"
+    ):
+        return sampling_root.parent.name
+    for candidate in (
+        training_root / "datasets" / FIXED_DATASET_ID / "sampling_seeds",
+        training_root / "sampling_seeds",
+    ):
+        if candidate.exists() and sampling_root == candidate.resolve():
+            return FIXED_DATASET_ID
+    return None
+
+
+def _observation_keys_ok(keys: tuple[str, ...], *, fixed: bool) -> bool:
+    if fixed:
+        return keys == FIXED_OBSERVATION_KEYS
+    if not keys or any(key in FIXED_OBSERVATION_KEYS for key in keys):
+        return False
+    return all(_OBSERVATION_KEY.fullmatch(key) for key in keys)
+
+
+def resolve_xuancheng_dataset(
+    *,
+    dataset_id: str | None = None,
+    sampling_root: Path | str | None = None,
+    training_root: Path | str | None = None,
+) -> dict[str, object]:
+    """Resolve one Xuancheng26 3s dataset without mixing two identities.
+
+    An omitted dataset is ``fixed_uniform``. A custom sampling root that is
+    not one of the official dataset directories keeps the fixed observation
+    keys so existing fixtures and callers continue to work. Official variable
+    datasets must name the manifest that declares their observation key.
+    """
+    root = Path(training_root).expanduser().resolve() if training_root else xuancheng26_training_3s_root()
+    sampling_path = Path(sampling_root).expanduser().resolve() if sampling_root else None
+    inferred = _infer_dataset_id(sampling_path, root) if sampling_path is not None else None
+    selected = str(dataset_id).strip() if dataset_id else None
+    if not selected:
+        selected = inferred or FIXED_DATASET_ID
+    elif inferred and inferred != selected:
+        raise PathLayoutError(
+            f"dataset_id {selected} contradicts sampling_root {sampling_path} ({inferred})"
+        )
+    if selected == FIXED_DATASET_ID:
+        if not _observation_keys_ok(FIXED_OBSERVATION_KEYS, fixed=True):
+            raise PathLayoutError("fixed observation keys are inconsistent")
+        official = _fixed_sampling_root(root)
+        if sampling_path is None:
+            sampling_path = official
+        elif inferred not in {None, FIXED_DATASET_ID}:
+            raise PathLayoutError(f"sampling_root {sampling_path} is not fixed_uniform")
+        manifest_path = root / "datasets" / FIXED_DATASET_ID / "dataset_manifest.json"
+        return {
+            "dataset_id": FIXED_DATASET_ID,
+            "kind": "fixed_uniform",
+            "training_root": root,
+            "dataset_root": root / "datasets" / FIXED_DATASET_ID,
+            "sampling_root": sampling_path,
+            "observation_keys": FIXED_OBSERVATION_KEYS,
+            "custom_sampling_root": inferred is None and sampling_path != official.resolve(),
+            "manifest_path": manifest_path if manifest_path.is_file() else None,
+            "schedule_sha256": None,
+        }
+    dataset_root = root / "datasets" / selected
+    manifest_path = dataset_root / "dataset_manifest.json"
+    if not manifest_path.is_file():
+        raise PathLayoutError(f"missing dataset manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("dataset_id") != selected:
+        raise PathLayoutError(f"{manifest_path} dataset_id is {manifest.get('dataset_id')!r}")
+    keys = tuple(str(item) for item in manifest.get("observation_keys") or ())
+    if not _observation_keys_ok(keys, fixed=False):
+        raise PathLayoutError(f"{selected} observation keys are not a declared range: {keys}")
+    expected = (dataset_root / "sampling_seeds").resolve()
+    if sampling_path is None:
+        sampling_path = expected
+    elif sampling_path != expected:
+        raise PathLayoutError(f"sampling_root {sampling_path} is not {expected}")
+    schedule_sha = None
+    schedule_path = dataset_root / "penetration_schedule.json"
+    if schedule_path.is_file():
+        schedule_sha = json.loads(schedule_path.read_text(encoding="utf-8")).get("schedule_sha256")
+    return {
+        "dataset_id": selected,
+        "kind": str(manifest.get("kind") or "variable"),
+        "training_root": root,
+        "dataset_root": dataset_root,
+        "sampling_root": sampling_path,
+        "observation_keys": keys,
+        "custom_sampling_root": False,
+        "manifest_path": manifest_path,
+        "schedule_sha256": schedule_sha,
+    }
+
+
+def dataset_results_parent(output_root: Path | str, dataset_id: str) -> Path:
+    """Model result root for one variable dataset, without the task leaf."""
+    root = Path(output_root)
+    if root.parent.name == "datasets" and root.name == dataset_id:
+        return root
+    if root.parent.parent.name == "datasets" and root.parent.name == dataset_id:
+        return root.parent
+    if root.name.startswith("in_") and "__out_" in root.name:
+        root = root.parent
+    if root.parent.name == "datasets":
+        return root.parent / dataset_id
+    return root / "datasets" / dataset_id

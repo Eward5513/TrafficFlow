@@ -7,29 +7,59 @@ from pathlib import Path
 from typing import Mapping
 
 from data_root import (
-    SAMPLING_SEEDS, TRAIN_SAMPLING_SEED, sampling_window_root,
-    sampling_root_from_window, xuancheng26_sampling_root, task_results_dir,
+    SAMPLING_SEEDS, TRAIN_SAMPLING_SEED, dataset_results_parent, resolve_xuancheng_dataset,
+    sampling_window_root, sampling_root_from_window, sampling_run_results_dir,
 )
-from reimplementation.common.data.r_only_npz_dataset import build_dataloader, load_json
+from reimplementation.common.data.r_only_npz_dataset import (
+    bind_observation_keys, build_dataloader, load_json, rate_tag,
+)
 from reimplementation.common.utils.hashing import sha256_file
 
 
 def configure_sampling(config: Mapping, *, model_name: str | None = None) -> dict:
     cfg = dict(config)
-    root = Path(cfg.get("sampling_root") or xuancheng26_sampling_root())
+    explicit = set(cfg.get("explicit_path_keys") or [])
+    dataset_id = cfg.get("dataset_id")
+    sampling_value = cfg.get("sampling_root")
+    if "dataset_id" in explicit and "sampling_root" not in explicit and dataset_id not in (None, "fixed_uniform"):
+        sampling_value = None
+    if "sampling_root" in explicit and "dataset_id" not in explicit and dataset_id == "fixed_uniform":
+        dataset_id = None
+    spec = resolve_xuancheng_dataset(dataset_id=dataset_id, sampling_root=sampling_value)
+    root = Path(spec["sampling_root"])
     train_seed = int(cfg.get("train_sampling_seed", TRAIN_SAMPLING_SEED))
     seeds = tuple(int(s) for s in cfg.get("evaluation_sampling_seeds", SAMPLING_SEEDS))
     if train_seed != TRAIN_SAMPLING_SEED or seeds != SAMPLING_SEEDS:
         raise ValueError("official protocol requires training seed 42 and evaluation seeds 42–46")
     model_seed = int(cfg.get("model_seed", cfg.get("seed", 42)))
+    bind_observation_keys(spec["observation_keys"])
+    window = sampling_window_root(root, train_seed)
     cfg.update(model_seed=model_seed, seed=model_seed, train_sampling_seed=train_seed,
                evaluation_sampling_seeds=list(seeds), sampling_root=str(root),
-               data_root=str(sampling_window_root(root, train_seed)),
-               checkpoint_selection="mean_validation_mae")
+               dataset_id=spec["dataset_id"], observation_keys=list(spec["observation_keys"]),
+               data_root=str(window), checkpoint_selection="mean_validation_mae")
+    if spec.get("schedule_sha256"):
+        cfg["schedule_sha256"] = spec["schedule_sha256"]
+    normalization = window / "state_normalization.json"
+    if normalization.is_file():
+        cfg["normalization_sha256"] = sha256_file(normalization)
     for key, name in (("split_manifest", "split_manifest.json"), ("normalization", "state_normalization.json"),
                       ("data_validation", "validation_summary.json"), ("node_mapping", "node_mapping.csv")):
-        cfg[key] = str(sampling_window_root(root, train_seed) / name)
+        cfg[key] = str(window / name)
+    if spec["dataset_id"] != "fixed_uniform" and cfg.get("output_root"):
+        cfg["output_root"] = str(dataset_results_parent(cfg["output_root"], str(spec["dataset_id"])))
+    cfg.pop("explicit_path_keys", None)
     return cfg
+
+
+def tag_configured_rates(rates, *, dataset_id=None, sampling_root=None) -> list[str]:
+    """Validate CLI rates against one dataset. Fixed commands still accept 5 or p05."""
+    spec = resolve_xuancheng_dataset(
+        dataset_id=dataset_id,
+        sampling_root=str(sampling_root) if sampling_root else None,
+    )
+    bind_observation_keys(spec["observation_keys"])
+    return [rate_tag(item, allowed=spec["observation_keys"]) for item in rates]
 
 
 def is_sampling_loader(loader) -> bool:

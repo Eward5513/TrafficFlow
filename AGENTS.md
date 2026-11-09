@@ -52,12 +52,17 @@ config file.
   configs, generated networks, simulation results, and experiment outputs.
 - Resolve data paths through `data_root.py`. The earlier Xuancheng package
   remains at `xuancheng26/training_data/`. The 3-second-phase package is
-  `xuancheng26/training_data_3s/`. Its only flow entry is
-  `training_data_3s/sampling_seeds/seed_<42..46>/flow/`. Shared scaler and
-  manifests are in `training_data_3s/shared/`. Train on sampling seed 42.
-  Validation and test score seeds 42–46 and select checkpoints by the mean
-  raw MAE. New 3-second results go to
-  `xuancheng26/training_results_3s/<model>/in_<input>__out_<target>/<rate>/seed_<model_seed>/`.
+  `xuancheng26/training_data_3s/`. Fixed penetrations live in
+  `training_data_3s/datasets/fixed_uniform/sampling_seeds/`; `sampling_seeds`
+  remains a compatibility symlink to that directory. Shared split, node order,
+  and the fixed scaler stay in `training_data_3s/shared/`. Variable-penetration
+  datasets are `training_data_3s/datasets/<dataset_id>/` and carry their own
+  input scaler. Train on sampling seed 42. Validation and test score seeds
+  42–46 and select checkpoints by the mean raw MAE. `sampling_seed`,
+  `schedule_seed`, and `model_seed` are different. Fixed 3-second results stay
+  at `xuancheng26/training_results_3s/<model>/in_<input>__out_<target>/<rate>/seed_<model_seed>/`.
+  A variable dataset reserves
+  `training_results_3s/<model>/datasets/<dataset_id>/in_<input>out<target>/<observation_key>/seed<model_seed>/`.
   `reimplementation/` does not generate datasets. Never write those artifacts
   under `CODE_ROOT`, and do not overwrite an existing result directory.
 - Keep ID-like values such as VINs, OSM IDs, SUMO edge IDs, junction IDs, and

@@ -71,14 +71,11 @@ def task_spec(name: str) -> TaskSpec:
     return TASKS[name]
 
 
-def rate_tag(rate: str | int) -> str:
-    text = str(rate).strip()
-    if text.startswith("p"):
-        text = text[1:]
-    tag = f"p{int(text):02d}"
-    if tag not in RATES:
-        raise ValueError(f"penetration {tag} is not one of {list(RATES)}")
-    return tag
+def rate_tag(rate: str | int, *, allowed: tuple[str, ...] | list[str] | None = None) -> str:
+    """Delegate to the shared checker so ``p10_p20`` is not parsed as an integer."""
+    from reimplementation.common.data.r_only_npz_dataset import rate_tag as shared_rate_tag
+
+    return shared_rate_tag(rate, allowed=allowed)
 
 
 MODEL_DEFAULTS: dict[str, Any] = {
@@ -183,6 +180,7 @@ TRAIN_DEFAULTS: dict[str, Any] = {
 }
 
 DATA_DEFAULTS: dict[str, Any] = {
+    "dataset_id": "fixed_uniform",
     "sampling_root": str(xuancheng26_sampling_root()),
     "model_seed": 42,
     "train_sampling_seed": 42,
@@ -279,13 +277,14 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def overlay_args(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    for key in default_config():
-        if hasattr(args, key):
-            config[key] = getattr(args, key)
+    passed = [key for key in default_config() if hasattr(args, key)]
+    for key in passed:
+        config[key] = getattr(args, key)
+    config["explicit_path_keys"] = [key for key in passed if key in {"dataset_id", "sampling_root"}]
     if hasattr(args, "seed") and not hasattr(args, "model_seed"):
         config["model_seed"] = args.seed
     from reimplementation.common.data.sampling_seeds import configure_sampling
-    return configure_sampling(config)
+    return configure_sampling(config, model_name="MSTT")
 
 
 def resolve_ffn_hidden_dim(d_model: int, value: int | None) -> int:

@@ -37,6 +37,12 @@ analysis/flow/**
 !analysis/flow/**/
 !analysis/flow/**/*.py
 !analysis/flow/**/AGENTS.md
+# Summary tables for the Xuancheng26 FCD trajectory-duration audit.
+!analysis/flow/fcd_trajectory_duration_audit/**
+!analysis/flow/fcd_trajectory_duration_audit/**/*.csv
+!analysis/flow/fcd_trajectory_duration_audit/**/*.json
+!analysis/flow/fcd_trajectory_duration_audit/**/*.md
+!analysis/flow/fcd_trajectory_duration_audit/**/*.png
 
 analysis/simulation/**
 !analysis/simulation/**/

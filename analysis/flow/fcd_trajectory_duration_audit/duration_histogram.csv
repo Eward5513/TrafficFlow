@@ -1,0 +1,31 @@
+source,row_type,label,lo_seconds,hi_seconds,count,share
+tripinfo_completed,bin,0～5 min,0,300,3337734,0.34353746
+tripinfo_completed,bin,5～10 min,300,600,3089695,0.31800795
+tripinfo_completed,bin,10～15 min,600,900,1770921,0.18227267
+tripinfo_completed,bin,15～30 min,900,1800,1350827,0.13903435
+tripinfo_completed,bin,30～60 min,1800,3600,162220,0.01669655
+tripinfo_completed,bin,60～120 min,3600,7200,4381,0.00045092
+tripinfo_completed,bin,120 min 以上,7200,,1,0.0000001
+tripinfo_completed,threshold,≥30 min,1800,,166602,0.01714757
+tripinfo_completed,threshold,≥60 min,3600,,4382,0.00045102
+tripinfo_completed,threshold,≥120 min,7200,,1,0.0000001
+fcd_all,bin,0～5 min,0,300,3351546,0.34479699
+fcd_all,bin,5～10 min,300,600,3087389,0.31762131
+fcd_all,bin,10～15 min,600,900,1767734,0.18185916
+fcd_all,bin,15～30 min,900,1800,1347382,0.13861461
+fcd_all,bin,30～60 min,1800,3600,161917,0.01665753
+fcd_all,bin,60～120 min,3600,7200,4377,0.00045029
+fcd_all,bin,120 min 以上,7200,,1,0.0000001
+fcd_all,threshold,≥30 min,1800,,166295,0.01710793
+fcd_all,threshold,≥60 min,3600,,4378,0.0004504
+fcd_all,threshold,≥120 min,7200,,1,0.0000001
+fcd_matched_completed,bin,0～5 min,0,300,3349390,0.34473715
+fcd_matched_completed,bin,5～10 min,300,600,3086034,0.31763114
+fcd_matched_completed,bin,10～15 min,600,900,1767152,0.18188475
+fcd_matched_completed,bin,15～30 min,900,1800,1346981,0.1386385
+fcd_matched_completed,bin,30～60 min,1800,3600,161846,0.01665806
+fcd_matched_completed,bin,60～120 min,3600,7200,4375,0.0004503
+fcd_matched_completed,bin,120 min 以上,7200,,1,0.0000001
+fcd_matched_completed,threshold,≥30 min,1800,,166222,0.01710846
+fcd_matched_completed,threshold,≥60 min,3600,,4376,0.0004504
+fcd_matched_completed,threshold,≥120 min,7200,,1,0.0000001

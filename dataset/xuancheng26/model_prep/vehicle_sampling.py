@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import gzip
 import hashlib
+import os
 import random
 from pathlib import Path
 from xml.parsers import expat

@@ -48,9 +48,12 @@ new traffic input into `mstt.py`; add it beside `InputEmbedding`.
 ## Data and outputs
 
 - Train windows: `sampling_seeds/seed_42/flow/window_data/{rate}/{split}/{date}/{state}.npz`.
+  `sampling_seeds` is the fixed-uniform compatibility entry. Pass `--dataset-id`
+  to read `training_data_3s/datasets/<dataset_id>/` instead. `p10_p20` is that
+  dataset's observation key, not a numeric penetration.
 - Validation and test: the same layout for seeds 42, 43, 44, 45, and 46.
-  Shared scaler, split manifest, and node order live in `training_data_3s/shared/`
-  and are linked from each seed.
+  The fixed scaler, split manifest, and node order live in `training_data_3s/shared/`
+  and are linked from each fixed seed. A variable dataset keeps its own input scaler.
 - Graph: `training_data_3s/graph/r_graph.npz`. `adjacency[u, v] = 1` means
   traffic moves from road `u` to road `v`.
 - 12→12 labels, when needed, are `training_data_3s/shared/sequence_targets_12step/`.

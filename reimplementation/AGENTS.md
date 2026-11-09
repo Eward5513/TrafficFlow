@@ -14,9 +14,11 @@ Rules:
   seed 42. Validation and test call `sampling_evaluation` once per seed
   42–46 and average the raw metrics. Each model keeps its own loss,
   optimizer, and training loop.
-- New results:
+- New fixed-uniform results:
   `xuancheng26/training_results_3s/<model>/in_<input>__out_<target>/<rate>/seed_<model_seed>/`.
-  `model_seed` initializes parameters. `train_sampling_seed` and
+  A variable dataset reserves
+  `training_results_3s/<model>/datasets/<dataset_id>/in_<input>out<target>/<observation_key>/seed<model_seed>/`.
+  `model_seed` initializes parameters. `dataset_id`, `train_sampling_seed`, and
   `evaluation_sampling_seeds` are written into the resolved config.
   Existing result directories are protected. The older
   `xuancheng26/training_data/` and `training_results/` trees stay in place.

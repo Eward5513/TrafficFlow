@@ -1,0 +1,21 @@
+{
+  "algorithm_version": "xuancheng26_variable_penetration_v1",
+  "schema_version": "xuancheng26_variable_windows_v1",
+  "schedule_seed": 42,
+  "sampling_seeds": [42, 43, 44, 45, 46],
+  "fit_sampling_seed": 42,
+  "p_min": 0.10,
+  "p_max": 0.20,
+  "datasets": [
+    {
+      "dataset_id": "variable_day_p10_p20",
+      "mode": "day",
+      "segment_seconds": 86400
+    },
+    {
+      "dataset_id": "variable_2h_p10_p20",
+      "mode": "2h",
+      "segment_seconds": 7200
+    }
+  ]
+}

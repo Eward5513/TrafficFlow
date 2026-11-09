@@ -14,6 +14,7 @@ from torch.utils.data import Dataset
 
 from reimplementation.common.data.r_only_npz_dataset import (
     SPLITS,
+    declared_observation_keys,
     invert_target,
     load_json,
     load_npz,
@@ -50,6 +51,7 @@ def channel_count(kind: str) -> int:
 
 
 def add_state_type_arguments(parser) -> None:
+    parser.add_argument("--dataset-id", dest="dataset_id", default=None)
     parser.add_argument("--sampling-root", type=Path, default=None)
     parser.add_argument("--model-seed", type=int, default=None)
     parser.add_argument("--train-sampling-seed", type=int, default=42)
@@ -64,14 +66,25 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
     target_flag = getattr(args, "target_type", None)
     from reimplementation.common.data.sampling_seeds import configure_sampling
     config = dict(config)
+    explicit: list[str] = []
+    if getattr(args, "dataset_id", None):
+        config["dataset_id"] = str(args.dataset_id)
+        explicit.append("dataset_id")
+        if getattr(args, "sampling_root", None) is None:
+            config.pop("sampling_root", None)
+            config.pop("data_root", None)
     for key in ("sampling_root", "model_seed", "train_sampling_seed", "evaluation_sampling_seeds"):
         if getattr(args, key, None) is not None:
             config[key] = str(getattr(args, key)) if key == "sampling_root" else getattr(args, key)
+            if key == "sampling_root":
+                explicit.append("sampling_root")
     if getattr(args, "seed", None) is not None and getattr(args, "model_seed", None) is None:
         config["model_seed"] = args.seed
     if getattr(args, "data_root", None) is not None:
         from data_root import sampling_root_from_window
         config["sampling_root"] = str(sampling_root_from_window(args.data_root))
+        explicit.append("sampling_root")
+    config["explicit_path_keys"] = explicit
     config = configure_sampling(config, model_name=model_name)
     input_type = input_flag or config.get("input_type") or "inflow"
     target_type = target_flag or config.get("target_type") or "inflow"
@@ -110,11 +123,24 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
         if "output_dim" in config:
             config["output_dim"] = out_channels
     root = Path(str(config["output_root"]))
-    leaf = f"in_{input_type}__out_{target_type}"
-    # Keep the official model directory, and put each input/target pair in its
-    # own child so single-state runs and all-to-all never share checkpoints.
-    if root.name != leaf:
-        config["output_root"] = (root / leaf).as_posix()
+    dataset_id = str(config.get("dataset_id") or "fixed_uniform")
+    if dataset_id != "fixed_uniform":
+        from data_root import dataset_results_parent
+
+        leaf = f"in_{input_type}out{target_type}"
+        if not (root.name == leaf and root.parent.name == dataset_id and root.parent.parent.name == "datasets"):
+            if root.parent.name == "datasets" and root.name == dataset_id:
+                base = root
+            else:
+                base = dataset_results_parent(root, dataset_id)
+            root = base / leaf
+        config["output_root"] = root.as_posix()
+    else:
+        leaf = f"in_{input_type}__out_{target_type}"
+        # Keep the official model directory, and put each input/target pair in its
+        # own child so single-state runs and all-to-all never share checkpoints.
+        if root.name != leaf:
+            config["output_root"] = (root / leaf).as_posix()
     return config
 
 
@@ -191,7 +217,7 @@ class AlignedStateWindowDataset(Dataset):
         if split not in SPLITS:
             raise ReimplementationError(f"unknown split {split}")
         self.data_root = Path(data_root)
-        self.rate = rate_tag(rate)
+        self.rate = rate_tag(rate, allowed=declared_observation_keys(self.data_root))
         self.split = split
         self.input_type = input_type
         self.target_type = target_type
