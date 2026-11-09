@@ -46,9 +46,15 @@ def main(argv=None) -> dict:
         root = args.output_root or Path(load_config(None)["output_root"])
         run_dir = run_directory(root, rate_tag(args.penetration), args.task, args.seed)
     run_dir = Path(run_dir).resolve()
-    saved = with_legacy_defaults(json.loads((run_dir / "resolved_config.json").read_text(encoding="utf-8")))
+    raw = json.loads((run_dir / "resolved_config.json").read_text(encoding="utf-8"))
+    saved = with_legacy_defaults(raw)
     config = load_config(None)
     config.update({key: saved[key] for key in config if key in saved})
+    # The built model is stored under model_config. A missing field, there or at the
+    # top level, stays joint_linear via with_legacy_defaults.
+    raw_model = raw.get("model_config")
+    if isinstance(raw_model, dict) and "value_embedding_mode" in raw_model:
+        config["value_embedding_mode"] = raw_model["value_embedding_mode"]
     if args.device is not None:
         config["device"] = args.device
     output_root = run_dir.parents[2]

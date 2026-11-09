@@ -74,9 +74,35 @@ class RawScaleLoss(nn.Module):
         return name if self.channel_balance == "none" else f"{name}__balance_{self.channel_balance}"
 
 
+def _projected_inflow_only_objective(criterion: RawScaleLoss, outputs, target_raw, config):
+    """Projected inflow MAE plus the pre-projection conservation residual. No other state MAE."""
+    if criterion.kind != "mae_raw" or criterion.channel_balance != "none":
+        raise ValueError("inflow_only projection loss requires unbalanced raw-scale MAE")
+    if float(config.get("projection_raw_loss_weight", 0.5)) != 0.0:
+        raise ValueError("inflow_only projection loss does not add raw MAE; projection_raw_loss_weight must be 0")
+    final_physical = criterion.denormalize(outputs["final_pred"])
+    raw_physical = criterion.denormalize(outputs["raw_pred"])
+    target = target_raw.float()
+    if final_physical.shape != target.shape or raw_physical.shape != target.shape or int(target.shape[-1]) != 4:
+        raise ValueError("inflow_only projection loss expects four-state raw and final predictions matching the target")
+    inflow_final_mae = (final_physical[..., 0] - target[..., 0]).abs().mean()
+    raw_conservation_mae = conservation_residual(raw_physical).abs().mean()
+    total = inflow_final_mae + float(config.get("projection_consistency_weight", 0.0)) * raw_conservation_mae
+    return total, {
+        "inflow_final_mae": inflow_final_mae,
+        "raw_conservation_mae": raw_conservation_mae,
+        "total_loss": total,
+    }
+
+
 def conservation_objective(criterion: RawScaleLoss, outputs, target_raw, config):
     """All components remain tensors on the training device until after backward."""
     mode = config.get("conservation_mode", "none")
+    supervision = str(config.get("projection_supervision", "all"))
+    if mode == "projected" and supervision == "inflow_only":
+        return _projected_inflow_only_objective(criterion, outputs, target_raw, config)
+    if supervision not in ("all", "inflow_only"):
+        raise ValueError(f"unknown projection_supervision {supervision!r}")
     supervised = criterion(outputs["final_pred"], target_raw)
     total = supervised
     parts = {"supervised_mae": supervised}
@@ -100,6 +126,9 @@ def objective_description(criterion: RawScaleLoss, config) -> str:
     mode = config.get("conservation_mode", "none")
     if mode == "soft":
         return f"mae_raw + {float(config.get('conservation_lambda', .1)):g} * conservation_mae"
+    if mode == "projected" and str(config.get("projection_supervision", "all")) == "inflow_only":
+        return (f"inflow_final_mae + {float(config.get('projection_consistency_weight', 0.)):g}"
+                " * raw_conservation_mae")
     if mode == "projected":
         return (f"final_mae_raw + {float(config.get('projection_raw_loss_weight', .5)):g} * raw_mae_raw"
                 f" + {float(config.get('projection_consistency_weight', 0.)):g} * raw_conservation_mae")

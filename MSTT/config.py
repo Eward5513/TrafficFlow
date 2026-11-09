@@ -106,6 +106,7 @@ MODEL_DEFAULTS: dict[str, Any] = {
     "use_dow": True,
     "use_node_embedding": True,
     "embedding_fusion": "concat",
+    "value_embedding_mode": "joint_linear",
     "value_embedding_dim": 32,
     "node_embedding_dim": 16,
     "tod_embedding_dim": 8,
@@ -130,7 +131,9 @@ MODEL_DEFAULTS: dict[str, Any] = {
 
 # Meaning of keys that older run directories never stored: v0.1 predates
 # ``embedding_fusion`` (it summed), v0.1/v0.2 predate the adaptive embedding.
-# Fill them in before rebuilding an old model from its resolved_config.json.
+# A missing ``value_embedding_mode`` is the original joint Linear, including
+# inside a nested ``model_config``. Fill these in before rebuilding an old
+# model from its resolved_config.json.
 LEGACY_DEFAULTS: dict[str, Any] = {
     "attention_order": "TS",
     "attention_layout": "factorized_ts",
@@ -143,6 +146,7 @@ LEGACY_DEFAULTS: dict[str, Any] = {
     "base_embedding_dim": None, "adaptive_embedding_dim": None,
     "adaptive_embedding_fusion": "add", "ffn_placement": "after_spatial",
     "embedding_fusion": "add", "use_adaptive_embedding": False,
+    "value_embedding_mode": "joint_linear",
     "conservation_mode": "none", "projection_mlp_hidden_dim": 32,
 }
 
@@ -150,6 +154,8 @@ TRAIN_DEFAULTS: dict[str, Any] = {
     "conservation_lambda": 0.1,
     "projection_raw_loss_weight": 0.5,
     "projection_consistency_weight": 0.0,
+    # "all" is original C. "inflow_only" supervises projected inflow plus the raw residual.
+    "projection_supervision": "all",
     "seed": 42,
     "device": "auto",
     "batch_size": 16,
@@ -233,10 +239,12 @@ _CHOICES = {
     "adaptive_embedding_fusion": ("add", "concat"),
     "ffn_placement": ("after_spatial",),
     "conservation_mode": ("none", "soft", "projected"),
+    "projection_supervision": ("all", "inflow_only"),
     "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
     "head_type": ("flatten", "last"),
     "embedding_fusion": ("add", "concat"),
+    "value_embedding_mode": ("joint_linear", "separate_mlp"),
     "loss": ("mae_raw", "huber_raw", "mse_raw"),
     "channel_balance": ("none", "target_std"),
     "selection_metric": ("mean_validation_mae",),
@@ -323,6 +331,15 @@ def validate_config(config: Mapping[str, Any]) -> None:
             raise ValueError("soft/projected spatial attention must be sparse or global")
         if config["use_adaptive_embedding"] and config.get("adaptive_embedding_fusion") != "concat":
             raise ValueError("soft/projected adaptive embedding must be concatenated, not added")
+    supervision = str(config.get("projection_supervision", "all"))
+    if supervision == "inflow_only":
+        if config.get("conservation_mode", "none") != "projected":
+            raise ValueError("projection_supervision=inflow_only requires conservation_mode=projected")
+        raw_weight = float(config.get("projection_raw_loss_weight", TRAIN_DEFAULTS["projection_raw_loss_weight"]))
+        if raw_weight != 0.0:
+            raise ValueError(
+                "projection_supervision=inflow_only does not add raw MAE; set projection_raw_loss_weight to 0"
+            )
     if str(config["target_mode"]) != "last-observed-step":
         raise ValueError("MSTT reconstructs the last observed slot; target_mode must be last-observed-step")
     if int(config["d_model"]) % int(config["num_heads"]) != 0:
@@ -344,6 +361,16 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("input_window and num_layers must be positive")
     if str(config["spatial_attention"]) == "global" and bool(config["use_edge_type_bias"]):
         raise ValueError("use_edge_type_bias does not apply to spatial_attention=global; pass --use-edge-type-bias 0")
+    value_mode = str(config.get("value_embedding_mode", "joint_linear"))
+    if value_mode == "separate_mlp":
+        if str(config.get("embedding_fusion", "add")) != "concat":
+            raise ValueError("value_embedding_mode=separate_mlp requires embedding_fusion=concat")
+        value_dim = int(config.get("value_embedding_dim", 0))
+        if value_dim % 4 != 0 or value_dim // 4 < 1:
+            raise ValueError(
+                "value_embedding_mode=separate_mlp requires value_embedding_dim to be a positive "
+                f"multiple of 4, got {value_dim}"
+            )
     from MSTT.model.embedding import resolve_embedding_dims
 
     base_dim, _ = resolve_embedding_dims(
@@ -387,10 +414,22 @@ def validate_conservation_task(config: Mapping[str, Any], task: TaskSpec) -> Non
         raise ValueError(f"conservation_mode={config['conservation_mode']} is only allowed for All2All, got {task.name}")
 
 
+def validate_value_embedding_task(config: Mapping[str, Any], task: TaskSpec) -> None:
+    """Channel count and order are known once the task is. Fusion and width stay in ``validate_config``."""
+    if str(config.get("value_embedding_mode", "joint_linear")) != "separate_mlp":
+        return
+    if task.input_channels != STATE_CHANNELS:
+        raise ValueError(
+            "value_embedding_mode=separate_mlp requires input channels "
+            f"{list(STATE_CHANNELS)} in that order, task {task.name} has {list(task.input_channels)}"
+        )
+
+
 def conservation_settings(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Loss identity checked against checkpoints. A missing supervision key is original C (``all``)."""
     return {key: config.get(key, default_config()[key]) for key in (
         "conservation_mode", "conservation_lambda", "projection_raw_loss_weight",
-        "projection_consistency_weight", "projection_mlp_hidden_dim",
+        "projection_consistency_weight", "projection_supervision", "projection_mlp_hidden_dim",
     )}
 
 

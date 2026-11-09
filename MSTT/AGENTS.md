@@ -75,6 +75,17 @@ sample standard deviation (`ddof=1`). Test never selects the checkpoint.
 are All2All task losses, not extra backbone branches. Launch them with
 `conservation_best_backbone.py` and an empty output root.
 
+`projection_supervision` is `all` or `inflow_only`. Missing or `all` keeps
+original C: four-state final MAE + `projection_raw_loss_weight` * raw MAE +
+`projection_consistency_weight` * pre-projection conservation MAE.
+`inflow_only` (C_inflow_aux) changes only that loss. It supervises the
+projected inflow channel and adds `projection_consistency_weight` times the
+pre-projection conservation MAE, with `projection_raw_loss_weight` at 0.
+The MLP and projection math stay in `model/conservation.py`. All2All still
+selects `best_checkpoint.pt` by the mean validation inflow MAE over seeds
+42–46. Config: `configs/conservation_best_backbone/C_inflow_aux.json`.
+Results: `training_results_3s/MSTT/C_inflow_aux/`.
+
 ## Rules
 
 - `MSTT/model/` must not read files or know task names. Pass the graph in.

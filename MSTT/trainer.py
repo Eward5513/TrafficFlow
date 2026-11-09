@@ -34,6 +34,7 @@ from MSTT.config import (
     validate_config,
     with_legacy_defaults,
     validate_conservation_task,
+    validate_value_embedding_task,
     conservation_settings,
     conservation_output_root,
 )
@@ -90,6 +91,7 @@ def run_is_complete(run_dir: Path) -> bool:
 
 def model_config(config: Mapping[str, Any], task: TaskSpec) -> MSTTConfig:
     validate_conservation_task(config, task)
+    validate_value_embedding_task(config, task)
     return MSTTConfig.from_mapping(
         config,
         num_nodes=int(config["num_nodes"]),
@@ -103,7 +105,13 @@ _CONCAT_WIDTH_KEYS = ("value_embedding_dim", "node_embedding_dim", "tod_embeddin
 
 
 def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """``add`` fusion ignores the concat widths, so they do not distinguish two ``add`` runs."""
+    """``add`` fusion ignores the concat widths, so they do not distinguish two ``add`` runs.
+
+    ``value_embedding_mode`` stays in the compared dict. ``joint_linear`` and
+    ``separate_mlp`` build different value modules, so a run directory or
+    checkpoint from one cannot be reused for the other. Missing values are
+    filled with ``joint_linear`` by ``with_legacy_defaults`` before this compare.
+    """
     result = dict(payload)
     if result.get("conservation_mode", "none") != "projected":
         result.pop("projection_mlp_hidden_dim", None)
@@ -199,6 +207,23 @@ def assert_conservation_checkpoint(payload, config, *, normalization_sha256=None
             raise ReimplementationError("checkpoint conservation coefficients/MLP config differ; start an independent run")
         if normalization_sha256 is not None and payload.get("normalization_sha256") != normalization_sha256:
             raise ReimplementationError("checkpoint target scaler SHA256 differs from state_normalization.json")
+    saved_value_mode = checkpoint_value_embedding_mode(payload)
+    requested_value_mode = str(config.get("value_embedding_mode", "joint_linear"))
+    if saved_value_mode != requested_value_mode:
+        raise ReimplementationError(
+            f"checkpoint value_embedding_mode={saved_value_mode} != requested {requested_value_mode}"
+        )
+
+
+def checkpoint_value_embedding_mode(payload: Mapping[str, Any]) -> str:
+    """Old checkpoints omit the field and used the joint linear value projection."""
+    config = payload.get("config") if isinstance(payload.get("config"), Mapping) else {}
+    model = config.get("model_config") if isinstance(config.get("model_config"), Mapping) else {}
+    if "value_embedding_mode" in model:
+        return str(model["value_embedding_mode"])
+    if "value_embedding_mode" in config:
+        return str(config["value_embedding_mode"])
+    return "joint_linear"
 
 
 def _limited(loader, limit: int | None) -> Iterable:
@@ -212,6 +237,7 @@ class TaskRun:
         config = configure_sampling(config)
         validate_config(config)
         validate_conservation_task(config, task_spec(task))
+        validate_value_embedding_task(config, task_spec(task))
         self.config = dict(config)
         self.config["output_root"] = Path(output_root).as_posix()
         self.task = task_spec(task)
@@ -389,6 +415,16 @@ def train_step(
     else:
         outputs = predict_with_aux(model, batch, amp=amp, device=run.device)
         loss, parts = conservation_objective(run.criterion, outputs, batch["y_raw"], run.config)
+        if (str(run.config.get("conservation_mode", "none")) == "projected"
+                and str(run.config.get("projection_supervision", "all")) == "inflow_only"):
+            required = ("inflow_final_mae", "raw_conservation_mae", "total_loss")
+            missing = [key for key in required if key not in parts]
+            unexpected = [key for key in ("supervised_mae", "raw_mae", "conservation_loss") if key in parts]
+            if missing or unexpected or loss is not parts["total_loss"]:
+                raise ReimplementationError(
+                    "inflow_only backward must use inflow_final_mae + raw_conservation_mae "
+                    f"(missing={missing}, unexpected={unexpected})"
+                )
     if not torch.isfinite(loss):
         raise ReimplementationError(f"non-finite training loss at epoch {epoch}: {float(loss)}")
     optimizer.zero_grad(set_to_none=True)
@@ -435,6 +471,7 @@ def train_task(
 ) -> dict[str, Any]:
     validate_config(config)
     validate_conservation_task(config, task_spec(task))
+    validate_value_embedding_task(config, task_spec(task))
     output_root = conservation_output_root(config, output_root)
     planned_dir = run_directory(output_root, rate, task_spec(task).name, int(config["seed"]))
     from reimplementation.common.data.sampling_seeds import protect_historical_results
@@ -608,9 +645,16 @@ def train_task(
             _write_history(run_dir, history)
             logger.log({"stage": "epoch", "task": run.task.name, "rate": run.rate, **row})
             inflow_text = f" val_inflow={row['val_inflow_mae']:.5f}" if "val_inflow_mae" in row else ""
+            aux_text = ""
+            if "train_inflow_final_mae" in row and "train_raw_conservation_mae" in row and "train_total_loss" in row:
+                aux_text = (
+                    f" inflow_final_mae={row['train_inflow_final_mae']:.5f}"
+                    f" raw_conservation_mae={row['train_raw_conservation_mae']:.5f}"
+                    f" total_loss={row['train_total_loss']:.5f}"
+                )
             print(
                 f"[MSTT] {run.task.name} {run.rate} epoch={epoch} lr={lr:.2e} train={row['train_loss']:.5f} "
-                f"val_loss={row['val_loss']:.5f} val_mae={row['val_mae']:.5f}{inflow_text} "
+                f"val_loss={row['val_loss']:.5f} val_mae={row['val_mae']:.5f}{inflow_text}{aux_text} "
                 f"{'*' if improved else ''} {row['epoch_total_seconds']:.1f}s",
                 flush=True,
             )
@@ -708,6 +752,7 @@ def train_task(
 
 SUMMARY_FIELDS = [
     "conservation_mode", "conservation_lambda", "projection_raw_loss_weight", "projection_consistency_weight",
+    "projection_supervision",
     "task",
     "rate",
     "seed",

@@ -51,6 +51,7 @@ class MSTTConfig:
     use_dow: bool = True
     use_node_embedding: bool = True
     embedding_fusion: str = "concat"
+    value_embedding_mode: str = "joint_linear"
     value_embedding_dim: int = 32
     node_embedding_dim: int = 16
     tod_embedding_dim: int = 8
@@ -126,6 +127,7 @@ class MSTT(nn.Module):
             use_dow=config.use_dow,
             dropout=config.embedding_dropout,
             fusion=config.embedding_fusion,
+            value_embedding_mode=config.value_embedding_mode,
             value_dim=config.value_embedding_dim,
             node_dim=config.node_embedding_dim,
             tod_dim=config.tod_embedding_dim,
@@ -326,6 +328,7 @@ class MSTT(nn.Module):
         return {
             "fusion": embedding.fusion,
             "widths": dict(embedding.widths),
+            "value_embedding": embedding.value_embedding_summary(),
             "enabled": {
                 "value": True,
                 "node": embedding.node_embedding is not None,

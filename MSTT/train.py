@@ -23,7 +23,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from data_root import PathLayoutError, assert_training_results_output  # noqa: E402
 from MSTT import MODEL_NAME  # noqa: E402
 from MSTT.config import (TASKS, add_config_arguments, load_config, overlay_args, rate_tag,
-                         validate_config, validate_conservation_task, task_spec, conservation_output_root)  # noqa: E402
+                         validate_config, validate_conservation_task, validate_value_embedding_task,
+                         task_spec, conservation_output_root)  # noqa: E402
 
 
 def resolve_output_root(config: dict, *, explicit_conservation: bool = False) -> Path:
@@ -55,6 +56,7 @@ def main(argv: list[str] | None = None) -> dict:
         config["device"] = f"cuda:{args.gpu}"
     validate_config(config)
     validate_conservation_task(config, task_spec(args.task))
+    validate_value_embedding_task(config, task_spec(args.task))
     output_root = resolve_output_root(config, explicit_conservation=args.task == "All2All" and getattr(args, "conservation_mode", None) is not None)
     config["output_root"] = output_root.as_posix()
     from MSTT.trainer import train_task

@@ -18,6 +18,7 @@ MSTT/
 ├── conservation_best_backbone.py
 ├── run_experiments.py
 ├── configs/default.json
+├── configs/experiment_A_separate_value_mlp_projected.json
 ├── configs/conservation_best_backbone/
 ├── model/
 │   ├── mstt.py
@@ -97,6 +98,18 @@ instead of replacing it. Pass an empty `--output-root` for another copy.
 Soft and projected conservation are All2All only. They add a loss term or a
 differentiable projection. They do not change the TSF block.
 
+`configs/conservation_best_backbone/C_inflow_aux.json` keeps projected C's
+MLP and conservation projection. Its loss is projected-inflow MAE plus
+`0.5` times the pre-projection conservation MAE. The other three states
+and the raw four-state MAE are not supervised. Checkpoints are still the
+epoch with the smallest mean validation inflow MAE over seeds 42–46.
+Results go to `training_results_3s/MSTT/C_inflow_aux/`.
+
+```bash
+python MSTT/train.py --config MSTT/configs/conservation_best_backbone/C_inflow_aux.json \
+  --task All2All --penetration p05 --gpu 0
+```
+
 ## Joint 3-step attention
 
 `configs/joint_st3_projected.json` keeps the projected All2All backbone and
@@ -113,6 +126,29 @@ python MSTT/train.py --config MSTT/configs/joint_st3_projected.json \
 ```
 
 Results go to `training_results_3s/MSTT/joint_st3_projected/in_all__out_all/p05/seed_42/`.
+
+## Experiment A: separate value MLPs
+
+`configs/experiment_A_separate_value_mlp_projected.json` keeps the projected
+All2All backbone: one T→S→FFN block, `d_model=128`, 4 heads,
+`ffn_hidden_dim=176`, `attention_layout=factorized_ts`, and
+`projection_raw_loss_weight=0.5` on all four states. Only the value
+embedding changes. In `STATE_CHANNELS` order — inflow, outflow,
+accumulation_start, accumulation_end — each channel has its own
+`Linear(1, 8) → SiLU → Linear(8, 8)`. The four 8-d outputs are
+concatenated to the original 32-d value vector. Road, TOD, DOW, embedding
+dropout, the 64-d adaptive table, the TSF block, the flatten head, and the
+conservation projection are unchanged.
+
+Results go to
+`training_results_3s/MSTT/experiment_A_separate_value_mlp_projected/in_all__out_all/<rate>/seed_<model_seed>/`.
+The historical unconstrained All2All run stays at
+`ablation_100ep/single_tsf_adaptive128_all2a_100ep`.
+
+```bash
+python MSTT/train.py --config MSTT/configs/experiment_A_separate_value_mlp_projected.json \
+  --task All2All --penetration p05 --gpu <GPU>
+```
 
 ## Historical results
 
