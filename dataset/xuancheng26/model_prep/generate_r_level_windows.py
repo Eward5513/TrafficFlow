@@ -155,9 +155,16 @@ def _mean_std(total: float, total_sq: float, count: int) -> tuple[float, float]:
 
 
 def _check_conservation(states: dict[str, np.ndarray], label: str) -> None:
-    end = states["accumulation_start"] + states["inflow"] - states["outflow"]
-    if not np.array_equal(end, states["accumulation_end"]):
-        raise RuntimeError(f"{label} failed N_end = N_start + inflow - outflow")
+    """Legacy name. Current data only requires adjacent boundary snapshots to agree.
+
+    ``accumulation_end - accumulation_start - inflow + outflow`` is a residual,
+    not a validity condition, under ``independent_fcd_v1``.
+    """
+    if not np.array_equal(states["accumulation_start"][1:], states["accumulation_end"][:-1]):
+        raise RuntimeError(f"{label} adjacent boundary occupancy disagrees")
+    for name, values in states.items():
+        if np.any(values < 0):
+            raise RuntimeError(f"{label} {name} is negative")
 
 
 def _load_states(directory: Path, edge_ids: list[str]) -> dict[str, np.ndarray]:

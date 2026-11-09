@@ -58,10 +58,12 @@ new traffic input into `mstt.py`; add it beside `InputEmbedding`.
   traffic moves from road `u` to road `v`.
 - 12→12 labels, when needed, are `training_data_3s/shared/sequence_targets_12step/`.
   They are not the default 12→1 trainer.
-- New results:
-  `training_results_3s/MSTT/in_<input>__out_<target>/<rate>/seed_<model_seed>/`.
-  `seed_<model_seed>` is the initialization seed. The config also records
-  `train_sampling_seed=42` and `evaluation_sampling_seeds=[42,43,44,45,46]`.
+- New results for the current physical definition:
+  `training_results_3s/MSTT/physical_independent_fcd_v1/datasets/<dataset_id>/in_<input>__out_<target>/<observation_key>/seed_<model_seed>/`.
+  `seed_<model_seed>` is the initialization seed. The config records
+  `train_sampling_seed=42`, `evaluation_sampling_seeds=[42,43,44,45,46]`, and
+  `physical_definition_version`. A checkpoint from the cumsum labels is refused
+  on this data. Older result directories are not moved.
 - Historical result trees, including `ablation_100ep/` and earlier versions,
   stay where they are. A directory whose resolved config is not the five-seed
   protocol is protected from overwrite.

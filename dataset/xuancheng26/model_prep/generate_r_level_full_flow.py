@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Build four 5-minute road-level states from Xuancheng26 FCD.
 
-Each date directory receives ``inflow.csv``, ``outflow.csv``,
-``accumulation_start.csv`` and ``accumulation_end.csv``. Inflow and outflow
-keep the audited edge-event counts. Accumulation is the running stock of
-those counts, starting from an empty network before t=0:
-
-    N_end[t] = N_start[t] + inflow[t] - outflow[t]
-    N_start[0] = 0
-    N_start[t+1] = N_end[t]
+Current definition ``independent_fcd_v1`` (see ``independent_states.py``):
+inflow and outflow are direct edge events, including departures, internal
+exits, unknown-lane exits, same-edge re-entry, and tripinfo arrivals.
+Accumulation is the real-edge occupancy at each bin boundary, not
+``cumsum(inflow - outflow)``. ``accumulate_states`` remains only as the
+legacy cumsum helper and is not used by the current writer.
 
 ``--migrate-legacy`` copies already audited ``entry_flow.csv`` /
 ``exit_flow.csv`` into the new names and does not reread FCD. ``--remove-legacy``
@@ -221,12 +219,18 @@ def observe(
         seen.add(vehicle_id)
     slot = bin_index(event_time)
     state = states.get(vehicle_id)
-    if kind != "real":
-        if kind == "internal" and state is not None and not state.exited and slot is not None:
+    if kind == "internal":
+        if state is not None and not state.exited and slot is not None:
             add_exit(slot, state.edge_index)
             state.exited = True
-        elif kind == "unknown":
-            counts["unknown"] += 1
+        return
+    if kind == "unknown":
+        counts["unknown"] += 1
+        if state is not None and not state.exited and slot is not None:
+            add_exit(slot, state.edge_index)
+            state.exited = True
+        return
+    if kind != "real":
         return
     if edge_index is None or slot is None:
         return
@@ -234,7 +238,11 @@ def observe(
         add_entry(slot, edge_index)
         states[vehicle_id] = Stay(edge_index, False)
         return
-    if edge_index == state.edge_index:
+    if edge_index == state.edge_index and not state.exited:
+        return
+    if edge_index == state.edge_index and state.exited:
+        add_entry(slot, edge_index)
+        state.exited = False
         return
     if not state.exited:
         add_exit(slot, state.edge_index)
@@ -293,7 +301,11 @@ def accumulate_states(
     edges: list[str],
     label: str,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Stock before t=0 is zero. Each window then conserves vehicles."""
+    """LEGACY cumsum stock. Not used by independent_fcd_v1 generation or checks.
+
+    Historical files were built with ``N_end = cumsum(inflow - outflow)`` and
+    ``N_start[0] = 0``. New accumulation comes from FCD boundary snapshots.
+    """
     if inflow.shape != outflow.shape:
         raise RuntimeError(f"{label} inflow shape {inflow.shape} != outflow {outflow.shape}")
     if inflow.ndim != 2 or inflow.shape[1] != len(edges) or inflow.shape[0] < 1:
@@ -328,8 +340,14 @@ def write_state_matrices(
     label: str,
     *,
     rewrite_inflow: bool = True,
+    start: np.ndarray | None = None,
+    end: np.ndarray | None = None,
+    legacy_cumsum: bool = False,
 ) -> None:
-    start, end = accumulate_states(inflow, outflow, edges, label)
+    if start is None or end is None:
+        if not legacy_cumsum:
+            raise RuntimeError(f"{label} needs snapshot accumulation; legacy_cumsum is explicit")
+        start, end = accumulate_states(inflow, outflow, edges, label)
     written = {
         "inflow.csv": inflow,
         "outflow.csv": outflow,
@@ -355,7 +373,12 @@ def states_match(
     outflow: np.ndarray,
     edges: list[str],
     label: str,
+    *,
+    start: np.ndarray | None = None,
+    end: np.ndarray | None = None,
 ) -> bool:
+    """Compare stored files with counted matrices. Accumulation is not derived."""
+    del label
     paths = [out_dir / name for name in STATE_FILES]
     if not all(path.is_file() and path.stat().st_size > 0 for path in paths):
         return False
@@ -365,7 +388,8 @@ def states_match(
     got_end = read_flow_csv(out_dir / "accumulation_end.csv", edges)
     if not np.array_equal(got_in, inflow) or not np.array_equal(got_out, outflow):
         return False
-    start, end = accumulate_states(inflow, outflow, edges, label)
+    if start is None or end is None:
+        return False
     return np.array_equal(got_start, start) and np.array_equal(got_end, end)
 
 
@@ -545,11 +569,8 @@ def process_day(task: tuple) -> dict[str, object]:
             if not np.array_equal(entry, audited_in) or not np.array_equal(exit_flow, audited_out):
                 raise RuntimeError(f"{date_label} migrated inflow/outflow differs from audited entry/exit")
         else:
-            fcd_path = prefer_xml(day_dir, f"fcd_{date_label}")
-            trip_path = prefer_xml(day_dir, f"tripinfo_{date_label}")
-            arrivals = load_arrivals(trip_path)
-            entry, exit_flow, counts, vehicles = stream_fcd(
-                fcd_path, edges, lane_to_edge, internal_lanes, arrivals, date_label
+            raise RuntimeError(
+                f"{date_label} independent_fcd_v1 is written by independent_states.py scan, not cumsum"
             )
         if int(entry.min()) < 0 or int(exit_flow.min()) < 0:
             raise RuntimeError("negative flow")
@@ -557,10 +578,8 @@ def process_day(task: tuple) -> dict[str, object]:
             raise RuntimeError(f"unexpected matrix shape {entry.shape}")
         if int(entry.sum()) <= 0:
             raise RuntimeError("entry flow is empty")
-        if skip_complete and states_match(out_dir, entry, exit_flow, edges, date_label):
-            log(f"[{date_label}] SKIP verified four-state files")
-        else:
-            write_state_matrices(out_dir, entry, exit_flow, edges, date_label)
+        write_state_matrices(out_dir, entry, exit_flow, edges, date_label, legacy_cumsum=True)
+        del skip_complete
         if remove_legacy:
             remove_legacy_full(out_dir)
         row = summary_row(date_label, entry, exit_flow, vehicles if vehicles != "" else 0)

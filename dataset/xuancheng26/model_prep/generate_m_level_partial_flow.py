@@ -250,7 +250,8 @@ def process_day(task: dict) -> list[dict[str, object]]:
             raise RuntimeError("; ".join(problems))
         for index, name in enumerate(RATES):
             rfull.write_state_matrices(
-                out_root / name / date_label, tracker.inflow[index], tracker.outflow[index], ids, f"{date_label} {name}"
+                out_root / name / date_label, tracker.inflow[index], tracker.outflow[index], ids, f"{date_label} {name}",
+                legacy_cumsum=True,
             )
         counters = [
             {key: int(value[index]) for key, value in tracker.counts.items()} for index in range(len(RATES))

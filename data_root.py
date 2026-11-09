@@ -363,6 +363,26 @@ def sampled_vehicle_root(sampling_root: Path | str, sampling_seed: int = TRAIN_S
     return sampling_seed_root(sampling_root, sampling_seed) / "sampled_vehicle"
 
 
+def sequence_targets_dir(training_root: Path | str | None = None) -> Path:
+    """Authoritative 12-step full labels. Dataset shared directories may link here."""
+    root = Path(training_root).expanduser().resolve() if training_root else xuancheng26_training_3s_root()
+    return root / "shared" / "sequence_targets_12step"
+
+
+def rf_observation_feature_path(
+    training_root: Path | str,
+    dataset_id: str,
+    sampling_seed: int,
+    observation_key: str,
+    date: str,
+) -> Path:
+    """Speed cube for one dataset, sampling seed, observation key, and day."""
+    return (
+        Path(training_root) / "datasets" / str(dataset_id) / "sampling_seeds" / f"seed_{int(sampling_seed)}"
+        / "model_prepared" / "RF" / str(observation_key) / f"{date}.npz"
+    )
+
+
 def sampling_root_from_window(window_root: Path | str) -> Path:
     path = Path(window_root).absolute()
     if path.name != "window_data" or path.parent.name != "flow" or path.parent.parent.name not in {f"seed_{s}" for s in SAMPLING_SEEDS}:
@@ -376,22 +396,52 @@ def task_results_dir(output_root: Path | str, input_type: str, target_type: str)
     return root if root.name == leaf else root / leaf
 
 
-def sampling_run_results_dir(output_root: Path | str, input_type: str, target_type: str, rate: str, model_seed: int) -> Path:
-    """Fixed runs stay ``in_<in>__out_<out>/<rate>/seed_<model_seed>``.
+def sampling_run_results_dir(
+    output_root: Path | str,
+    input_type: str,
+    target_type: str,
+    rate: str,
+    model_seed: int,
+    *,
+    physical_version: str | None = None,
+    dataset_id: str | None = None,
+) -> Path:
+    """Fixed runs stay ``in_<in>__out_<out>/<rate>/seed_<model_seed>`` unless a physical version is set.
 
-    A variable dataset reserves
-    ``datasets/<dataset_id>/in_<in>out<out>/<observation_key>/seed<model_seed>``.
+    With ``physical_version``, new runs go to
+    ``physical_<version>/datasets/<dataset_id>/in_<in>__out_<out>/<rate>/seed_<model_seed>``.
+    Existing result trees are not moved.
     """
     root = Path(output_root)
     variable_leaf = f"in_{input_type}out{target_type}"
     fixed_leaf = f"in_{input_type}__out_{target_type}"
-    if "datasets" in root.parts and (root.name == variable_leaf or root.parent.name == "datasets"):
-        parent = root if root.name == variable_leaf else root / variable_leaf
-        return parent / str(rate) / f"seed{int(model_seed)}"
-    parent = root if root.name == fixed_leaf else root / fixed_leaf
-    return parent / str(rate) / f"seed_{int(model_seed)}"
+    if physical_version:
+        if root.name in {fixed_leaf, variable_leaf}:
+            root = root.parent
+        dataset = dataset_id or FIXED_DATASET_ID
+        if root.name == dataset and root.parent.name == "datasets":
+            root = root.parent.parent
+        elif root.name == "datasets":
+            root = root.parent
+        version_dir = f"physical_{physical_version}"
+        if version_dir in root.parts:
+            index = root.parts.index(version_dir)
+            base = Path(*root.parts[: index + 1])
+        else:
+            base = root / version_dir
+        if not (base.name == dataset and base.parent.name == "datasets"):
+            base = base / "datasets" / dataset
+        return base / fixed_leaf / str(rate) / f"seed_{int(model_seed)}"
+    if not physical_version:
+        if "datasets" in root.parts and (root.name == variable_leaf or root.parent.name == "datasets"):
+            parent = root if root.name == variable_leaf else root / variable_leaf
+            return parent / str(rate) / f"seed{int(model_seed)}"
+        parent = root if root.name == fixed_leaf else root / fixed_leaf
+        return parent / str(rate) / f"seed_{int(model_seed)}"
+    raise PathLayoutError("sampling result path was not resolved")
 
 
+PHYSICAL_DEFINITION_VERSION = "independent_fcd_v1"
 FIXED_DATASET_ID = "fixed_uniform"
 FIXED_OBSERVATION_KEYS = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
 _OBSERVATION_KEY = re.compile(r"^p\d+(?:p\d+)?_p\d+(?:p\d+)?$")
@@ -414,8 +464,11 @@ def observation_key(p_min: float, p_max: float) -> str:
     return f"p{_percent_token(low)}_p{_percent_token(high)}"
 
 
+VARIABLE_MODES = ("30min", "1h", "2h", "day")
+
+
 def variable_dataset_id(mode: str, p_min: float, p_max: float) -> str:
-    if mode not in {"day", "2h"}:
+    if mode not in VARIABLE_MODES:
         raise PathLayoutError(f"unknown variable mode: {mode}")
     return f"variable_{mode}_{observation_key(p_min, p_max)}"
 

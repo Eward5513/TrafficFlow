@@ -529,18 +529,19 @@ def load_sampled_indices(day_name: str, rate: str) -> list[int]:
 
 
 def build_mask(rate_indices: list[list[int]]) -> np.ndarray:
-    if len(rate_indices) > 8:
-        raise FeatureError("at most 8 penetrations can be packed into one mask byte")
+    """Pack group membership in 64-bit words. More than 64 groups use extra words."""
     largest = 0
     for indices in rate_indices:
         if indices:
             largest = max(largest, max(indices))
-    mask = np.zeros(largest + 1, dtype=np.uint8)
+    words = max(1, (len(rate_indices) + 63) // 64)
+    mask = np.zeros((largest + 1, words), dtype=np.uint64)
     for bit, indices in enumerate(rate_indices):
         if not indices:
             continue
-        mask[np.asarray(indices, dtype=np.int64)] |= np.uint8(1 << bit)
-    return mask
+        word, offset = divmod(bit, 64)
+        mask[np.asarray(indices, dtype=np.int64), word] |= np.uint64(1 << offset)
+    return mask if words > 1 else mask[:, 0]
 
 
 def nesting_holds(rate_names: list[str], rate_indices: list[list[int]]) -> bool:
@@ -636,8 +637,12 @@ def parse_fcd_stream(
             return
         if vehicle_index < 0 or vehicle_index >= mask_len:
             return
-        membership = int(mask[vehicle_index])
-        if membership == 0:
+        raw_membership = mask[vehicle_index]
+        if getattr(raw_membership, "ndim", 0) == 0:
+            words = (int(raw_membership),)
+        else:
+            words = tuple(int(item) for item in raw_membership.tolist())
+        if not any(words):
             return
         stats["mask_hits"] += 1
         lane_id = attrs.get("lane", "")
@@ -668,15 +673,19 @@ def parse_fcd_stream(
         if speed > EXTREME_SPEED_MS:
             stats["extreme_speed"] += 1
         limit = float(base_ms[column])
-        bit = 1
-        for rate_index in range(n_rates):
-            if membership & bit:
-                sums[rate_index][slot, column] += speed
-                counts[rate_index][slot, column] += 1
-                used[rate_index] += 1
-                if speed > limit:
-                    above[rate_index] += 1
-            bit <<= 1
+        for word_index, word in enumerate(words):
+            bit = 1
+            for offset in range(64):
+                rate_index = word_index * 64 + offset
+                if rate_index >= n_rates:
+                    break
+                if word & bit:
+                    sums[rate_index][slot, column] += speed
+                    counts[rate_index][slot, column] += 1
+                    used[rate_index] += 1
+                    if speed > limit:
+                        above[rate_index] += 1
+                bit <<= 1
 
     parser = expat.ParserCreate()
     parser.StartElementHandler = start
@@ -801,6 +810,10 @@ def write_rate_npz(
     complete: bool,
     parse_stats: dict[str, object],
     rate_index: int,
+    dataset_id: str = "",
+    sampling_seed: int = -1,
+    vehicle_list_sha256: str = "",
+    physical_definition_version: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.stem}.partial.npz")
@@ -827,6 +840,10 @@ def write_rate_npz(
             extreme_speed_count=np.int64(parse_stats["extreme_speed"]),
             used_record_count=np.int64(parse_stats["used_records"][rate_index]),
             above_base_observation_count=np.int64(parse_stats["above_base_observations"][rate_index]),
+            dataset_id=np.asarray(dataset_id),
+            sampling_seed=np.int16(sampling_seed),
+            vehicle_list_sha256=np.asarray(vehicle_list_sha256),
+            physical_definition_version=np.asarray(physical_definition_version),
         )
         with np.load(temporary, allow_pickle=False) as payload:
             validate_arrays(

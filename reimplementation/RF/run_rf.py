@@ -34,18 +34,19 @@ def _log(message: str) -> None:
     print(f"{stamp} {message}", flush=True)
 
 
-def _parse_rates(values: list[str] | None) -> list[str]:
+def _parse_rates(values: list[str] | None, allowed: tuple[str, ...] | None = None) -> list[str]:
+    catalog = tuple(allowed) if allowed else tuple(DEFAULT_RATES)
     if not values:
-        return list(DEFAULT_RATES)
+        return list(catalog)
     rates: list[str] = []
     for value in values:
         for part in value.split(","):
             name = part.strip()
             if name:
                 rates.append(name)
-    unknown = [name for name in rates if name not in DEFAULT_RATES]
+    unknown = [name for name in rates if name not in catalog]
     if unknown or len(rates) != len(set(rates)):
-        raise SystemExit(f"penetrations must be a subset of {DEFAULT_RATES}, got {rates}")
+        raise SystemExit(f"observation keys must be a subset of {catalog}, got {rates}")
     return rates
 
 
@@ -159,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Train and evaluate the Xuancheng26 RF baseline.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--dataset-id", default="fixed_uniform")
     parser.add_argument("--training-root", type=Path, default=DEFAULT_TRAINING_ROOT)
     parser.add_argument("--results-root", type=Path, default=RESULTS_ROOT)
     parser.add_argument("--penetrations", nargs="*", default=None)
@@ -188,7 +190,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("parallelism must be >= 1")
     if args.n_clusters < 2:
         parser.error("--n-clusters must be >= 2")
-    rates = _parse_rates(args.penetrations)
+    from data_root import resolve_xuancheng_dataset
+    spec = resolve_xuancheng_dataset(dataset_id=args.dataset_id, training_root=training_root)
+    rates = _parse_rates(args.penetrations, tuple(spec["observation_keys"]))
     from reimplementation.RF.data_loader import XuanchengRFData, validate_task
 
     try:
@@ -197,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(str(exc)) from exc
 
     _log(f"auditing RF inputs {args.input_type}->{args.target_type}")
-    audit = XuanchengRFData().audit(args.input_type, args.target_type)
+    audit = XuanchengRFData(dataset_id=args.dataset_id, training_root=training_root).audit(args.input_type, args.target_type)
     _log(f"audit {audit}")
     if args.audit_only:
         return 0
@@ -209,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     experiment = {
         "model": "RF",
+        "dataset_id": args.dataset_id,
+        "physical_definition_version": "independent_fcd_v1",
         "paper": "Othman et al., IEEE ITSC 2022",
         "paper_settings": {
             "kmeans_clusters": 50,

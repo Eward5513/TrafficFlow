@@ -504,7 +504,7 @@ def train_penetration(config: dict) -> None:
             if _complete(rate_dir, multi) and not config["force"] and not config["evaluate_only"]:
                 log("SKIP completed five-sampling run")
                 return
-            data = XuanchengRFData()
+            data = XuanchengRFData(dataset_id=str(config.get("dataset_id") or "fixed_uniform"))
             if config["evaluate_only"]:
                 if not _fitted_complete(rate_dir, multi):
                     if _read_discard_record(rate_dir) is not None:
@@ -566,7 +566,7 @@ def train_penetration(config: dict) -> None:
             for split in ("validation", "test"):
                 per_seed = {}
                 for sampling_seed in SAMPLING_SEEDS:
-                    observed = XuanchengRFData(sampling_seed)
+                    observed = XuanchengRFData(sampling_seed, dataset_id=str(config.get("dataset_id") or "fixed_uniform"))
                     scored = _score_split(estimators, observed, penetration, observed.days[split],
                                           rate_dir / "predictions" / f"seed_{sampling_seed}" / split, **score_kwargs)
                     flat = dict(scored["overall"])
@@ -621,7 +621,7 @@ def train_penetration(config: dict) -> None:
             torch.save(checkpoint, rate_dir / "last_checkpoint.pt")
             _write_payload(rate_dir / "training_history.json", [{"fit": 0, "mean_validation_mae": reports["validation"]["mean"]["mae"]}])
             _write_payload(rate_dir / "run_metadata.json", {**checkpoint, "status": "completed",
-                           "speed_features": "shared existing RF auxiliary features (fixed across Flow sampling seeds)",
+                           "speed_features": "per dataset, observation key, and sampling seed; not shared across seeds",
                            "scaler_fit": "seed42 training only", "optimizer": "RandomForest/KMeans/LAD"})
             elapsed = time.perf_counter() - started
             log(f"PASS seconds={elapsed:.1f} test_mae={test['overall']['mae']:.6f} rss_mib={_rss_mib()}")

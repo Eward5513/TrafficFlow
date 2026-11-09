@@ -52,10 +52,8 @@ def load_states(directory, edges):
 
 
 def check_states(states, label, complete=None, previous=None):
-    start, end = full.accumulate_states(states["inflow"], states["outflow"], CONTEXT["edges"], label)
-    for name, expected in (("accumulation_start", start), ("accumulation_end", end)):
-        if not np.array_equal(states[name], expected):
-            raise RuntimeError(f"{label}/{name}: conservation/continuity/initial stock failed")
+    if not np.array_equal(states["accumulation_start"][1:], states["accumulation_end"][:-1]):
+        raise RuntimeError(f"{label}: adjacent boundary occupancy disagrees")
     for name, values in states.items():
         if values.shape != (288, 1406) or not np.isfinite(values).all() or np.any(values < 0):
             raise RuntimeError(f"{label}/{name}: invalid count matrix")
@@ -224,9 +222,10 @@ def process_day(day):
                 for ri, rate in enumerate(common.RATES):
                     if (seed, rate) not in pending:
                         continue
-                    inflow, outflow = counts[:, si, ri]
-                    start, end = full.accumulate_states(inflow, outflow, edges, f"{day}/{seed}/{rate}")
-                    states = dict(zip(common.CHANNELS, (inflow.copy(), outflow.copy(), start, end)))
+                    raise RuntimeError(
+                        f"{day}/{seed}/{rate} is missing independent snapshot accumulation; "
+                        "rerun independent_states.py scan instead of cumsum"
+                    )
                     check_states(states, f"{day}/{seed}/{rate}", complete)
                     out = common.flow_path(root, seed, rate, day)
                     for name, matrix in states.items():

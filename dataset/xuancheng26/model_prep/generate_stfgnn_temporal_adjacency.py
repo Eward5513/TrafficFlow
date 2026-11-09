@@ -416,6 +416,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-common-valid-days", type=int, default=MIN_COMMON_VALID_DAYS)
     parser.add_argument("--sparsity", type=float, default=SPARSITY)
     parser.add_argument("--workers", type=int, default=29)
+    parser.add_argument("--states", nargs="*", default=None)
     return parser.parse_args(argv)
 
 
@@ -570,7 +571,8 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     written: list[str] = []
-    for state in STATES:
+    selected = tuple(args.states) if args.states else STATES
+    for state in selected:
         print(f"state={state} source={state}.csv", flush=True)
         state_started = time.perf_counter()
         cube = load_training_flow(edge_ids, days, f"{state}.csv")

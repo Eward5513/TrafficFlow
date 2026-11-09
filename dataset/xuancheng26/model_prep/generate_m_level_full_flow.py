@@ -545,7 +545,7 @@ def process_day(task: dict) -> dict[str, object]:
             problems.append("last accumulation_end differs from unresolved vehicles")
         if problems:
             raise RuntimeError("; ".join(problems))
-        rfull.write_state_matrices(out_dir, inflow, outflow, ids, date_label)
+        rfull.write_state_matrices(out_dir, inflow, outflow, ids, date_label, legacy_cumsum=True)
         write_rows(anomaly_path, ANOMALY_FIELDS, tracker.anomalies)
         r_in, r_out = r_totals(Path(task["r_full_root"]) / date_label, mnet.edges)
         c = {key: int(value[0]) for key, value in tracker.counts.items()}

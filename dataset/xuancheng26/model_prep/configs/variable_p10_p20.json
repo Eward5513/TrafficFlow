@@ -8,14 +8,24 @@
   "p_max": 0.20,
   "datasets": [
     {
-      "dataset_id": "variable_day_p10_p20",
-      "mode": "day",
-      "segment_seconds": 86400
+      "dataset_id": "variable_30min_p10_p20",
+      "mode": "30min",
+      "segment_seconds": 1800
+    },
+    {
+      "dataset_id": "variable_1h_p10_p20",
+      "mode": "1h",
+      "segment_seconds": 3600
     },
     {
       "dataset_id": "variable_2h_p10_p20",
       "mode": "2h",
       "segment_seconds": 7200
+    },
+    {
+      "dataset_id": "variable_day_p10_p20",
+      "mode": "day",
+      "segment_seconds": 86400
     }
   ]
 }

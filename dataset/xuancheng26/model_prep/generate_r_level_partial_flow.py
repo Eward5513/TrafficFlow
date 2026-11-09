@@ -227,6 +227,8 @@ def process_day(task: tuple) -> list[dict[str, object]]:
         for index, name in enumerate(RATES):
             out_dir = OUT_ROOT / name / date_label
             label = f"{date_label} {name}"
+            if not migrate_legacy:
+                raise RuntimeError(f"{label} partial states come from independent_states.py scan")
             if skip_complete and full.states_match(out_dir, inflows[index], outflows[index], edges, label):
                 log(f"[{label}] SKIP verified four-state files")
             else:
@@ -238,6 +240,7 @@ def process_day(task: tuple) -> list[dict[str, object]]:
                     edges,
                     label,
                     rewrite_inflow=not preserve_inflow,
+                    legacy_cumsum=True,
                 )
             if remove_legacy:
                 legacy = out_dir / "out_flow.csv"

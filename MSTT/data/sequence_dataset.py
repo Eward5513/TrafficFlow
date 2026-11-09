@@ -29,7 +29,17 @@ from torch.utils.data import DataLoader, Dataset
 from data_root import sampling_root_from_window
 
 def shared_sequence_root(data_root):
-    return sampling_root_from_window(data_root).parent / "shared" / "sequence_targets_12step"
+    """Prefer the dataset shared link, then the authoritative training-root package."""
+    from data_root import sequence_targets_dir
+
+    sampling = sampling_root_from_window(data_root)
+    linked = sampling.parent / "shared" / "sequence_targets_12step"
+    if linked.exists():
+        return linked
+    for parent in sampling.parents:
+        if parent.name == "training_data_3s":
+            return sequence_targets_dir(parent)
+    return sequence_targets_dir()
 
 from MSTT.config import STATE_CHANNELS, TASKS, TaskSpec, rate_tag, task_spec
 from reimplementation.common.data.r_only_npz_dataset import (
@@ -136,8 +146,18 @@ class SequenceStateWindowDataset(Dataset):
             raise ReimplementationError(f"sequence package is {manifest['n_his']}->{manifest['output_steps']}, not {self.n_his}->{self.n_his}")
         if int(manifest["num_nodes"]) != self.num_nodes or int(manifest["steps_per_day"]) != STEPS_PER_DAY:
             raise ReimplementationError("sequence package node count or day length differs")
-        if manifest["normalization"]["sha256"] != sha256_file(self.data_root / "state_normalization.json"):
-            raise ReimplementationError("state_normalization.json changed since the sequence targets were audited")
+        from data_root import PHYSICAL_DEFINITION_VERSION
+
+        if manifest.get("physical_definition_version") != PHYSICAL_DEFINITION_VERSION:
+            raise ReimplementationError(
+                f"sequence targets physical_definition_version={manifest.get('physical_definition_version')!r} "
+                f"!= {PHYSICAL_DEFINITION_VERSION}"
+            )
+        normalization = load_json(self.data_root / "state_normalization.json")
+        if normalization.get("physical_definition_version") != PHYSICAL_DEFINITION_VERSION:
+            raise ReimplementationError("state_normalization.json is not the current physical definition")
+        if manifest.get("normalization", {}).get("target") != normalization.get("target"):
+            raise ReimplementationError("sequence target scaler does not match state_normalization.json")
         self.samples_per_day = int(manifest["samples_per_day"])
         if self.samples_per_day != STEPS_PER_DAY - self.n_his + 1:
             raise ReimplementationError(f"samples_per_day {self.samples_per_day} is not 288 - n_his + 1")

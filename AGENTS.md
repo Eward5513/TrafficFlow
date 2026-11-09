@@ -55,14 +55,16 @@ config file.
   `xuancheng26/training_data_3s/`. Fixed penetrations live in
   `training_data_3s/datasets/fixed_uniform/sampling_seeds/`; `sampling_seeds`
   remains a compatibility symlink to that directory. Shared split, node order,
-  and the fixed scaler stay in `training_data_3s/shared/`. Variable-penetration
-  datasets are `training_data_3s/datasets/<dataset_id>/` and carry their own
-  input scaler. Train on sampling seed 42. Validation and test score seeds
-  42–46 and select checkpoints by the mean raw MAE. `sampling_seed`,
-  `schedule_seed`, and `model_seed` are different. Fixed 3-second results stay
-  at `xuancheng26/training_results_3s/<model>/in_<input>__out_<target>/<rate>/seed_<model_seed>/`.
-  A variable dataset reserves
-  `training_results_3s/<model>/datasets/<dataset_id>/in_<input>out<target>/<observation_key>/seed<model_seed>/`.
+  and the shared target scaler stay in `training_data_3s/shared/`. The current
+  four road states are `independent_fcd_v1`: events for inflow/outflow and FCD
+  boundary snapshots for accumulation. The retired cumsum stock is
+  `archive/cumsum_stock_v1/`. Variable-penetration datasets are
+  `training_data_3s/datasets/<dataset_id>/` and carry their own input scaler.
+  Train on sampling seed 42. Validation and test score seeds 42–46 and select
+  checkpoints by the mean raw MAE. `sampling_seed`, `schedule_seed`, and
+  `model_seed` are different. New 3-second results go to
+  `training_results_3s/<model>/physical_independent_fcd_v1/datasets/<dataset_id>/in_<input>__out_<target>/<observation_key>/seed_<model_seed>/`.
+  Older result directories stay where they are.
   `reimplementation/` does not generate datasets. Never write those artifacts
   under `CODE_ROOT`, and do not overwrite an existing result directory.
 - Keep ID-like values such as VINs, OSM IDs, SUMO edge IDs, junction IDs, and

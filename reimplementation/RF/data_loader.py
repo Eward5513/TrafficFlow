@@ -19,8 +19,13 @@ from pathlib import Path
 
 import numpy as np
 
-from data_root import (xuancheng26_training_3s_root, sampling_partial_flow_root,
-                       xuancheng26_sampling_root, SAMPLING_SEEDS)
+from data_root import (
+    SAMPLING_SEEDS,
+    resolve_xuancheng_dataset,
+    rf_observation_feature_path,
+    sampling_partial_flow_root,
+    xuancheng26_training_3s_root,
+)
 TRAIN_ROOT = Path(os.environ.get("XUANCHENG_RF_TRAINING_ROOT", str(xuancheng26_training_3s_root()))).expanduser().resolve()
 RF_ROOT = TRAIN_ROOT / "config" / "RF"
 FULL_ROOT = TRAIN_ROOT / "full_flow" / "r-level"
@@ -164,7 +169,16 @@ def _load_flow(path: Path, edges: list[str]) -> np.ndarray:
     return values
 
 
-def _load_speed(path: Path, edges: list[str], penetration: str, day_name: str, limit: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _load_speed(
+    path: Path,
+    edges: list[str],
+    penetration: str,
+    day_name: str,
+    limit: np.ndarray,
+    *,
+    dataset_id: str | None = None,
+    sampling_seed: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     with np.load(path, allow_pickle=False) as payload:
         speed = np.asarray(payload["average_speed"], dtype=np.float32)
         norm = np.asarray(payload["normalized_speed"], dtype=np.float32)
@@ -176,6 +190,10 @@ def _load_speed(path: Path, edges: list[str], penetration: str, day_name: str, l
             raise DataError(f"{path} shape {speed.shape}")
         if str(payload["date"]) != day_name or str(payload["penetration"]) != penetration:
             raise DataError(f"{path} date/penetration metadata mismatch")
+        if dataset_id is not None and "dataset_id" in payload.files and str(payload["dataset_id"]) != dataset_id:
+            raise DataError(f"{path} dataset_id {payload['dataset_id']} != {dataset_id}")
+        if sampling_seed is not None and "sampling_seed" in payload.files and int(payload["sampling_seed"]) != int(sampling_seed):
+            raise DataError(f"{path} sampling_seed {payload['sampling_seed']} != {sampling_seed}")
         if int(payload["complete_day"]) != 1:
             raise DataError(f"{path} is not a complete day")
         if not np.array_equal(payload["time_bins"], np.arange(N_BINS)):
@@ -194,11 +212,15 @@ def _load_speed(path: Path, edges: list[str], penetration: str, day_name: str, l
 
 
 class XuanchengRFData:
-    def __init__(self, sampling_seed: int = 42) -> None:
+    def __init__(self, sampling_seed: int = 42, dataset_id: str = "fixed_uniform", training_root: Path | None = None) -> None:
         if sampling_seed not in SAMPLING_SEEDS:
             raise DataError(f"unknown sampling seed {sampling_seed}")
+        self.training_root = Path(training_root or TRAIN_ROOT)
+        self.dataset_id = str(dataset_id)
+        spec = resolve_xuancheng_dataset(dataset_id=self.dataset_id, training_root=self.training_root)
+        self.observation_keys = tuple(spec["observation_keys"])
         self.sampling_seed = sampling_seed
-        self.partial_root = sampling_partial_flow_root(TRAIN_ROOT / "sampling_seeds", sampling_seed)
+        self.partial_root = sampling_partial_flow_root(spec["sampling_root"], sampling_seed)
         self.edges = load_edges()
         self.lanes, self.speed_limit = load_static(self.edges)
         self.days = load_manifest()
@@ -210,7 +232,7 @@ class XuanchengRFData:
     def audit(self, input_type: str = "inflow", target_type: str = "inflow") -> dict[str, int]:
         validate_task(input_type, target_type)
         checked = 0
-        for rate in RATES:
+        for rate in self.observation_keys:
             for day_name in self.all_days():
                 self.day_cube(rate, day_name, input_type, target_type)
                 checked += 1
@@ -237,9 +259,13 @@ class XuanchengRFData:
         """
         validate_task(input_type, target_type)
         names = feature_names_for(input_type)
-        speed_path = RF_ROOT / penetration / f"{day_name}.npz"
+        if penetration not in self.observation_keys:
+            raise DataError(f"{penetration} is not declared by {self.dataset_id}: {self.observation_keys}")
+        speed_path = rf_observation_feature_path(
+            self.training_root, self.dataset_id, self.sampling_seed, penetration, day_name,
+        )
         if not speed_path.is_file():
-            raise DataError(f"missing {speed_path}")
+            raise DataError(f"missing observation speed {speed_path}")
         observed_states = STATES if input_type == "all" else (input_type,)
         label_states = STATES if target_type == "all" else (target_type,)
         observed = []
@@ -254,7 +280,10 @@ class XuanchengRFData:
             if not path.is_file():
                 raise DataError(f"missing {path}")
             labels.append(_load_flow(path, self.edges))
-        speed, norm = _load_speed(speed_path, self.edges, penetration, day_name, self.speed_limit)
+        speed, norm = _load_speed(
+            speed_path, self.edges, penetration, day_name, self.speed_limit,
+            dataset_id=self.dataset_id, sampling_seed=self.sampling_seed,
+        )
         sl = slice(TARGET_START, N_BINS)
         features = np.empty((N_TARGETS, N_EDGES, len(names)), dtype=np.float32)
         for index, flow in enumerate(observed):

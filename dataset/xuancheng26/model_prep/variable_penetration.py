@@ -17,6 +17,7 @@ from vehicle_sampling import daily_seed, permute
 ALGORITHM_VERSION = "xuancheng26_variable_penetration_v1"
 SCHEMA_VERSION = "xuancheng26_variable_windows_v1"
 DAY_SECONDS = 86400
+SEGMENT_SECONDS = {"30min": 1800, "1h": 3600, "2h": 7200, "day": 86400}
 
 
 class PopulationConflict(RuntimeError):

@@ -124,6 +124,19 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
             config["output_dim"] = out_channels
     root = Path(str(config["output_root"]))
     dataset_id = str(config.get("dataset_id") or "fixed_uniform")
+    version = config.get("physical_definition_version")
+    if version:
+        from data_root import sampling_run_results_dir
+
+        leaf = f"in_{input_type}__out_{target_type}"
+        sample = sampling_run_results_dir(
+            root, input_type, target_type, "p05", 0,
+            physical_version=str(version), dataset_id=dataset_id,
+        )
+        config["output_root"] = sample.parent.parent.as_posix()
+        if Path(config["output_root"]).name != leaf:
+            raise ReimplementationError(f"physical output root did not end in {leaf}")
+        return config
     if dataset_id != "fixed_uniform":
         from data_root import dataset_results_parent
 
@@ -142,6 +155,32 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
         if root.name != leaf:
             config["output_root"] = (root / leaf).as_posix()
     return config
+
+
+def assert_physical_package(data_root: Path) -> None:
+    """Reject cumsum-era labels and unfinished packages on the official 3-second tree."""
+    from data_root import PHYSICAL_DEFINITION_VERSION
+
+    root = Path(data_root)
+    path = root / "state_normalization.json"
+    if not path.is_file():
+        return
+    payload = load_json(path)
+    official = "training_data_3s" in root.parts or bool(payload.get("physical_definition_version"))
+    if not official:
+        return
+    version = payload.get("physical_definition_version")
+    if version != PHYSICAL_DEFINITION_VERSION:
+        raise ReimplementationError(
+            f"refusing {root}: physical_definition_version={version!r}, expected {PHYSICAL_DEFINITION_VERSION}"
+        )
+    if payload.get("dataset_status") in {"building", "failed"}:
+        raise ReimplementationError(f"refusing {root}: dataset_status={payload.get('dataset_status')}")
+    report_path = root / "validation_summary.json"
+    if report_path.is_file():
+        report = load_json(report_path)
+        if report.get("dataset_status") in {"building", "failed"} or report.get("overall_validation_passed") is False:
+            raise ReimplementationError(f"refusing {root}: validation_summary is not ready")
 
 
 def read_state_target_scaler(data_root: Path, target_type: str) -> tuple[float, float] | tuple[np.ndarray, np.ndarray]:
@@ -217,6 +256,7 @@ class AlignedStateWindowDataset(Dataset):
         if split not in SPLITS:
             raise ReimplementationError(f"unknown split {split}")
         self.data_root = Path(data_root)
+        assert_physical_package(self.data_root)
         self.rate = rate_tag(rate, allowed=declared_observation_keys(self.data_root))
         self.split = split
         self.input_type = input_type

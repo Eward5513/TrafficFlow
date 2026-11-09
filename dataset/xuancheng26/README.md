@@ -104,7 +104,7 @@ python3 run_fcd_simulations_3s.py --smoke-test
 建议顺序：
 
 1. `generate_r_graph.py`：用 `xuancheng_tls_rebuilt.net.xml` 的真实连接做成有向路段图 `graph/r_graph.npz`。
-2. `generate_r_level_full_flow.py`：按 5 分钟写出 `inflow.csv`、`outflow.csv`、`accumulation_start.csv`、`accumulation_end.csv`。部分观测由 `generate_r_level_partial_flow.py` 用同样四个文件名写到各渗透率目录。
+2. `independent_states.py` 按 `independent_fcd_v1` 写出四个 5 分钟状态。inflow/outflow 是含出发、到达、内部车道和未知车道的直接进出事件；accumulation 是边界时刻的真实道路占有快照，不是 `inflow-outflow` 的累计。历史 `accumulate_states` 只保留给旧的 M/MR 口径。`generate_r_level_full_flow.py` 不再用累计库存生成 R 级文件。
 3. `generate_multi_seed_vehicle_sampling.py`：五个采样种子、七个渗透率的车辆名单。seed 42 复用已经核对过的历史名单。
 4. `generate_multi_seed_flow_data.py`：按这些名单写四状态 CSV 和 12→1 窗口。这是当前唯一的流量数据入口。
 5. `generate_r_level_partial_flow.py` 和 `generate_r_level_windows.py` 仍可供单种子核对，默认写到 `sampling_seeds/seed_42/flow/`。正式五种子数据不要靠它们重跑。
@@ -190,15 +190,19 @@ seed 42 全部历史名单以及 42–46 的 p05 测试名单必须与理论集�
 一次 FCD，复用 `generate_r_level_full_flow.stream_fcd` 的真实道路、internal lane、
 Entry/Exit、到达补齐规则，读取缓冲为 16 MiB，不缓存完整轨迹。
 事件先计入每个种子的最低待生成渗透率层级，再沿渗透率轴累加。
-四状态保持 288×1406、整数守恒、零日初存量、连续存量，并逐格检查非负、partial≤full、
-渗透率单调和 R 图列顺序。
+四状态保持 288×1406。inflow/outflow 来自直接事件，accumulation 来自 FCD 边界快照。
+相邻窗口共用同一边界样本，所以 `accumulation_start[t+1] == accumulation_end[t]`。
+`Q(0-)` 是开步前的空网，不是 t=0.00 那一帧。日末用 t=86399，不构造 t=86400。
+残差 `end-start-inflow+outflow` 只做诊断。逐格检查非负、partial≤full、
+渗透率单调和 R 图列顺序。旧版“四状态整数守恒、由流量差生成库存”只描述已归档的 cumsum 口径。
 
 窗口为同日 12→1，共 277 个，目标是最后输入时间片的全量状态。
 四通道顺序固定为 `[inflow,outflow,accumulation_start,accumulation_end]`。
 保留 `x,y,x_raw,y_raw,day_index,window_start_slot,target_slot` 的原 dtype、shape 和语义。
-所有种子的同一渗透率都使用 seed 42 原训练集 input scaler；所有目标共用原 full target scaler，
-不拟合任何新 scaler。每一个 NPZ 的所有数组都会与 CSV 推导值精确比较，因此全量标签在
-所有种子和渗透率间相同。`day_index` 仍是 Monday=0 的星期索引。
+每个 dataset 用 sampling seed 42 的训练窗口拟合自己的 input scaler。所有 dataset 共用
+`shared/target_normalization.json` 里由新版 full 训练标签拟合的 target scaler。
+旧 cumsum 口径的 scaler、窗口和序列标签在 `archive/cumsum_stock_v1/`。
+全量标签在同一物理量版本下跨种子、跨 dataset 相同。`day_index` 仍是 Monday=0 的星期索引。
 
 全量 CSV 和图只引用权威 `training_data_3s/full_flow/r-level`、`training_data_3s/graph`，
 不在各 seed 下复制；NPZ 内保留读取接口要求的 `y/y_raw` 数组。
@@ -302,7 +306,7 @@ training_data_3s/graph/
 
 MR-level 不产生新的物理量：每天、每个状态把 R-level 矩阵（1406 列道路）和 M-level 矩阵（3877 列 Movement）按 `mr_graph.npz` 的节点顺序直接按列拼接，`X_MR[t] = [X_R[t], X_M[t]]`。不读 FCD，不重新抽样，不归一化。CSV 仍是 `time_bin,start_time,<node_ids...>`，288 行，5283 个数据列，列名就是 MR 的 `node_ids`：前 1406 列 `R::<edge_id>`，后 3877 列 Movement ID。
 
-R 列是道路存量，M 列是连接区（via 车道）存量，两者不能相加，也不要求 R、M 总量相等。守恒只逐节点检查：`N_end = N_start + inflow - outflow`、`N_start[t+1] = N_end[t]`、`N_start[0] = 0`、无负值。
+R 列在已归档的 cumsum 口径里是道路存量，现行 R 级 `independent_fcd_v1` 改为边界快照，不再要求 `N_end = N_start + inflow - outflow`。M 列仍是连接区存量，并且 M/MR 文件还是旧口径，这次没有重生成。两类存量不能相加。M 与旧 MR 仍逐节点检查 `N_end = N_start + inflow - outflow`。
 
 | 脚本 | 输入 | 输出 |
 | --- | --- | --- |

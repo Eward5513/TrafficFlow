@@ -195,9 +195,7 @@ def build_day(day_name: str, edge_ids: np.ndarray) -> tuple[np.ndarray, dict[str
         path = FULL_ROOT / day_name / f"{name}.csv"
         states[name] = load_aligned_matrix(path, ids)
         digests[name] = sha256_file(path)
-    within = states["accumulation_start"] + states["inflow"] - states["outflow"]
-    if not np.array_equal(within, states["accumulation_end"]):
-        raise RuntimeError(f"{day_name} failed N_end = N_start + inflow - outflow")
+    within = states["accumulation_end"] - states["accumulation_start"] - states["inflow"] + states["outflow"]
     continuity = bool(np.array_equal(states["accumulation_start"][1:], states["accumulation_end"][:-1]))
     if not continuity:
         raise RuntimeError(f"{day_name} failed N_start[t+1] = N_end[t]")
@@ -206,7 +204,8 @@ def build_day(day_name: str, edge_ids: np.ndarray) -> tuple[np.ndarray, dict[str
     if not np.array_equal(full_raw.astype(np.int64), full):
         raise RuntimeError(f"{day_name} counts are not exactly representable in float32")
     stats = {
-        "conservation_within_slot": True,
+        "conservation_within_slot": bool(np.all(within == 0)),
+        "residual_nonzero_cells": int(np.count_nonzero(within)),
         "continuity_across_slots": continuity,
         "channel_totals": {name: int(states[name].sum()) for name in CHANNELS},
         "channel_max": {name: int(states[name].max()) for name in CHANNELS},
@@ -473,6 +472,7 @@ def build_manifest(
         "sample_counts": dict(EXPECTED_COUNTS),
         "rates": list(RATES),
         "source_package": package,
+        "physical_definition_version": "independent_fcd_v1",
         "normalization": {
             "file": "../state_normalization.json",
             "sha256": package["state_normalization_sha256"],

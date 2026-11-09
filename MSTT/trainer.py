@@ -207,6 +207,14 @@ def assert_conservation_checkpoint(payload, config, *, normalization_sha256=None
             raise ReimplementationError("checkpoint conservation coefficients/MLP config differ; start an independent run")
         if normalization_sha256 is not None and payload.get("normalization_sha256") != normalization_sha256:
             raise ReimplementationError("checkpoint target scaler SHA256 differs from state_normalization.json")
+    expected_version = config.get("physical_definition_version")
+    saved_version = payload.get("physical_definition_version")
+    if saved_version is None and isinstance(payload.get("config"), Mapping):
+        saved_version = payload["config"].get("physical_definition_version")
+    if expected_version and saved_version != expected_version:
+        raise ReimplementationError(
+            f"checkpoint physical_definition_version {saved_version!r} does not match data {expected_version!r}"
+        )
     saved_value_mode = checkpoint_value_embedding_mode(payload)
     requested_value_mode = str(config.get("value_embedding_mode", "joint_linear"))
     if saved_value_mode != requested_value_mode:
@@ -583,6 +591,7 @@ def train_task(
             "graph_sha256": run.graph_info["graph_sha256"],
             "data_file_sha256": data_sha,
             "normalization_sha256": run.package["state_normalization_sha256"],
+            "physical_definition_version": cfg.get("physical_definition_version"),
             "code_version": CODE_VERSION,
         }
 

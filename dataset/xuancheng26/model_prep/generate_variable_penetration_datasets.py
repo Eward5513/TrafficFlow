@@ -39,6 +39,7 @@ from variable_penetration import (  # noqa: E402
     build_schedule,
     population_from_tripinfo,
     sample_day,
+    SEGMENT_SECONDS,
     schedule_sha256,
     segments_for_date,
 )
@@ -86,10 +87,9 @@ def load_config(path: Path) -> dict:
             if item["dataset_id"] != expected:
                 raise RuntimeError(f"dataset_id {item['dataset_id']} != {expected}")
         item["observation_key"] = key
-        if item["mode"] == "day" and int(item["segment_seconds"]) != 86400:
-            raise RuntimeError("day mode uses one segment of 86400 seconds")
-        if item["mode"] == "2h" and int(item["segment_seconds"]) != 7200:
-            raise RuntimeError("2h mode uses 7200-second segments")
+        expected_seconds = SEGMENT_SECONDS.get(item["mode"])
+        if expected_seconds is None or int(item["segment_seconds"]) != expected_seconds:
+            raise RuntimeError(f"{item['mode']} must use {expected_seconds} second segments")
     return payload
 
 
@@ -346,166 +346,8 @@ def _network_ratio(partial, full_matrix):
 
 
 def process_flow_day(task: dict) -> dict:
-    import numpy as np
-    from xml.parsers import expat
+    raise RuntimeError("variable flow is written by independent_states.py scan; this cumsum path is retired")
 
-    try:
-        date = task["date"]
-        edges = RUNTIME["edges"]
-        lane_to_edge = RUNTIME["lane_to_edge"]
-        internal = RUNTIME["internal"]
-        full_dir = Path(RUNTIME["full_root"]) / date
-        groups = []
-        for spec in task["datasets"]:
-            for seed in task["sampling_seeds"]:
-                path = Path(spec["vehicle_paths"][str(seed)])
-                include = set(read_ids(path))
-                groups.append({
-                    "dataset_id": spec["dataset_id"],
-                    "mode": spec["mode"],
-                    "seed": seed,
-                    "key": spec["observation_key"],
-                    "include": include,
-                    "directory": _group_dir(Path(spec["dataset_root"]), seed, spec["observation_key"], date),
-                    "schedule_sha256": spec["schedule_sha256"],
-                })
-        audit_path = Path(task["datasets"][0]["dataset_root"]) / "audit" / "days" / f"{date}.json"
-        # Each dataset keeps its own day audit. A shared scan still verifies each one.
-        if all(_flow_matches(group["directory"], edges, None) for group in groups) and not task.get("force"):
-            verified = []
-            for group in groups:
-                inflow = full.read_flow_csv(group["directory"] / "inflow.csv", edges)
-                outflow = full.read_flow_csv(group["directory"] / "outflow.csv", edges)
-                full_in = full.read_flow_csv(full_dir / "inflow.csv", edges)
-                full_out = full.read_flow_csv(full_dir / "outflow.csv", edges)
-                if np.any(inflow > full_in) or np.any(outflow > full_out):
-                    raise RuntimeError(f"{date} stored partial exceeds full")
-                full.accumulate_states(inflow, outflow, edges, f"{group['dataset_id']}:{group['seed']}:{date}")
-                verified.append({"dataset_id": group["dataset_id"], "sampling_seed": group["seed"], "action": "skipped", "sha256": _flow_digest(group["directory"])})
-            return {"date": date, "ok": True, "action": "skipped", "fcd_scans": 0, "groups": verified, "fcd_missing_tripinfo": None}
-        population = population_from_tripinfo(Path(task["tripinfo"]))
-        if population["conflicts"]:
-            raise PopulationConflict(f"{date} {population['conflicts']} {population['counts']}")
-        population_ids = population["all_ids"]
-        arrivals = full.load_arrivals(Path(task["tripinfo"]))
-        fcd_path = full.prefer_xml(Path(task["fcd_dir"]), f"fcd_{date}")
-        for group in groups:
-            group["entry"] = np.zeros((full.N_BINS, len(edges)), dtype=np.int64)
-            group["exit"] = np.zeros((full.N_BINS, len(edges)), dtype=np.int64)
-            group["states"] = {}
-            group["seen"] = set()
-            group["counts"] = {"entry": 0, "exit": 0, "unknown": 0, "unresolved": 0, "final_exit": 0}
-        members: dict[str, list[dict]] = {}
-        for group in groups:
-            for vehicle_id in group["include"]:
-                members.setdefault(vehicle_id, []).append(group)
-        missing: set[str] = set()
-        clock = {"time": 0.0}
-
-        def start(name: str, attrs) -> None:
-            if name == "timestep":
-                clock["time"] = float(attrs.get("time", "0"))
-                return
-            if name != "vehicle":
-                return
-            vehicle_id = attrs.get("id", "")
-            if not vehicle_id:
-                return
-            targets = members.get(vehicle_id)
-            if not targets:
-                if vehicle_id not in population_ids:
-                    missing.add(vehicle_id)
-                return
-            lane = attrs.get("lane", "")
-            if lane in lane_to_edge:
-                kind, column = "real", RUNTIME["edge_index"][lane_to_edge[lane]]
-            elif lane in internal:
-                kind, column = "internal", None
-            else:
-                kind, column = "unknown", None
-            for group in targets:
-                full.observe(
-                    group["states"], group["seen"], vehicle_id, clock["time"], kind, column,
-                    group["entry"], group["exit"], group["counts"],
-                )
-
-        full.READ_BYTES = 64 << 20
-        parser = expat.ParserCreate()
-        parser.StartElementHandler = start
-        read_bytes = 0
-        next_report = 4 << 30
-        for block in full.read_chunks(fcd_path):
-            read_bytes += len(block)
-            parser.Parse(block, False)
-            if read_bytes >= next_report:
-                log(f"[{date}] fcd {read_bytes / 1024**3:.1f} GiB groups={len(groups)}")
-                next_report += 4 << 30
-        parser.Parse(b"", True)
-        for group in groups:
-            full.impute_final_exits(group["states"], arrivals, group["exit"], group["counts"])
-        scans = 1
-        cross = None
-        if task.get("cross_check"):
-            probe = groups[0]
-            entry, exit_flow, _counts, _seen = full.stream_fcd(
-                fcd_path, edges, lane_to_edge, internal, arrivals, date, include=probe["include"],
-            )
-            scans += 1
-            if not np.array_equal(entry, probe["entry"]) or not np.array_equal(exit_flow, probe["exit"]):
-                raise RuntimeError(f"{date} multi-group dispatch disagrees with stream_fcd({probe['dataset_id']} seed {probe['seed']})")
-            cross = {"dataset_id": probe["dataset_id"], "sampling_seed": probe["seed"], "matched": True}
-        full_states = {name: full.read_flow_csv(full_dir / f"{name}.csv", edges) for name in CHANNELS}
-        summaries = []
-        for group in groups:
-            if np.any(group["entry"] > full_states["inflow"]) or np.any(group["exit"] > full_states["outflow"]):
-                raise RuntimeError(f"{date} {group['dataset_id']} seed {group['seed']} exceeds full flow")
-            label = f"{group['dataset_id']}:seed{group['seed']}:{date}"
-            action = publish_flow(group["directory"], group["entry"], group["exit"], edges, label)
-            stored = {name: full.read_flow_csv(group["directory"] / f"{name}.csv", edges) for name in CHANNELS}
-            start, end = full.accumulate_states(stored["inflow"], stored["outflow"], edges, label)
-            if not np.array_equal(start, stored["accumulation_start"]) or not np.array_equal(end, stored["accumulation_end"]):
-                raise RuntimeError(f"{label} accumulation diverged")
-            if np.any(stored["accumulation_start"] > full_states["accumulation_start"]) or np.any(stored["accumulation_end"] > full_states["accumulation_end"]):
-                raise RuntimeError(f"{label} accumulation exceeds full")
-            network = {}
-            cells = {}
-            for name in CHANNELS:
-                partial_sum, full_sum, ratio = _network_ratio(stored[name], full_states[name])
-                network[name] = {
-                    "partial_sum": partial_sum.tolist(),
-                    "full_sum": full_sum.tolist(),
-                    "ratio_finite": int(np.isfinite(ratio).sum()),
-                    "ratio_missing": int((~np.isfinite(ratio)).sum()),
-                }
-                cells[name] = _cell_summary(stored[name], full_states[name])
-            summaries.append({
-                "dataset_id": group["dataset_id"],
-                "sampling_seed": group["seed"],
-                "action": action,
-                "sha256": _flow_digest(group["directory"]),
-                "counts": group["counts"],
-                "seen_vehicles": len(group["seen"]),
-                "network": network,
-                "cells": cells,
-            })
-        if missing:
-            raise PopulationConflict(f"{date} FCD车辆缺少tripinfo: {len(missing)} 例如 {sorted(missing)[:8]}")
-        by_dataset: dict[str, list] = {}
-        for item in summaries:
-            by_dataset.setdefault(item["dataset_id"], []).append(item)
-        for spec in task["datasets"]:
-            write_json(Path(spec["dataset_root"]) / "audit" / "days" / f"{date}.json", {
-                "date": date,
-                "schedule_sha256": spec["schedule_sha256"],
-                "fcd_missing_tripinfo": 0,
-                "cross_check": cross,
-                "groups": by_dataset.get(spec["dataset_id"], []),
-            })
-        slim = [{key: value for key, value in item.items() if key not in {"network", "cells"}} for item in summaries]
-        log(f"[{date}] flow groups={len(slim)} scans={scans} missing_tripinfo=0")
-        return {"date": date, "ok": True, "action": "scanned", "fcd_scans": scans, "fcd_missing_tripinfo": 0, "cross_check": cross, "groups": slim, "audit_hint": str(audit_path)}
-    except Exception:
-        return {"date": task["date"], "ok": False, "error": traceback.format_exc(limit=8)}
 
 
 def _run(function, tasks: list[dict], workers: int) -> list[dict]:
@@ -768,28 +610,19 @@ def main(argv: list[str] | None = None) -> int:
         RUNTIME.update(edges=edges, lane_to_edge=lane_to_edge, internal=internal, edge_index={edge: index for index, edge in enumerate(edges)},
                        full_root=str(training_root / "full_flow" / "r-level"), fcd_root=str(fcd_root))
         if args.stage in {"all", "flow"}:
-            flow_tasks = []
-            for task in vehicle_tasks:
-                flow_tasks.append({
-                    **task,
-                    "fcd_dir": str(fcd_root / task["date"]),
-                    "cross_check": task["date"] == args.cross_check_date,
-                    "datasets": [{
-                        **spec,
-                        "dataset_root": str(dataset_root(training_root, spec["dataset_id"])),
-                        "observation_key": spec["observation_key"],
-                        "schedule_sha256": spec["schedule"]["schedule_sha256"],
-                    } for spec in task["datasets"]],
-                })
-            flow_rows = _run(process_flow_day, flow_tasks, resources["workers"])
-            failed = [row for row in flow_rows if not row.get("ok")]
-            scans = sum(int(row.get("fcd_scans") or 0) for row in flow_rows)
-            _save_stage(training_root, config["datasets"], "flow", {"complete_dataset": complete and not failed, "fcd_scans": scans, "rows": flow_rows, "resources": resources}, complete=complete and not failed)
-            if failed:
-                for row in failed:
-                    log(f"FLOW FAIL {row['date']} {row.get('error','')[:800]}")
+            from independent_states import scan_all
+            scan_argv = [
+                "--training-root", str(training_root),
+                "--fcd-root", str(fcd_root),
+                "--net-file", str(args.net_file),
+                "--workers", str(resources["workers"]),
+            ]
+            if args.dates:
+                scan_argv.extend(["--dates", *dates])
+            if scan_all(scan_argv):
                 return 1
-            log(f"flow ok scans={scans}")
+            _save_stage(training_root, config["datasets"], "flow", {"complete_dataset": complete, "writer": "independent_states.scan", "resources": resources}, complete=complete)
+            log("flow ok via independent scan")
         if args.stage == "flow":
             return 0
         if args.stage in {"all", "scaler", "windows"}:

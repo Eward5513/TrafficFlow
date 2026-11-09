@@ -43,6 +43,11 @@ def configure_sampling(config: Mapping, *, model_name: str | None = None) -> dic
     normalization = window / "state_normalization.json"
     if normalization.is_file():
         cfg["normalization_sha256"] = sha256_file(normalization)
+        normalization_payload = load_json(normalization)
+        if normalization_payload.get("physical_definition_version"):
+            cfg["physical_definition_version"] = normalization_payload["physical_definition_version"]
+            if normalization_payload.get("definition_sha256"):
+                cfg["definition_sha256"] = normalization_payload["definition_sha256"]
     for key, name in (("split_manifest", "split_manifest.json"), ("normalization", "state_normalization.json"),
                       ("data_validation", "validation_summary.json"), ("node_mapping", "node_mapping.csv")):
         cfg[key] = str(window / name)
@@ -155,6 +160,8 @@ def sampling_rate_dir(output_root, config: Mapping, rate) -> Path:
         str(config.get("target_type") or "inflow"),
         rate,
         int(config.get("model_seed", config.get("seed", 42))),
+        physical_version=config.get("physical_definition_version"),
+        dataset_id=str(config.get("dataset_id") or "") or None,
     )
 
 

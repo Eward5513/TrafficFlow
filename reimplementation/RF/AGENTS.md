@@ -3,8 +3,10 @@
 Othman et al., ITSC 2022, adapted to Xuancheng26. This is not a neural model
 and does not use a GPU or the road adjacency.
 
-- Read auxiliary features from `<training-root>/config/RF/`. The 3s root is
-  `xuancheng26/training_data_3s`.
+- Read speed features from
+  `datasets/<dataset_id>/sampling_seeds/seed_<s>/model_prepared/RF/<key>/<date>.npz`.
+  Static road attributes stay in `<training-root>/config/RF/road_attributes.csv`.
+  Do not reuse one penetration's speed cube for another sampling seed.
 - Do not rewrite partial flow, full flow, FCD, or other models' results.
 - Train on sampling seed 42 partial flow. Validate and test seeds 42–46
   separately, then average the raw metrics. Fit the feature scaler on seed 42

@@ -108,10 +108,8 @@ def check_states_date(dataset: Path, schedule: dict, training_root: Path, date: 
             failures.append(f"missing states {directory}")
             continue
         stored = {name: full.read_flow_csv(directory / f"{name}.csv", edges) for name in CHANNELS}
-        try:
-            full.accumulate_states(stored["inflow"], stored["outflow"], edges, f"{dataset.name}:{seed}:{date}")
-        except RuntimeError as exc:
-            failures.append(str(exc))
+        if not np.array_equal(stored["accumulation_start"][1:], stored["accumulation_end"][:-1]):
+            failures.append(f"{dataset.name} {date} seed {seed} adjacent boundary occupancy disagrees")
         for name in CHANNELS:
             if np.any(stored[name] > full_states[name]):
                 failures.append(f"{dataset.name} {date} seed {seed} {name} exceeds full")
