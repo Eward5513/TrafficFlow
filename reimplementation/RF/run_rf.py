@@ -77,13 +77,13 @@ def _json_default(value):
     raise TypeError(type(value).__name__)
 
 
-def _summarize(run_dir: Path, rates: list[str], elapsed: float, workers: int, model_seed: int = 42) -> None:
+def _summarize(run_dir: Path, rate_dirs: dict[str, Path], elapsed: float, workers: int, model_seed: int = 42) -> None:
     rows = []
-    for rate in rates:
-        metrics_path = run_dir / rate / f"seed_{model_seed}" / "metrics" / "test_metrics.json"
-        validation_path = run_dir / rate / f"seed_{model_seed}" / "metrics" / "validation_metrics.json"
-        status_path = run_dir / rate / f"seed_{model_seed}" / "status.json"
-        config_path = run_dir / rate / f"seed_{model_seed}" / "config.json"
+    for rate, directory in rate_dirs.items():
+        metrics_path = directory / "metrics" / "test_metrics.json"
+        validation_path = directory / "metrics" / "validation_metrics.json"
+        status_path = directory / "status.json"
+        config_path = directory / "config.json"
         status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.is_file() else {"status": "MISSING", "seconds": None}
         if not metrics_path.is_file() or not validation_path.is_file():
             rows.append(
@@ -104,7 +104,7 @@ def _summarize(run_dir: Path, rates: list[str], elapsed: float, workers: int, mo
         fit_seconds = None
         if config_path.is_file():
             fit_seconds = json.loads(config_path.read_text(encoding="utf-8")).get("fit_seconds")
-        discard_path = run_dir / rate / f"seed_{model_seed}" / "model_discarded.json"
+        discard_path = directory / "model_discarded.json"
         discarded_bytes = None
         if discard_path.is_file():
             discarded_bytes = json.loads(discard_path.read_text(encoding="utf-8")).get("total_bytes")
@@ -172,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--evaluate-only", action="store_true")
     parser.add_argument("--run-id", default=None)
+    parser.add_argument("--experiment-id", default=None)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--kmeans-n-init", type=int, default=10)
@@ -208,7 +209,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from data_root import model_report_dir, new_run_id, sampling_run_results_dir
     launch_id = args.run_id or new_run_id("RF", str(args.dataset_id or "fixed_uniform"))
-    experiment_id = "baseline" if int(args.n_clusters) == 50 else f"clusters_{int(args.n_clusters)}"
+    experiment_id = args.experiment_id or (
+        "baseline" if int(args.n_clusters) == 50 else f"clusters_{int(args.n_clusters)}"
+    )
     run_dir = model_report_dir("RF") / launch_id
     previous = run_dir / "experiment_config.json"
     if previous.is_file() and json.loads(previous.read_text()).get("evaluation_sampling_seeds") != [42,43,44,45,46]:
@@ -266,24 +269,34 @@ def main(argv: list[str] | None = None) -> int:
     started = time.perf_counter()
     context = mp.get_context("spawn")
     processes = []
+    rate_dirs: dict[str, Path] = {}
     for rate in rates:
+        rate_dir = sampling_run_results_dir(
+            RESULTS_ROOT, args.input_type, args.target_type, rate, args.seed,
+            physical_version="independent_fcd_v1",
+            dataset_id=str(args.dataset_id or "fixed_uniform"),
+            model_name="RF",
+            experiment_id=experiment_id,
+            run_id=launch_id,
+        )
+        rate_dirs[rate] = rate_dir
         config = {
             "penetration": rate,
+            "rates": [rate],
             "run_dir": str(run_dir),
-            "rate_dir": str(sampling_run_results_dir(
-                RESULTS_ROOT, args.input_type, args.target_type, rate, args.seed,
-                physical_version="independent_fcd_v1",
-                dataset_id=str(args.dataset_id or "fixed_uniform"),
-                model_name="RF",
-                experiment_id=experiment_id,
-                run_id=launch_id,
-            )),
+            "rate_dir": str(rate_dir),
             "input_type": args.input_type,
             "target_type": args.target_type,
             "seed": args.seed,
             "model_seed": args.seed,
             "train_sampling_seed": 42,
             "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
+            "dataset_id": str(args.dataset_id),
+            "training_root": str(training_root),
+            "experiment_id": experiment_id,
+            "run_id": launch_id,
+            "physical_definition_version": "independent_fcd_v1",
+            "model_name": "RF",
             "n_jobs": args.n_jobs_per_model,
             "n_clusters": args.n_clusters,
             "n_estimators": 50,
@@ -314,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
                 _log(f"{rate} exit={process.exitcode}")
         running = still
     elapsed = time.perf_counter() - started
-    _summarize(run_dir, rates, elapsed, workers, args.seed)
+    _summarize(run_dir, rate_dirs, elapsed, workers, args.seed)
     failed = [rate for rate, code in exit_codes.items() if code != 0]
     _log(f"done elapsed_seconds={elapsed:.1f} failed={failed}")
     return 1 if failed else 0

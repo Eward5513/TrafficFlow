@@ -235,8 +235,8 @@ def main() -> None:
         print(json.dumps({k: payload[k] for k in ("status", "training_loss", "prediction_shape")}, indent=2))
         return
     data_info = collect_data_info(data_root, config, project_root=PROJECT_ROOT)
-    from data_root import model_report_dir
-    metadata_root = model_report_dir('stid')
+    from reimplementation.common.data.sampling_seeds import task_metadata_dir
+    metadata_root = task_metadata_dir(output_root, config)
     metadata_root.mkdir(parents=True, exist_ok=True)
     atomic_write_json(metadata_root / "resolved_config.json", config)
     atomic_write_json(metadata_root / "environment.json", {"code_version": CODE_VERSION, **runtime_roots()})

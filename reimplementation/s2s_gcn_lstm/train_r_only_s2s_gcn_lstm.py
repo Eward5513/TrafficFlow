@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--normalization", type=Path, default=None)
     parser.add_argument("--split-manifest", dest="split_manifest", type=Path, default=None)
     parser.add_argument("--output-root", dest="output_root", type=Path, default=None)
-    parser.add_argument("--rates", type=int, nargs="+", default=None)
+    parser.add_argument("--rates", nargs="+", default=None, help="fixed pXX/integer, or a dataset observation key such as p10_p20")
     parser.add_argument("--n-his", dest="n_his", type=int, default=None)
     parser.add_argument("--output-steps", dest="output_steps", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
@@ -187,8 +187,8 @@ def main() -> None:
         if output_root == path or path in output_root.parents:
             raise ReimplementationError(f"refusing to write Seq2seq GCN-LSTM outputs into {path}")
     data_info = collect_data_info(data_root, config, project_root=PROJECT_ROOT)
-    from data_root import model_report_dir
-    metadata_root = model_report_dir('s2s_gcn_lstm')
+    from reimplementation.common.data.sampling_seeds import task_metadata_dir
+    metadata_root = task_metadata_dir(output_root, config)
     metadata_root.mkdir(parents=True, exist_ok=True)
     serializable = {key: value for key, value in config.items()}
     atomic_write_json(metadata_root / "resolved_config.json", serializable)

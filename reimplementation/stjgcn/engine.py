@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from torch.optim import Adam
 
-from data_root import SAMPLING_SEEDS, sampling_run_results_dir
+from data_root import SAMPLING_SEEDS
 from reimplementation.stjgcn.graph import load_predefined_graph
 from reimplementation.stjgcn.losses import STJGCNRawLoss
 from reimplementation.stjgcn.model.stjgcn import STJGCN
@@ -255,7 +255,7 @@ def run_single_rate(
     data_info = finalize_state_scaler(data_info, config, data_root)
     tag = rate_tag(rate)
     seed = int(config["seed"])
-    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    rate_dir = sampling_rate_dir(output_root, config, tag)
     protect_historical_results(rate_dir)
     if protocol_limit is None and _rate_complete(rate_dir) and not overwrite and resume_path is None:
         print(f"[stjgcn] stage=skip rate={tag} dir={rate_dir}", flush=True)

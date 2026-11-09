@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
+import os
 from pathlib import Path
 from typing import Mapping
 
@@ -134,21 +136,73 @@ def validate_sampling_package(root: Path, *, n_his: int, num_nodes: int, rates: 
     if len(nodes) != num_nodes or len(set(nodes)) != num_nodes:
         raise ValueError("invalid node mapping")
     counts = expected_split_counts(manifest)
-    hashes = {}
+    signature = []
     for rate in rates:
         for split in splits:
-            digest = hashlib.sha256()
             for day in manifest[split]:
                 for kind in (*CHANNELS, "all"):
                     path = root / rate / split / day / f"{kind}.npz"
-                    digest.update(f"{day}/{kind}:".encode())
-                    digest.update(sha256_file(path).encode())
-            # Stable logical key retained in checkpoint metadata, not an input filename.
-            hashes[f"{rate}/{split}.npz"] = digest.hexdigest()
+                    stat = path.stat()
+                    signature.append([str(path.relative_to(root)), int(stat.st_size), int(stat.st_mtime_ns)])
+    for name in ("state_normalization.json", "split_manifest.json", "state_window_manifest.json", "validation_summary.json", "node_mapping.csv"):
+        path = root / name
+        stat = path.stat()
+        signature.append([name, int(stat.st_size), int(stat.st_mtime_ns)])
+    cache_key = {
+        "n_his": int(n_his),
+        "num_nodes": int(num_nodes),
+        "rates": [str(item) for item in rates],
+        "splits": [str(item) for item in splits],
+        "files": signature,
+    }
+    cache_path = root / ".validation_cache.json"
+    cached = None
+    if cache_path.is_file():
+        try:
+            loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = None
+        if isinstance(loaded, dict) and loaded.get("key") == cache_key and isinstance(loaded.get("hashes"), dict):
+            cached = loaded
+    hashes = {}
+    if cached is not None:
+        hashes = {str(key): str(value) for key, value in cached["hashes"].items()}
+        normalization_sha256 = str(cached["normalization_sha256"])
+        split_manifest_sha256 = str(cached["split_manifest_sha256"])
+    else:
+        for rate in rates:
+            for split in splits:
+                digest = hashlib.sha256()
+                for day in manifest[split]:
+                    for kind in (*CHANNELS, "all"):
+                        path = root / rate / split / day / f"{kind}.npz"
+                        digest.update(f"{day}/{kind}:".encode())
+                        digest.update(sha256_file(path).encode())
+                # Stable logical key retained in checkpoint metadata, not an input filename.
+                hashes[f"{rate}/{split}.npz"] = digest.hexdigest()
+        normalization_sha256 = sha256_file(root / "state_normalization.json")
+        split_manifest_sha256 = sha256_file(root / "split_manifest.json")
+        temporary = cache_path.with_name(f".validation_cache.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(
+                    {
+                        "key": cache_key,
+                        "hashes": hashes,
+                        "normalization_sha256": normalization_sha256,
+                        "split_manifest_sha256": split_manifest_sha256,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(temporary, cache_path)
+        except OSError:
+            temporary.unlink(missing_ok=True)
     mean, std = read_state_target_scaler(root, "inflow")
     return dict(sample_counts=counts, mean_y_full=mean, std_y_full=std, node_ids=nodes,
-                file_hashes=hashes, normalization_sha256=sha256_file(root / "state_normalization.json"),
-                split_manifest_sha256=sha256_file(root / "split_manifest.json"),
+                file_hashes=hashes, normalization_sha256=normalization_sha256,
+                split_manifest_sha256=split_manifest_sha256,
                 target_mode="last-observed-step", did_not_refit_scaler=True,
                 prepared_data_report_status="passed", data_validation_status="passed",
                 split_manifest_target_mode="last-observed-step", split_sample_keys_disjoint=True,
@@ -173,6 +227,16 @@ def sampling_rate_dir(output_root, config: Mapping, rate) -> Path:
         experiment_id=str(config.get("experiment_id") or "baseline"),
         run_id=str(run_id),
     )
+
+
+def task_metadata_dir(output_root, config: Mapping) -> Path:
+    """Per-task logs live in the canonical run directory when the process has one rate."""
+    from data_root import model_report_dir
+
+    rates = [str(item) for item in (config.get("rates") or [])]
+    if len(rates) == 1 and config.get("run_id"):
+        return sampling_rate_dir(output_root, config, rates[0])
+    return model_report_dir(str(config.get("model_name") or ""))
 
 
 def protect_historical_results(root: Path) -> None:

@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--normalization", type=Path, default=None)
     parser.add_argument("--split-manifest", type=Path, default=None)
     parser.add_argument("--output-root", type=Path, default=None)
-    parser.add_argument("--rates", type=int, nargs="+", default=None)
+    parser.add_argument("--rates", nargs="+", default=None, help="fixed pXX/integer, or a dataset observation key such as p10_p20")
     parser.add_argument("--rate", type=int, default=None)
     parser.add_argument("--n-his", type=int, default=None)
     parser.add_argument("--target-mode", type=str, default=None)
@@ -118,8 +118,8 @@ def main() -> None:
     adjacency = resolve_path(PROJECT_ROOT, config["weighted_adjacency"])
     r_nodes = resolve_path(PROJECT_ROOT, config["r_nodes"])
     output_root = resolve_training_output(PROJECT_ROOT, config["output_root"], model_name="stgcn")
-    from data_root import model_report_dir
-    metadata_root = model_report_dir('stgcn')
+    from reimplementation.common.data.sampling_seeds import task_metadata_dir
+    metadata_root = task_metadata_dir(output_root, config)
     metadata_root.mkdir(parents=True, exist_ok=True)
     protected = [adjacency, r_nodes, data_root / "state_normalization.json"]
     before = {str(path): sha256_file(path) for path in protected if path.is_file()}

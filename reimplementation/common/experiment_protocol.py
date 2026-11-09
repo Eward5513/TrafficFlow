@@ -43,11 +43,26 @@ PREDICTION_ARRAY_KEYS = (
 )
 
 
+def accepted_baseline_rate(tag: str) -> bool:
+    """Fixed pXX tags, or an observation key declared by the bound dataset."""
+    text = str(tag)
+    if text in FORBIDDEN_RATES:
+        return False
+    if text in OFFICIAL_RATES:
+        return True
+    from reimplementation.common.data.r_only_npz_dataset import is_bound_observation_key
+
+    return is_bound_observation_key(text)
+
+
 def assert_official_rates(rates: Sequence[str | int]) -> list[str]:
     tags = [rate_tag(item) for item in rates]
-    illegal = [tag for tag in tags if tag in FORBIDDEN_RATES or tag not in OFFICIAL_RATES]
+    illegal = [tag for tag in tags if not accepted_baseline_rate(tag)]
     if illegal:
-        raise ReimplementationError(f"official baseline forbids rates {illegal}; allowed={list(OFFICIAL_RATES)}")
+        raise ReimplementationError(
+            f"baseline rates {illegal} are not a fixed penetration or a declared observation key; "
+            f"fixed={list(OFFICIAL_RATES)}"
+        )
     return tags
 
 
@@ -313,8 +328,8 @@ def build_run_metadata(
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     tag = rate_tag(penetration)
-    if tag not in OFFICIAL_RATES:
-        raise ReimplementationError(f"penetration {tag} is not an official baseline rate")
+    if not accepted_baseline_rate(tag):
+        raise ReimplementationError(f"penetration {tag} is not a fixed penetration or a declared observation key")
     timing = clock.summary(int(epochs_executed))
     payload: dict[str, Any] = {
         "model": str(model),
@@ -379,8 +394,8 @@ def finalize_completed_rate(
     if payload.get("physical_gpu_id") is None and str(payload.get("logical_device", "")).startswith("cuda"):
         raise ReimplementationError("physical_gpu_id missing while training on CUDA")
     tag = str(payload.get("penetration") or payload.get("penetration_rate"))
-    if tag not in OFFICIAL_RATES:
-        raise ReimplementationError(f"completed rate {tag} is not official")
+    if not accepted_baseline_rate(tag):
+        raise ReimplementationError(f"completed rate {tag} is not a fixed penetration or a declared observation key")
     if history_metric_key:
         expected_best = best_epoch_from_history(history, history_metric_key, rule=history_rule)
         if int(payload["best_epoch"]) != int(expected_best):

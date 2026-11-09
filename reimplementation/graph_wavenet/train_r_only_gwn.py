@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--normalization", type=Path, default=None)
     parser.add_argument("--split-manifest", type=Path, default=None)
     parser.add_argument("--output-root", type=Path, default=None)
-    parser.add_argument("--rates", type=int, nargs="+", default=None)
+    parser.add_argument("--rates", nargs="+", default=None, help="fixed pXX/integer, or a dataset observation key such as p10_p20")
     parser.add_argument("--rate", type=int, default=None)
     parser.add_argument("--seq-length", dest="seq_length", type=int, default=None)
     parser.add_argument("--horizon", type=int, default=None)
@@ -182,8 +182,8 @@ def main() -> None:
     dcrnn_output = PROJECT_ROOT / "reimplementation" / "dcrnn" / "experiments" / "r_only"
     if output_root.resolve() == dcrnn_output.resolve():
         raise ReimplementationError("GWN output_root must not be the DCRNN experiment directory")
-    from data_root import model_report_dir
-    metadata_root = model_report_dir('graph_wavenet')
+    from reimplementation.common.data.sampling_seeds import task_metadata_dir
+    metadata_root = task_metadata_dir(output_root, config)
     metadata_root.mkdir(parents=True, exist_ok=True)
     protected = [
         adjacency,

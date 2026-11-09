@@ -17,7 +17,7 @@ import torch
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
 
-from data_root import SAMPLING_SEEDS, sampling_run_results_dir
+from data_root import SAMPLING_SEEDS
 from reimplementation.asttn.embedding import load_spatial_embedding
 from reimplementation.asttn.losses import MaskedMAERawLoss
 from reimplementation.asttn.model.model_adp import ASTTN
@@ -248,7 +248,7 @@ def run_single_rate(
     data_info = finalize_state_scaler(data_info, config, data_root)
     tag = rate_tag(rate)
     seed = int(config["seed"])
-    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    rate_dir = sampling_rate_dir(output_root, config, tag)
     protect_historical_results(rate_dir)
     if protocol_limit is None and _rate_complete(rate_dir) and not overwrite and resume_path is None:
         print(f"[asttn] stage=skip rate={tag} dir={rate_dir}", flush=True)

@@ -51,7 +51,7 @@ SUMO 全天仿真（人工路网 + 晚高峰 WAUT）
 model_prep/  早期 R-level 脚本默认 fcd_data/；多种子 v2 和 M/MR 脚本默认 3s 批次
         |
         v
-training_data/  全量流量、抽样流量、路网图、12 步窗口
+training_data_3s/  全量流量、抽样流量、路网图、12 步窗口
         |
         v
 reimplementation/  各模型训练
@@ -120,7 +120,7 @@ python3 run_fcd_simulations_3s.py --smoke-test
    - `generate_stjgcn_predefined_graph.py`（有向中心距离上的 PeMSD7 预定义图，写到 `graph/stjgcn/`）
 8. `generate_training_support_files.py`：节点表、校验报告和各模型配置。
 9. `prepare_rf_features.py`：随机森林的辅助特征。它不训练模型。
-10. `run_all_models_training.py`：调用 `reimplementation/` 里的训练脚本。
+10. `../run_variable_baselines.py`：12 个基线（不含 MSTT、PDFormer）× 4 个波动频率 × I2I/A2A/A2I。默认同时占用 8 张空卡，每天 09:00 把上限调回 4。
 
 ```bash
 cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
@@ -144,11 +144,10 @@ python3 generate_r_level_full_flow.py \
 
 ## 五种子全渗透率数据（3 秒批次）
 
-当前唯一的车辆采样和流量入口是 `training_data_3s/sampling_seeds/`。
-训练只用 seed 42。验证和测试分别读取 42–46，再对每份指标取平均。
-不要读已经删除的 `training_data_3s/window_data`、`sampled_vehicle` 或 R-level `partial_flow`。
-
-
+固定七档的车辆采样和流量在 `training_data_3s/datasets/fixed_uniform/sampling_seeds/`。
+顶层没有 `training_data_3s/sampling_seeds`，也不要再建这个软链接。
+训练读 sampling seed 42。验证和测试分别读 42–46，再对每份指标取平均。
+不要读已经删除的顶层 `window_data`、`sampled_vehicle` 或 R-level `partial_flow`。
 
 新入口为两个独立阶段，默认通过 `data_root.py` 解析
 `xuancheng26/training_data_3s` 和 `xuancheng26/simulation_data/fcd_data_3s`，
@@ -157,7 +156,7 @@ python3 generate_r_level_full_flow.py \
 五个采样种子 42–46、七档 p05/p10/p20/p30/p40/p50/p70，共 1015 组。
 
 ```text
-training_data_3s/sampling_seeds/
+training_data_3s/datasets/fixed_uniform/sampling_seeds/
 ├── vehicle_sampling_manifest_v2.json
 ├── vehicle_sampling_validation_v2.json
 ├── flow_generation_manifest_v2.json
@@ -168,14 +167,16 @@ training_data_3s/sampling_seeds/
     ├── flow/
     │   ├── partial_flow/<rate>/<date>/<state>.csv
     │   └── window_data/
-    │       ├── split_manifest.json          # 链接到 training_data_3s/shared/
+    │       ├── split_manifest.json          # 链到 datasets/fixed_uniform/shared/
     │       ├── state_normalization.json
     │       ├── state_window_manifest.json
     │       ├── validation_summary.json
     │       ├── node_mapping.csv
     │       └── <rate>/<split>/<date>/{inflow,outflow,accumulation_start,accumulation_end,all}.npz
-    └── graph -> ../../graph
-training_data_3s/shared/                     # 五份种子共用的 scaler、manifest、节点表、12→12 标签
+    ├── graph
+    └── model_prepared
+training_data_3s/datasets/fixed_uniform/shared/   # 再把 split、target scaler、节点表、12→12 标签链到 training_data_3s/shared/
+training_data_3s/shared/
 ```
 
 `generate_multi_seed_vehicle_sampling.py` 只处理车辆身份。每日按字符串排序有效车辆，
@@ -206,12 +207,15 @@ Entry/Exit、到达补齐规则，读取缓冲为 16 MiB，不缓存完整轨迹
 
 全量 CSV 和图只引用权威 `training_data_3s/full_flow/r-level`、`training_data_3s/graph`，
 不在各 seed 下复制；NPZ 内保留读取接口要求的 `y/y_raw` 数组。
-五个种子的窗口元数据都链接到 `training_data_3s/shared/`，不各存一份 scaler。
-新实验只读 `seed_<id>/flow/window_data`、`seed_<id>/flow/partial_flow` 和
-`seed_<id>/sampled_vehicle`。旧的顶层 `window_data`、`sampled_vehicle`、
-R-level `partial_flow`，以及 `seed_*/window_data` 和 `seed_*/partial_flow`，
-在核对进新目录之后已经删除。`full_flow/`、`graph/`、`config/`、M/MR 流量和
-更早的 `xuancheng26/training_data/` 保留。
+每个种子的窗口元数据链到 `datasets/fixed_uniform/shared/`，不在种子目录里各存一份。
+`fixed_uniform/shared/` 里的 split、target scaler、节点表和 12→12 标签再链到
+`training_data_3s/shared/`。`state_normalization.json`、`state_window_manifest.json`
+和 `validation_summary.json` 放在 `fixed_uniform/shared/` 本体。
+新实验读 `datasets/fixed_uniform/sampling_seeds/seed_<id>/flow/window_data`、
+同级的 `partial_flow` 和 `sampled_vehicle`。旧的顶层 `window_data`、
+`sampled_vehicle`、R-level `partial_flow`，以及种子目录外的 `window_data` 和
+`partial_flow`，在核对进新目录之后已经删除。`full_flow/`、`graph/`、`config/`
+和 M/MR 流量还在 `training_data_3s/`。`xuancheng26/training_data/` 已经不在数据盘上，不要重建。
 
 从仓库根目录运行：
 
@@ -322,19 +326,44 @@ python3 generate_mr_level_full_flow.py --training-root /data5/tzhang174/TrafficF
 python3 generate_mr_level_partial_flow.py --training-root /data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s --workers 29 --skip-complete
 ```
 
-原来那一批的训练结果在 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results/`。3 秒这批的配置把 `output_root` 指到 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/`，`run_all_models_training.py` 也读 `training_data_3s` 并写到这个新目录。
+训练结果都在 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/`。`xuancheng26/training_results/` 已经不在数据盘上，不要重建。历史固定渗透率结果迁在 `datasets/legacy_unknown/physical_legacy_unknown/`。波动 10%–20% 这一轮用 `run_variable_baselines.py`，队列在 `training_results_3s/operations/variable_p10_p20_train42_eval5/`。已经完成的基线数字见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。
+
+```bash
+cd /home/tzhang174/TrafficFlow
+python3 dataset/xuancheng26/run_variable_baselines.py status
+python3 dataset/xuancheng26/run_variable_baselines.py run
+# 改最大 GPU 数：写 control.json 的 max_gpus，下一轮 30 秒轮询会读到；
+# kill -HUP <scheduler.lock 里的 pid> 会立刻重读。默认 8。每天 09:00 把 max_gpus 调回 4。
+```
 
 ## 6. 数据集身份与波动渗透率
 
-固定七档在 `training_data_3s/datasets/fixed_uniform/sampling_seeds/`。顶层 `sampling_seeds` 是指向它的兼容软链接，原来的相对元数据链接在下移两层后已按真实目标重写。`full_flow/`、`graph/`、`shared/` 和历史训练结果没有改内容。
+固定七档在 `training_data_3s/datasets/fixed_uniform/sampling_seeds/`。顶层没有 `sampling_seeds` 软链接。`full_flow/`、`graph/` 和 `training_data_3s/shared/` 仍是共用文件；`datasets/fixed_uniform/shared/` 指向其中的 split、target scaler、节点表和 12→12 标签。
 
-波动渗透率每次只建一个 `dataset_id`。本次生成的是 `variable_day_p10_p20`（每天一个 `U(0.10, 0.20)` 目标）和 `variable_2h_p10_p20`（每 7200 秒一个目标，整条 trip 由出发时刻决定）。目录里的 `p10_p20` 只是观测标识。日程种子是 `schedule_seed`，车辆排列种子是 `sampling_seed`，模型初始化是 `model_seed`。
+波动渗透率每次只建一个 `dataset_id`。当前四套都是 `dataset_status=ready`，渗透率都是 `U(0.10, 0.20)`，观测标识都是 `p10_p20`：
+
+| dataset_id | 一段多长 | 段长（秒） |
+| --- | --- | --- |
+| `variable_30min_p10_p20` | 30 分钟 | 1800 |
+| `variable_1h_p10_p20` | 1 小时 | 3600 |
+| `variable_2h_p10_p20` | 2 小时 | 7200 |
+| `variable_day_p10_p20` | 1 天 | 86400 |
+
+日程种子是 `schedule_seed` 42，车辆排列种子是 sampling seed 42–46，拟合输入 scaler 用 seed 42，模型初始化是 `model_seed`。每个 dataset 自己有 `sampling_seeds/seed_<id>/flow/window_data/p10_p20/`。窗口里的 split 和 target scaler 经 `datasets/<dataset_id>/shared/` 链到 `training_data_3s/shared/`。`p10_p20` 是这一段上的观测标识，渗透率在 0.10 和 0.20 之间。
 
 ```bash
 cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
 python3 migrate_xuancheng_training_datasets.py --execute
 python3 generate_variable_penetration_datasets.py --config configs/variable_p10_p20.json --execute --workers 24
-python3 audit_variable_penetration.py --dataset-id variable_day_p10_p20 --dataset-id variable_2h_p10_p20 --recount --publish-ready
+python3 audit_variable_penetration.py --dataset-id variable_30min_p10_p20 --dataset-id variable_1h_p10_p20 --dataset-id variable_2h_p10_p20 --dataset-id variable_day_p10_p20 --recount --publish-ready
 ```
 
-其它范围只改配置里的 `p_min`、`p_max` 和 `dataset_id`，例如 `0.125` 到 `0.175` 会得到 `variable_day_p12p5_p17p5`。不要把 `p10_p20` 交给 `int()`。固定集结果目录保持 `in_<input>__out_<target>/<rate>/seed_<model_seed>/`；波动集预留 `datasets/<dataset_id>/in_<input>out<target>/<observation_key>/seed<model_seed>/`。
+其它范围只改配置里的 `p_min`、`p_max` 和 `dataset_id`，例如 `0.125` 到 `0.175` 会得到 `variable_day_p12p5_p17p5`。不要把 `p10_p20` 交给 `int()`。结果目录是：
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_<version>/<model>/
+    in_<input>__out_<target>/<observation_key>/<experiment_id>/
+    seed_<model_seed>/<run_id>/
+```
+
+固定渗透率的历史运行在 `dataset_id=legacy_unknown`、`physical_legacy_unknown`。波动渗透率用 `physical_independent_fcd_v1`，观测标识 `p10_p20`，实验号 `variable_p10_p20_train42_eval5`。完成结果的模型和指标见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。

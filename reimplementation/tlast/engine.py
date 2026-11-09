@@ -354,9 +354,8 @@ def run_single_rate(
     data_info = finalize_state_scaler(data_info, config, data_root)
     tag = rate_tag(rate)
     seed = int(config["seed"])
-    from data_root import sampling_run_results_dir
-    from reimplementation.common.data.sampling_seeds import protect_historical_results
-    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    from reimplementation.common.data.sampling_seeds import protect_historical_results, sampling_rate_dir
+    rate_dir = sampling_rate_dir(output_root, config, tag)
     protect_historical_results(rate_dir)
     if rate_is_complete(rate_dir) and not overwrite and resume_path is None:
         print(f"[tlast] stage=skip rate={tag} dir={rate_dir}", flush=True)

@@ -9,12 +9,12 @@
   "task": "current-time full-state reconstruction from a 12-step partially observed sequence",
   "task_zh": "使用连续60分钟部分观测交通状态，重建最后一个5分钟时间片的全量四状态。",
   "target_mode": "last-observed-step",
-  "data_root": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/sampling_seeds/seed_42/flow/window_data",
+  "data_root": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/datasets/fixed_uniform/sampling_seeds/seed_42/flow/window_data",
   "r_nodes": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/graph/r_nodes.csv",
-  "node_mapping": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/sampling_seeds/seed_42/flow/window_data/node_mapping.csv",
-  "normalization": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/sampling_seeds/seed_42/flow/window_data/state_normalization.json",
+  "node_mapping": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/datasets/fixed_uniform/sampling_seeds/seed_42/flow/window_data/node_mapping.csv",
+  "normalization": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/datasets/fixed_uniform/sampling_seeds/seed_42/flow/window_data/state_normalization.json",
   "state_normalization": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/shared/state_normalization.json",
-  "split_manifest": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/sampling_seeds/seed_42/flow/window_data/split_manifest.json",
+  "split_manifest": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/datasets/fixed_uniform/sampling_seeds/seed_42/flow/window_data/split_manifest.json",
   "dataset_metadata": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/shared/state_window_manifest.json",
   "output_root": "/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/tlast",
   "rates": [
@@ -172,9 +172,9 @@
     45,
     46
   ],
-  "sampling_root": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/sampling_seeds",
+  "sampling_root": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/datasets/fixed_uniform/sampling_seeds",
   "checkpoint_selection": "mean_validation_mae",
-  "data_validation": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/sampling_seeds/seed_42/flow/window_data/validation_summary.json",
+  "data_validation": "/data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/datasets/fixed_uniform/sampling_seeds/seed_42/flow/window_data/validation_summary.json",
   "input_type": "inflow",
   "target_type": "inflow"
 }

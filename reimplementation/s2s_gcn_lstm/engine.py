@@ -341,9 +341,8 @@ def run_single_rate(
     seed = int(config["seed"])
     seed_everything(seed)
     device = resolve_device(str(config.get("device", "cpu")))
-    from data_root import sampling_run_results_dir
-    from reimplementation.common.data.sampling_seeds import protect_historical_results
-    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    from reimplementation.common.data.sampling_seeds import protect_historical_results, sampling_rate_dir
+    rate_dir = sampling_rate_dir(output_root, config, tag)
     protect_historical_results(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(rate_dir / "resolved_config.json", dict(config))
@@ -372,8 +371,8 @@ def run_single_rate(
             num_nodes=int(config["num_nodes"]),
             n_his=int(config.get("n_his", 12)),
             output_steps=1,
-            input_channels=1,
-            output_channels=1,
+            input_channels=int(config["input_channels"]),
+            output_channels=int(config["output_channels"]),
         )
         model.load_state_dict(payload["model_state_dict"])
         optimizer.load_state_dict(payload["optimizer_state_dict"])

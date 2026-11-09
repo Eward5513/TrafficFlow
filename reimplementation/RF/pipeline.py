@@ -56,10 +56,17 @@ def _rss_mib() -> float | None:
 
 def _assert_output(path: Path) -> None:
     resolved = path.resolve()
-    if RESULTS_ROOT.resolve() not in resolved.parents and resolved != RESULTS_ROOT.resolve():
-        raise RunError(f"refusing to write outside {RESULTS_ROOT}: {resolved}")
-    if CODE_ROOT.resolve() == resolved or CODE_ROOT.resolve() in resolved.parents:
+    code = CODE_ROOT.resolve()
+    if resolved == code or code in resolved.parents:
         raise RunError(f"refusing to write into the git tree: {resolved}")
+    legacy = RESULTS_ROOT.resolve()
+    from data_root import xuancheng26_training_results_3s_root
+
+    canonical = xuancheng26_training_results_3s_root().resolve()
+    under_legacy = resolved == legacy or legacy in resolved.parents
+    under_canonical = "RF" in resolved.parts and (resolved == canonical or canonical in resolved.parents)
+    if not under_legacy and not under_canonical:
+        raise RunError(f"refusing to write outside {legacy} or {canonical}: {resolved}")
 
 
 _FITTED_FILENAMES = (
@@ -483,6 +490,33 @@ def _confirm_reload(
         raise RunError("reloaded model does not reproduce the saved test prediction")
 
 
+def _rf_data(config: dict, sampling_seed: int = 42):
+    kwargs = {"dataset_id": str(config.get("dataset_id") or "fixed_uniform")}
+    if config.get("training_root"):
+        kwargs["training_root"] = Path(config["training_root"])
+    return XuanchengRFData(sampling_seed, **kwargs)
+
+
+def _aggregate_state_reports(samples: list[dict]) -> tuple[dict, dict]:
+    if not samples:
+        return {}, {}
+    names = list(samples[0])
+    mean: dict = {}
+    std: dict = {}
+    for name in names:
+        numeric = [
+            key for key, value in samples[0][name].items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        mean[name] = {}
+        std[name] = {}
+        for key in numeric:
+            values = np.asarray([float(item[name][key]) for item in samples], dtype=np.float64)
+            mean[name][key] = float(values.mean())
+            std[name][key] = float(values.std(ddof=1)) if values.size > 1 else 0.0
+    return mean, std
+
+
 def train_penetration(config: dict) -> None:
     penetration = str(config["penetration"])
     input_type, target_type, multi, heads = _task_types(config)
@@ -491,7 +525,15 @@ def train_penetration(config: dict) -> None:
     protect_historical_results(rate_dir)
     _assert_output(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
-    _write_payload(rate_dir / "resolved_config.json", {**config, "model_seed": int(config["seed"]), "train_sampling_seed": 42, "evaluation_sampling_seeds": [42,43,44,45,46], "checkpoint_selection": "mean_validation_mae"})
+    _write_payload(rate_dir / "resolved_config.json", {
+        **config,
+        "model_name": "RF",
+        "rates": [penetration],
+        "model_seed": int(config["seed"]),
+        "train_sampling_seed": 42,
+        "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
+        "checkpoint_selection": "mean_validation_mae",
+    })
     log_path = rate_dir / "logs" / "train.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
@@ -504,7 +546,7 @@ def train_penetration(config: dict) -> None:
             if _complete(rate_dir, multi) and not config["force"] and not config["evaluate_only"]:
                 log("SKIP completed five-sampling run")
                 return
-            data = XuanchengRFData(dataset_id=str(config.get("dataset_id") or "fixed_uniform"))
+            data = _rf_data(config)
             if config["evaluate_only"]:
                 if not _fitted_complete(rate_dir, multi):
                     if _read_discard_record(rate_dir) is not None:
@@ -563,15 +605,18 @@ def train_penetration(config: dict) -> None:
             from data_root import SAMPLING_SEEDS
             reports = {}
             seed42 = {}
+            state_samples = {"validation": [], "test": []}
             for split in ("validation", "test"):
                 per_seed = {}
                 for sampling_seed in SAMPLING_SEEDS:
-                    observed = XuanchengRFData(sampling_seed, dataset_id=str(config.get("dataset_id") or "fixed_uniform"))
+                    observed = _rf_data(config, sampling_seed)
                     scored = _score_split(estimators, observed, penetration, observed.days[split],
                                           rate_dir / "predictions" / f"seed_{sampling_seed}" / split, **score_kwargs)
                     flat = dict(scored["overall"])
                     for state, metrics in scored.get("states", {}).items():
                         flat.update({f"{state}_{key}": value for key, value in metrics.items() if isinstance(value, (int, float))})
+                    if scored.get("states"):
+                        state_samples[split].append(scored["states"])
                     per_seed[str(sampling_seed)] = flat
                     if sampling_seed == 42:
                         seed42[split] = scored
@@ -580,21 +625,38 @@ def train_penetration(config: dict) -> None:
             validation, test = seed42["validation"], seed42["test"]
             validation["overall"].update(reports["validation"]["mean"])
             test["overall"].update(reports["test"]["mean"])
+            for row in validation["daily"]:
+                row["sampling_seed"] = 42
+            for row in test["daily"]:
+                row["sampling_seed"] = 42
             active_report = _active_report(rate_dir, data.days["test"], multi)
+            if isinstance(active_report, dict):
+                active_report = {**active_report, "sampling_seed": 42}
             metrics_dir = rate_dir / "metrics"
             metrics_dir.mkdir(parents=True, exist_ok=True)
             _write_daily(metrics_dir / "validation_daily.csv", validation["daily"])
             _write_daily(metrics_dir / "test_daily.csv", test["daily"])
             validation_payload = dict(validation["overall"])
+            validation_payload["daily_sampling_seed"] = 42
             if "states" in validation:
-                validation_payload["states"] = validation["states"]
+                validation_payload["states_sampling_seed_42"] = validation["states"]
+                state_mean, state_std = _aggregate_state_reports(state_samples["validation"])
+                validation_payload["states"] = state_mean
+                validation_payload["states_std"] = state_std
             (metrics_dir / "validation_metrics.json").write_text(
                 json.dumps(validation_payload, indent=2) + "\n",
                 encoding="utf-8",
             )
-            test_payload = {"overall": test["overall"], "active_edges_train_defined": active_report}
+            test_payload = {
+                "overall": test["overall"],
+                "active_edges_train_defined": active_report,
+                "daily_sampling_seed": 42,
+            }
             if "states" in test:
-                test_payload["states"] = test["states"]
+                test_payload["states_sampling_seed_42"] = test["states"]
+                state_mean, state_std = _aggregate_state_reports(state_samples["test"])
+                test_payload["states"] = state_mean
+                test_payload["states_std"] = state_std
             (metrics_dir / "test_metrics.json").write_text(
                 json.dumps(test_payload, indent=2) + "\n",
                 encoding="utf-8",

@@ -574,9 +574,8 @@ def run_single_rate(
     seed = int(config["seed"])
     seed_everything(seed)
     device = resolve_device(str(config.get("device", "auto")))
-    from data_root import sampling_run_results_dir
-    from reimplementation.common.data.sampling_seeds import protect_historical_results
-    rate_dir = sampling_run_results_dir(output_root, config.get("input_type", "inflow"), config.get("target_type", "inflow"), tag, seed)
+    from reimplementation.common.data.sampling_seeds import protect_historical_results, sampling_rate_dir
+    rate_dir = sampling_rate_dir(output_root, config, tag)
     protect_historical_results(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(rate_dir / "resolved_config.json", dict(config))
@@ -845,13 +844,16 @@ def run_all_rates(
         for key, value in graph_info.items()
         if key not in {"spatial_topology", "temporal_adjacency", "localized_adj", "mask_init", "node_ids"}
     }
-    smoke_result = run_p70_smoke(
-        config,
-        data_root=data_root,
-        graph_info=graph_info,
-        data_info=data_info,
-        logger=logger,
-    )
+    smoke_result = None
+    from reimplementation.common.data.r_only_npz_dataset import dataset_declares
+    if dataset_declares("p70"):
+        smoke_result = run_p70_smoke(
+            config,
+            data_root=data_root,
+            graph_info=graph_info,
+            data_info=data_info,
+            logger=logger,
+        )
     seed_everything(int(config["seed"]))
     if smoke_only:
         return {

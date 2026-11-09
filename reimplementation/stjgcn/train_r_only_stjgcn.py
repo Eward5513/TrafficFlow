@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--data-root", dest="data_root", type=Path, default=None)
     parser.add_argument("--output-root", dest="output_root", type=Path, default=None)
-    parser.add_argument("--rates", type=int, nargs="+", default=None)
+    parser.add_argument("--rates", nargs="+", default=None, help="fixed pXX/integer, or a dataset observation key such as p10_p20")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=None)
@@ -73,8 +73,8 @@ def main() -> None:
     assert_task_config(config)
     data_root = resolve_path(PROJECT_ROOT, config["data_root"])
     output_root = resolve_training_output(PROJECT_ROOT, config["output_root"], model_name="stjgcn")
-    from data_root import model_report_dir
-    metadata_root = model_report_dir('stjgcn')
+    from reimplementation.common.data.sampling_seeds import task_metadata_dir
+    metadata_root = task_metadata_dir(output_root, config)
     metadata_root.mkdir(parents=True, exist_ok=True)
     atomic_write_json(metadata_root / "resolved_config.json", config)
     atomic_write_json(

@@ -56,6 +56,8 @@ def add_state_type_arguments(parser) -> None:
     parser.add_argument("--model-seed", type=int, default=None)
     parser.add_argument("--train-sampling-seed", type=int, default=42)
     parser.add_argument("--evaluation-sampling-seeds", type=int, nargs="+", default=[42,43,44,45,46])
+    parser.add_argument("--experiment-id", dest="experiment_id", default=None)
+    parser.add_argument("--run-id", dest="run_id", default=None)
     parser.add_argument("--input-type", dest="input_type", choices=STATE_TYPES, default=None)
     parser.add_argument("--target-type", dest="target_type", choices=STATE_TYPES, default=None)
 
@@ -80,6 +82,10 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
                 explicit.append("sampling_root")
     if getattr(args, "seed", None) is not None and getattr(args, "model_seed", None) is None:
         config["model_seed"] = args.seed
+    if getattr(args, "experiment_id", None):
+        config["experiment_id"] = str(args.experiment_id)
+    if getattr(args, "run_id", None):
+        config["run_id"] = str(args.run_id)
     if getattr(args, "data_root", None) is not None:
         from data_root import sampling_root_from_window
         config["sampling_root"] = str(sampling_root_from_window(args.data_root))
@@ -124,6 +130,35 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
             config["output_dim"] = out_channels
     # output_root stays the results pointer. sampling_rate_dir adds dataset,
     # physical version, task, observation key, experiment, model seed, and run id once.
+    if config.get("rates") is not None:
+        from reimplementation.common.data.sampling_seeds import tag_configured_rates
+
+        config["rates"] = tag_configured_rates(
+            list(config["rates"]),
+            dataset_id=config.get("dataset_id"),
+            sampling_root=config.get("sampling_root"),
+        )
+    run_dir = ""
+    rates = [str(item) for item in (config.get("rates") or [])]
+    if len(rates) == 1 and config.get("run_id") and config.get("output_root"):
+        from reimplementation.common.data.sampling_seeds import sampling_rate_dir
+
+        run_dir = sampling_rate_dir(config["output_root"], config, rates[0]).as_posix()
+    print(
+        "[sampling] "
+        f"dataset_id={config.get('dataset_id')} "
+        f"observation_key={','.join(rates)} "
+        f"train_sampling_seed={config.get('train_sampling_seed')} "
+        f"model_seed={config.get('model_seed')} "
+        f"evaluation_sampling_seeds={config.get('evaluation_sampling_seeds')} "
+        f"input_type={config.get('input_type')} target_type={config.get('target_type')} "
+        f"input_channels={config.get('input_channels')} output_channels={config.get('output_channels')} "
+        f"data_root={config.get('data_root')} "
+        f"normalization={config.get('normalization')} "
+        f"experiment_id={config.get('experiment_id')} run_id={config.get('run_id')} "
+        f"run_dir={run_dir}",
+        flush=True,
+    )
     return config
 
 

@@ -56,13 +56,34 @@ def rate_tag(rate: int | str, *, allowed: tuple[str, ...] | list[str] | None = N
             raise ValueError(f"penetration {tag} is not declared for this dataset")
         return tag
     if _OBSERVATION_KEY.fullmatch(text):
-        if text in RATE_TAGS or allowed_set is None or text not in allowed_set:
+        # Keys are not known until the dataset manifest is bound. Callers that
+        # parse the CLI before configure_sampling must not reject p10_p20 here.
+        if allowed_set is None:
+            return text
+        if text in RATE_TAGS or text not in allowed_set:
             raise ValueError(
-                f"observation key {text} is not a fixed penetration; "
-                "select the dataset manifest that declares it"
+                f"observation key {text} is not declared by the selected dataset"
             )
         return text
     raise ValueError(f"invalid penetration or observation key: {text!r}")
+
+
+def dataset_declares(tag: str) -> bool:
+    """Whether the bound dataset, or the fixed seven when nothing is bound, includes ``tag``."""
+    text = str(tag)
+    allowed = _ALLOWED_KEYS.get()
+    if allowed is None:
+        return text in RATE_TAGS
+    return text in {str(item) for item in allowed}
+
+
+def is_bound_observation_key(tag: str) -> bool:
+    """True when ``tag`` is an observation key of the dataset bound in this process."""
+    text = str(tag)
+    if not _OBSERVATION_KEY.fullmatch(text):
+        return False
+    allowed = _ALLOWED_KEYS.get()
+    return allowed is not None and text in {str(item) for item in allowed}
 
 
 def declared_observation_keys(data_root: Path) -> tuple[str, ...]:
