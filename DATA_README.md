@@ -1,15 +1,25 @@
 # 数据盘目录清单
 
-更新日期：2026-11-09，按当时磁盘上的实际路径记录。代码在 `/home/tzhang174/TrafficFlow`，数据在 `/data5/tzhang174/TrafficFlow`。
+更新日期：2026-11-10 18:18 +0800，按当时磁盘上的实际路径记录。代码在 `/home/tzhang174/TrafficFlow`，数据在 `/data5/tzhang174/TrafficFlow`。
 
 ```text
-/data5/tzhang174/TrafficFlow          1.9T
-├── shanghai_sim                      122G
-└── xuancheng26                       1.8T
-    ├── simulation_data               1.1T
-    ├── training_data_3s              503G
-    └── training_results_3s           190G
+/data5/tzhang174/TrafficFlow                         2.3T
+├── shanghai_sim/                                    122G   上海 20 天、56 条路：截图、SUMO、窗口、八个模型结果
+└── xuancheng26/                                     2.1T   宣城 29 天、3 秒相位
+    ├── simulation_data/                             1.1T   路网、全天路线、FCD
+    ├── training_data_3s/                            864G   四状态流量、图、固定档和波动渗透率窗口
+    └── training_results_3s/                         230G   checkpoint、指标、预测
+        ├── datasets/variable_30min_p10_p20/         14G    最新一轮，日程 30 分钟
+        ├── datasets/variable_1h_p10_p20/            11G    最新一轮，日程 1 小时
+        ├── datasets/variable_2h_p10_p20/            9.3G   最新一轮，日程 2 小时
+        ├── datasets/variable_day_p10_p20/           8.1G   最新一轮，日程 1 天
+        ├── datasets/legacy_unknown/                 190G   历史固定渗透率 p05–p70
+        ├── operations/                              队列、调度日志、清理记录
+        ├── reports/                                 启动汇总和训练日志
+        └── registry/                                631 条历史运行索引
 ```
+
+最新一轮的层级和每一层里的文件，见下面「宣城训练结果」开头的树。物理版本是 `independent_fcd_v1`，观测键是 `p10_p20`。
 
 宣城非 3 秒的 `training_data/`、`training_results/` 已删除。`training_data_3s/sampling_seeds` 软链接、`archive/`、`.staging/`、`architecture_audit/` 也已删除。原始出行仍在数据盘外面的 `/data5/tzhang174/Xuancheng26/`，本清单不展开那棵树。
 
@@ -58,7 +68,7 @@ simulation_data/
 
 ---
 
-## 宣城训练数据：`xuancheng26/training_data_3s/`（503G）
+## 宣城训练数据：`xuancheng26/training_data_3s/`（864G）
 
 四状态定义在 `shared/physical_definition.json`，版本名 `independent_fcd_v1`。通道顺序是 `inflow, outflow, accumulation_start, accumulation_end`。划分在 `shared/split_manifest.json`：训练 20 天（04-01…04-08、04-10…04-21），验证 04-22…04-25，测试 04-26…04-30。每天 277 个窗口，R 节点 1406。
 
@@ -130,26 +140,101 @@ python3 dataset/xuancheng26/model_prep/generate_variable_penetration_datasets.py
 
 ---
 
-## 宣城训练结果：`xuancheng26/training_results_3s/`（190G）
+## 宣城训练结果：`xuancheng26/training_results_3s/`（230G）
+
+正式运行都在 `datasets/` 下面，一层一个身份字段。四个 `variable_*_p10_p20` 结构相同，下面把 30 分钟展开；1 小时、2 小时、全天只是段长不同。`p5_p15` 和 `p5_p35` 还只有训练数据，结果树里没有这两个观测键。
 
 ```text
 training_results_3s/
-├── datasets/legacy_unknown/physical_legacy_unknown/<model>/...
-├── registry/runs.jsonl
-├── reports/
-└── operations/cleanup_20261109/
+├── datasets/                                      正式运行。checkpoint 和指标只在最底层 <run_id>/
+│   ├── variable_30min_p10_p20/                    一套数据：渗透率每 30 分钟重抽一次，U(0.10, 0.20)
+│   │   └── physical_independent_fcd_v1/           状态定义。通道顺序 inflow, outflow, accumulation_start, accumulation_end
+│   │       ├── RF/  stgcn/  dcrnn/  …  stjgcn/    十二个基线，各一个模型
+│   │       │   └── in_inflow__out_inflow/         输入输出。这一轮已落盘的是 I2I：inflow → inflow
+│   │       │       └── p10_p20/                   观测键，对应上面的 0.10–0.20
+│   │       │           └── variable_p10_p20_train42_eval5/   实验号。训练种子 42，评估种子 42–46
+│   │       │               └── seed_42/           模型初始化种子，不是采样种子
+│   │       │                   └── <run_id>/      一次运行。见下面的叶子
+│   │       └── MSTT/                              不在基线队列里
+│   │           └── in_all__out_all/               A2A：四个状态进，四个状态出
+│   │               └── p10_p20/conservation_projected/seed_42/<run_id>/
+│   ├── variable_1h_p10_p20/                       同上，一段 1 小时
+│   ├── variable_2h_p10_p20/                       同上，一段 2 小时
+│   ├── variable_day_p10_p20/                      同上，一段 1 天
+│   └── legacy_unknown/physical_legacy_unknown/    历史固定档。观测键 p05…p70，run_id 为 legacy_<hash>
+├── operations/                                    调度和清理记录，没有模型权重
+│   ├── variable_p10_p20_train42_eval5/            144 条任务的 manifest、tasks、完成汇总、scheduler 日志
+│   └── cleanup_20261109/                          11 月 9 日迁移清单，以及当时删除的中断 run
+├── reports/                                       日志和启动汇总，不代替 datasets/ 里的运行
+│   ├── RF/<run_id>/                               随机森林四次运行的 config 和 summary
+│   ├── historical/                                从旧模型根目录收进来的 loose 文件
+│   └── mstt_variable_projected_a2a*.log           MSTT 这一轮的标准输出
+├── registry/runs.jsonl                           631 行，只索引 legacy 运行
+└── asttn/ dcrnn/ … tlast/                         结果根上的模型名。只有 overall_summary 或校验 json
 ```
 
-现存 631 个 run，全部在 `legacy_unknown` / `physical_legacy_unknown` 下面。这些历史运行的配置里没有写下 `dataset_id` 和 `physical_definition_version`，所以没有标成 `fixed_uniform` 或 `independent_fcd_v1`。模型有 `MSTT`、`RF`、`dcrnn`、`graph_wavenet`、`pdformer`、`s2s_gcn_lstm`、`staeformer`、`stfgnn`、`stgcn`、`stid`、`stsgcn`、`tlast`。
-
-一个 run 的路径是：
+叶子 `<run_id>/` 是一次运行的全部输出。写完并做过五种子评估之后，目录里是：
 
 ```text
-datasets/<dataset_id>/physical_<version>/<model>/in_<input>__out_<target>/<observation_key>/<experiment_id>/seed_<model_seed>/<run_id>/
+<run_id>/
+├── best_checkpoint.pt          按五种子验证 MAE 的平均选出的权重
+├── last_checkpoint.pt          最后一个 epoch 的权重
+├── resolved_config.json        这次实际用的配置
+├── run_metadata.json           数据集、实验号、种子、是否早停
+├── training_history.json       每个 epoch 的损失和验证指标
+├── training_log.jsonl          训练过程日志
+├── validation_metrics.json     选中 checkpoint 后的一次验证
+├── validation_sampling_metrics.json    种子 42–46 的验证平均和标准差
+├── test_metrics.json           一次测试
+├── test_sampling_metrics.json  种子 42–46 的测试平均和标准差
+├── test_predictions.npz        测试预测和真值
+└── predictions/                按采样种子、按天拆开的预测
 ```
 
-历史 run 的 `run_id` 是 `legacy_<hash>`。目录里保留原来的 checkpoint、配置、history、metrics、predictions 文件名，并用 `run_manifest.json` 登记。新训练由 `data_root.sampling_run_results_dir` 写到同一层结构，并使用新的 `run_id`。
+还在训练的叶子只有 checkpoint、配置和 history，没有 `test_sampling_metrics.json`。随机森林没有 checkpoint；它的运行本体仍在 `datasets/.../RF/.../<run_id>/`，`reports/RF/<run_id>/` 是另一份启动汇总。结果根上的 `dcrnn/`、`stgcn/` 等目录没有这些叶子。
+
+### 最新一轮：`variable_*_p10_p20` / `physical_independent_fcd_v1`
+
+四个 `dataset_id` 对应四套日程，渗透率在 0.10 到 0.20 之间均匀抽取，观测键都是 `p10_p20`。段长沿用训练数据：30 分钟 1800 秒，1 小时 3600 秒，2 小时 7200 秒，全天 86400 秒。训练 sampling seed 是 42，模型种子是 42，验证和测试对种子 42、43、44、45、46 取平均。
+
+基线队列的实验号是 `variable_p10_p20_train42_eval5`。模型是 `RF`、`stgcn`、`dcrnn`、`graph_wavenet`、`stsgcn`、`stfgnn`、`stid`、`staeformer`、`s2s_gcn_lstm`、`tlast`、`asttn`、`stjgcn`。这一轮的清单把 `MSTT` 和 `pdformer` 留在队列外。计划中的输入输出是 I2I（`in_inflow__out_inflow`）、A2A（`in_all__out_all`）、A2I（`in_all__out_inflow`），共 4 × 12 × 3 = 144 条。队列状态在 `operations/variable_p10_p20_train42_eval5/`：`campaign_manifest.json`、`tasks.json`、`campaign_summary.json`、`campaign_summary.csv`、`scheduler.log`、`stdout.log`、`control.json`、`logs/`。
+
+18:18 的 `campaign_summary.json` 里，144 条是 41 条 completed、7 条 running、96 条 pending。已经落盘的都是 I2I：
+
+| dataset_id | 已完成 I2I | 18:18 仍在训练的 I2I | 运行目录 |
+| --- | --- | --- | --- |
+| `variable_30min_p10_p20` | 12 | — | 14G，十二个基线都有 `test_sampling_metrics.json` |
+| `variable_1h_p10_p20` | 12 | — | 11G，十二个基线都有 `test_sampling_metrics.json` |
+| `variable_2h_p10_p20` | 10 | `asttn` `20261109T225358_ef6d85d5`，`stjgcn` `20261109T225358_81ede9b1` | 9.3G |
+| `variable_day_p10_p20` | 7：`RF`、`stgcn`、`dcrnn`、`graph_wavenet`、`stid`、`s2s_gcn_lstm`、`tlast` | `stsgcn` `20261109T225358_827a67cd`，`stfgnn` `20261109T225358_e71705b1`，`staeformer` `20261109T225358_cb529e29`，`asttn` `20261109T225358_7b8bb41a`，`stjgcn` `20261109T225358_e534e5fe` | 8.1G |
+
+96 条 pending 是四个 dataset 的 A2A 和 A2I。这些任务还没有运行目录。
+
+一条已经写完测试指标的基线，例如：
+
+```text
+datasets/variable_1h_p10_p20/physical_independent_fcd_v1/dcrnn/
+    in_inflow__out_inflow/p10_p20/variable_p10_p20_train42_eval5/
+    seed_42/20261109T225358_dbeadc83/
+```
+
+叶子里的文件就是上一棵树列出的那些。五种子平均在 `validation_sampling_metrics.json` 和 `test_sampling_metrics.json`。随机森林的四份启动汇总在 `reports/RF/<run_id>/`，run id 是 `20261109T225358_ffe1a013`（30 分钟）、`f03af6f8`（1 小时）、`0cc4c3ec`（2 小时）、`80a226ab`（全天）。
+
+MSTT 单独跑 A2A，实验号 `conservation_projected`，配置是 `MSTT/configs/conservation_best_backbone/projected.json`。它不进上面的 144 条队列。
+
+```text
+datasets/variable_30min_p10_p20/physical_independent_fcd_v1/MSTT/
+    in_all__out_all/p10_p20/conservation_projected/seed_42/20261110T132316_29bc19aa/
+```
+
+30 分钟这一条已经有 `test_sampling_metrics.json`。1 小时的 `20261110T161911_f3edf8f9` 在 18:18 仍在训练，目录里是 checkpoint、`resolved_config.json` 和 history。同一条 shell 队列接着跑 2 小时和全天，那两个 dataset 下还没有 `MSTT/`。日志是 `reports/mstt_variable_projected_a2a.log` 和 `reports/mstt_variable_projected_a2a_1h_2h_day.log`。
+
+指标摘录在代码树的 [dataset/xuancheng26/TRAINING_RESULTS.md](dataset/xuancheng26/TRAINING_RESULTS.md)，MSTT 在 [MSTT/TRAINING_RESULTS.md](MSTT/TRAINING_RESULTS.md)。那份基线摘录整理到 2026-11-10 12:28，当时记下 26 条已完成的 I2I；此后又有运行写完测试指标。目录和完成状态以本节和 `campaign_summary.json` 为准。
+
+### 历史固定渗透率：`legacy_unknown` / `physical_legacy_unknown`（190G）
+
+631 个历史 run 都在这一层。配置里没有写下 `dataset_id` 和 `physical_definition_version`，所以没有标成 `fixed_uniform` 或 `independent_fcd_v1`。模型有 `MSTT`、`dcrnn`、`graph_wavenet`、`pdformer`、`s2s_gcn_lstm`、`staeformer`、`stfgnn`、`stgcn`、`stid`、`stsgcn`、`tlast`。观测键是固定档 `p05`、`p10`、`p20`、`p30`、`p40`、`p50`、`p70`。实验号主要是 `baseline`，另外有 STAEformer 的 `sampling_protocol` 和若干 MSTT 实验号。模型种子都是 `seed_42`，`run_id` 是 `legacy_<hash>`。目录里保留原来的 checkpoint、配置、history、metrics、predictions 文件名，并用 `run_manifest.json` 登记。
 
 另有 103 个中断 run 已删除：79 个随机森林、19 个 STAEformer、3 个 STFGNN、2 个 MSTT。它们有模型文件，没有测试指标，也没有完成状态。清单在 `operations/cleanup_20261109/removed_interrupted_runs.jsonl`。
 
-`operations/cleanup_20261109/` 只保存这次清理的迁移记录和从 `xuancheng26/` 根目录收进来的旧准备日志，不参与训练。`registry/runs.jsonl` 是留下的 run 索引。`reports/` 里是迁移时从旧模型根目录收来的 summary、日志和 loose 文件。
+`operations/cleanup_20261109/` 只保存这次清理的迁移记录和从 `xuancheng26/` 根目录收进来的旧准备日志。`registry/runs.jsonl` 仍是这 631 条 legacy 运行的索引，波动渗透率的新 run 不在这个文件里。`reports/historical/` 是迁移时从旧模型根目录收来的 summary、日志和 loose 文件。

@@ -15,7 +15,10 @@ first poll at or after 09:00 local time each day writes ``max_gpus`` back to
 Lowering the cap does not stop a job that is already running. ``0`` pauses
 new launches. ``max_gpus`` counts only tasks that occupy a GPU. A pure CPU
 task such as RF does not take a card and does not count toward that limit.
-An empty nvidia-smi row is a free GPU.
+An empty nvidia-smi row is a free GPU. An RF task is not launched when its
+entry in ``model_preparation_manifest.json`` has status ``failed``, even if
+an older feature NPZ is still present. A missing manifest or a missing RF
+entry keeps the previous check. Another model's failure does not block RF.
 
 Campaign files live under
 ``<training_results_3s>/operations/<campaign_id>/``.
@@ -400,11 +403,37 @@ def build_tasks(training_root: Path, results_root: Path) -> list[dict]:
     return tasks
 
 
+def reject_failed_rf_preparation(task: dict, training_root: Path) -> None:
+    """Refuse an RF launch when that model's preparation entry is failed.
+
+    A missing manifest, or a manifest with no RF entry, leaves command
+    generation unchanged. Top-level ``models_ready`` is ignored so another
+    model's failure cannot block RF. Queued tasks read the file again here,
+    immediately before the process is started.
+    """
+    dataset_id = str(task["dataset_id"])
+    manifest_path = training_root / "datasets" / dataset_id / "model_preparation_manifest.json"
+    payload = read_json(manifest_path)
+    if not isinstance(payload, dict):
+        return
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return
+    for item in models:
+        if not isinstance(item, dict) or item.get("model") != "RF":
+            continue
+        if item.get("status") == "failed":
+            raise RuntimeError(f"{dataset_id} RF preparation failed: {manifest_path}")
+        return
+
+
 def command_for(task: dict, python: Path, training_root: Path, results_root: Path, threads: int) -> list[str]:
     observation_key = str(task["observation_key"])
     experiment_id = str(task["experiment_id"])
     sampling_root = training_root / "datasets" / task["dataset_id"] / "sampling_seeds"
     if task["cpu"]:
+        if task["model"] == "RF":
+            reject_failed_rf_preparation(task, training_root)
         return [
             str(python),
             task["script"],
