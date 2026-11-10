@@ -21,6 +21,19 @@ STATE_CHANNELS = ("inflow", "outflow", "accumulation_start", "accumulation_end")
 RATES = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
 
 
+def summary_rate_sort_key(rate: str) -> tuple[int, int, str]:
+    """Order summary rows without treating ``RATES`` as the set of legal keys.
+
+    The seven fixed penetrations stay in their declared order. An observation
+    key such as ``p10_p20`` is accepted by ``rate_tag`` from the dataset
+    manifest and sorts by its text after those seven.
+    """
+    text = str(rate)
+    if text in RATES:
+        return (0, RATES.index(text), "")
+    return (1, len(RATES), text)
+
+
 @dataclass(frozen=True)
 class TaskSpec:
     name: str

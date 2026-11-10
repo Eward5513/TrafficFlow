@@ -859,10 +859,13 @@ def merge_summary(output_root: Path, rows: list[dict[str, Any]]) -> list[dict[st
             keyed = {(row["task"], row["rate"], int(row["seed"])): row for row in existing}
             for row in rows:
                 keyed[(row["task"], row["rate"], int(row["seed"]))] = row
-            from MSTT.config import RATES, TASKS
+            from MSTT.config import TASKS, summary_rate_sort_key
 
             order = {name: index for index, name in enumerate(TASKS)}
-            merged = sorted(keyed.values(), key=lambda row: (RATES.index(row["rate"]), order.get(row["task"], 99), row["seed"]))
+            merged = sorted(
+                keyed.values(),
+                key=lambda row: (summary_rate_sort_key(row["rate"]), order.get(row["task"], 99), row["seed"]),
+            )
             atomic_write_json(path, merged)
             buffer = io.StringIO()
             writer = csv.DictWriter(buffer, fieldnames=SUMMARY_FIELDS, lineterminator="\n", extrasaction="ignore")

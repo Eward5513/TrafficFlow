@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Queue the 144 Xuancheng variable-penetration baseline tasks.
 
-One task is one model, one dataset, and one input/target pair. It keeps one
-physical GPU until the process exits. A GPU is free only when nvidia-smi lists
-no compute process on it. Memory is not part of that decision. The scheduler
-asks again every 30 seconds.
+One task is one model, one dataset, and one input/target pair. A CUDA task
+keeps one physical GPU until the process exits. A GPU is free only when
+nvidia-smi lists no compute process on it. Memory is not part of that
+decision. The scheduler asks again every 30 seconds.
 
 ``control.json`` is ``{"max_gpus": N}``. A missing file starts at 8. The next
 poll reads edits. ``SIGHUP`` wakes the scheduler and reads it immediately. A
@@ -13,8 +13,9 @@ first poll at or after 09:00 local time each day writes ``max_gpus`` back to
 4. A later edit still applies until the next morning.
 
 Lowering the cap does not stop a job that is already running. ``0`` pauses
-new launches. RF stays on CPU and still reserves its GPU slot; an empty
-nvidia-smi row does not release that slot.
+new launches. ``max_gpus`` counts only tasks that occupy a GPU. A pure CPU
+task such as RF does not take a card and does not count toward that limit.
+An empty nvidia-smi row is a free GPU.
 
 Campaign files live under
 ``<training_results_3s>/operations/<campaign_id>/``.
@@ -374,7 +375,7 @@ def build_tasks(training_root: Path, results_root: Path) -> list[dict]:
                     "gpu_index": None,
                     "gpu_uuid": None,
                     "compute_backend": "cpu" if model.get("cpu") else "cuda",
-                    "gpu_reserved": True,
+                    "gpu_reserved": not bool(model.get("cpu")),
                     "command": [],
                     "log": "",
                     "started_at": None,
@@ -749,20 +750,36 @@ def write_manifest(ops: Path, training_root: Path, results_root: Path) -> None:
             "morning_hour": MORNING_HOUR,
             "morning_cap": MORNING_CAP,
             "empty_gpu": "no compute process; memory is ignored",
+            "gpu_cap": "max_gpus counts CUDA tasks only; CPU tasks do not reserve a GPU",
         },
     )
 
 
-def adopt_running(tasks: list[dict]) -> dict[int, str]:
+def adopt_running(tasks: list[dict]) -> tuple[dict[int, str], set[str]]:
+    """Return GPU reservations and live CPU task ids.
+
+    Only a CUDA task reserves its GPU. A CPU task left from an older scheduler
+    may still carry a ``gpu_index``; that index is cleared and does not count.
+    """
     running: dict[int, str] = {}
+    cpu_running: set[str] = set()
     for task in tasks:
         if task["status"] != "running":
             continue
         pid = int(task["pid"] or 0)
-        gpu = task.get("gpu_index")
-        if pid_alive(pid) and isinstance(gpu, int):
-            running[gpu] = task["task_id"]
-            continue
+        if task.get("cpu"):
+            if pid_alive(pid):
+                task["gpu_index"] = None
+                task["gpu_uuid"] = None
+                task["gpu_reserved"] = False
+                cpu_running.add(task["task_id"])
+                continue
+        else:
+            gpu = task.get("gpu_index")
+            if pid_alive(pid) and isinstance(gpu, int):
+                task["gpu_reserved"] = True
+                running[gpu] = task["task_id"]
+                continue
         complete, reason = artifacts_complete(task)
         task["finished_at"] = stamp()
         if complete:
@@ -777,7 +794,8 @@ def adopt_running(tasks: list[dict]) -> dict[int, str]:
             task["pid"] = None
             task["gpu_index"] = None
             task["gpu_uuid"] = None
-    return running
+            task["gpu_reserved"] = not bool(task.get("cpu"))
+    return running, cpu_running
 
 
 def finish_task(task: dict, exit_code: int | None) -> None:
@@ -797,25 +815,35 @@ def finish_task(task: dict, exit_code: int | None) -> None:
 def launch_task(
     ops: Path,
     task: dict,
-    gpu: dict[str, object],
+    gpu: dict[str, object] | None,
     python: Path,
     training_root: Path,
     results_root: Path,
     threads: int,
 ) -> subprocess.Popen:
+    if task.get("cpu"):
+        gpu = None
     command = command_for(task, python, training_root, results_root, threads)
     log_path = ops / "logs" / f"{task['task_id']}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     handle = log_path.open("a", encoding="utf-8")
+    if gpu is None:
+        physical_gpu = ""
+        gpu_uuid = ""
+        visible_gpu = 0
+    else:
+        physical_gpu = str(gpu["index"])
+        gpu_uuid = str(gpu["uuid"])
+        visible_gpu = int(gpu["index"])
     handle.write(
-        f"start_time={stamp()}\nphysical_gpu={gpu['index']}\ngpu_uuid={gpu['uuid']}\n"
+        f"start_time={stamp()}\nphysical_gpu={physical_gpu}\ngpu_uuid={gpu_uuid}\n"
         f"threads={threads}\ncommand={' '.join(command)}\n"
     )
     handle.flush()
     proc = subprocess.Popen(
         command,
         cwd=CODE,
-        env=child_env(task, int(gpu["index"]), threads),
+        env=child_env(task, visible_gpu, threads),
         stdout=handle,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
@@ -825,8 +853,9 @@ def launch_task(
     task["status"] = "running"
     task["attempt"] = int(task.get("attempt") or 0) + 1
     task["pid"] = proc.pid
-    task["gpu_index"] = int(gpu["index"])
-    task["gpu_uuid"] = str(gpu["uuid"])
+    task["gpu_index"] = None if gpu is None else int(gpu["index"])
+    task["gpu_uuid"] = None if gpu is None else str(gpu["uuid"])
+    task["gpu_reserved"] = gpu is not None
     task["command"] = command
     task["log"] = str(log_path)
     task["threads"] = threads
@@ -851,11 +880,32 @@ def counts_of(tasks: list[dict]) -> dict[str, int]:
 def format_running(tasks: list[dict]) -> str:
     rows = []
     for task in tasks:
-        if task["status"] == "running":
-            rows.append(
-                f"{task['gpu_index']}:{task['task_id']}:pid={task['pid']}"
-            )
+        if task["status"] != "running":
+            continue
+        if task.get("cpu"):
+            rows.append(f"cpu:{task['task_id']}:pid={task['pid']}")
+        else:
+            rows.append(f"{task['gpu_index']}:{task['task_id']}:pid={task['pid']}")
     return ",".join(rows) if rows else "[]"
+
+
+def reap_task(ops: Path, task: dict, procs: dict[str, subprocess.Popen], label: str) -> bool:
+    """Finish a task whose process has exited. True means it left the running set."""
+    task_id = task["task_id"]
+    proc = procs.get(task_id)
+    if proc is not None:
+        code = proc.poll()
+        if code is None:
+            return False
+        finish_task(task, code)
+        log_line(ops, f"{label} {task['status'].upper()} {task_id} exit={code} {task.get('error') or ''}")
+        procs.pop(task_id, None)
+        return True
+    if pid_alive(int(task.get("pid") or 0)):
+        return False
+    finish_task(task, task.get("exit_code"))
+    log_line(ops, f"{label} {task['status'].upper()} {task_id} {task.get('error') or ''}")
+    return True
 
 
 def acquire_lock(ops: Path):
@@ -888,7 +938,7 @@ def run_campaign(ops: Path, training_root: Path, results_root: Path) -> None:
     existing = load_tasks(ops)
     created = existing is None
     tasks = existing if existing is not None else build_tasks(training_root, results_root)
-    running = adopt_running(tasks)
+    running, cpu_running = adopt_running(tasks)
     procs: dict[str, subprocess.Popen] = {}
     limit = 0
     log_line(
@@ -909,30 +959,43 @@ def run_campaign(ops: Path, training_root: Path, results_root: Path) -> None:
             gpus, occupied = [], set()
         limit = refresh_cap(ops, len(gpus), limit)
         for gpu_index, task_id in list(running.items()):
-            task = by_id[task_id]
-            proc = procs.get(task_id)
-            if proc is not None:
-                code = proc.poll()
-                if code is None:
-                    continue
-                finish_task(task, code)
-                log_line(ops, f"GPU {gpu_index} {task['status'].upper()} {task_id} exit={code} {task.get('error') or ''}")
+            if reap_task(ops, by_id[task_id], procs, f"GPU {gpu_index}"):
                 running.pop(gpu_index, None)
-                procs.pop(task_id, None)
-            elif not pid_alive(int(task.get("pid") or 0)):
-                finish_task(task, task.get("exit_code"))
-                log_line(ops, f"GPU {gpu_index} {task['status'].upper()} {task_id} {task.get('error') or ''}")
-                running.pop(gpu_index, None)
+        for task_id in list(cpu_running):
+            if reap_task(ops, by_id[task_id], procs, "CPU"):
+                cpu_running.discard(task_id)
         reserved = set(running)
         free = [row for row in gpus if int(row["index"]) not in occupied and int(row["index"]) not in reserved]
         ram = mem_available_bytes()
         threads = thread_budget(limit)
         pending = [task for task in tasks if task["status"] == "pending"]
-        if ram < MIN_FREE_RAM_BYTES:
+        ram_ok = ram >= MIN_FREE_RAM_BYTES
+        if not ram_ok:
             log_line(ops, f"skip launch MemAvailable={ram} below {MIN_FREE_RAM_BYTES}")
-            free = []
-        while pending and free and len(running) < limit:
-            task = pending.pop(0)
+        while pending and ram_ok:
+            task = pending[0]
+            if task.get("cpu"):
+                pending.pop(0)
+                try:
+                    proc = launch_task(ops, task, None, python, training_root, results_root, threads)
+                except Exception as exc:
+                    task["status"] = "failed"
+                    task["error"] = f"launch failed: {exc}"
+                    task["finished_at"] = stamp()
+                    log_line(ops, f"CPU FAILED {task['task_id']} {exc}")
+                    continue
+                cpu_running.add(task["task_id"])
+                procs[task["task_id"]] = proc
+                log_line(
+                    ops,
+                    f"CPU START {task['task_id']} pid={proc.pid} "
+                    f"backend={task['compute_backend']} threads={threads}"
+                )
+                continue
+            # running is the CUDA set. CPU tasks live in cpu_running and do not count.
+            if not free or len(running) >= limit:
+                break
+            pending.pop(0)
             gpu = free.pop(0)
             try:
                 listed, occupied_now = query_gpus()
@@ -966,9 +1029,10 @@ def run_campaign(ops: Path, training_root: Path, results_root: Path) -> None:
         pending_count = sum(task["status"] == "pending" for task in tasks)
         log_line(
             ops,
-            f"poll local={stamp()} max={limit} running={format_running(tasks)} queued={pending_count}",
+            f"poll local={stamp()} max={limit} gpu_slots={len(running)} "
+            f"running={format_running(tasks)} queued={pending_count}",
         )
-        if pending_count == 0 and not running:
+        if pending_count == 0 and not running and not cpu_running:
             break
         wait_poll(POLL_SECONDS)
     try:
@@ -1045,12 +1109,40 @@ def print_plan(training_root: Path, results_root: Path) -> None:
     print(f"example_run_dir={tasks[0]['run_dir']}")
 
 
+def apply_range_config(path: Path | None) -> None:
+    """Point the scheduler at one range config. The default remains the 10–20 campaign."""
+    global CAMPAIGN_ID, EXPERIMENT_ID, OBSERVATION_KEY, DATASETS
+    if path is None:
+        return
+    import sys
+    prep = Path(__file__).resolve().parent / "model_prep"
+    if str(prep) not in sys.path:
+        sys.path.insert(0, str(prep))
+    from variable_penetration import validate_generator_config
+
+    config = validate_generator_config(json.loads(path.read_text(encoding="utf-8")))
+    keys = {item["observation_key"] for item in config["datasets"]}
+    if len(keys) != 1:
+        raise SystemExit(f"{path} must contain one observation key, got {sorted(keys)}")
+    key = keys.pop()
+    CAMPAIGN_ID = f"variable_{key}_train42_eval5"
+    EXPERIMENT_ID = CAMPAIGN_ID
+    OBSERVATION_KEY = key
+    DATASETS = tuple(
+        {"dataset_id": item["dataset_id"], "period_seconds": int(item["segment_seconds"])}
+        for item in config["datasets"]
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Schedule the 144 variable-penetration baseline tasks.")
+    parser = argparse.ArgumentParser(description="Schedule variable-penetration baseline tasks.")
     parser.add_argument("command", choices=("run", "status", "plan", "requeue-failed"))
-    parser.add_argument("--campaign-id", default=CAMPAIGN_ID)
+    parser.add_argument("--campaign-id", default=None)
+    parser.add_argument("--range-config", type=Path, default=None)
     args = parser.parse_args(argv)
-    if args.campaign_id != CAMPAIGN_ID:
+    apply_range_config(args.range_config)
+    selected = args.campaign_id or CAMPAIGN_ID
+    if selected != CAMPAIGN_ID:
         raise SystemExit(f"this entry only resumes {CAMPAIGN_ID}")
     training_root = xuancheng26_training_3s_root()
     results_root = xuancheng26_training_results_3s_root()

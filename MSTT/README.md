@@ -152,7 +152,8 @@ python MSTT/train.py --config MSTT/configs/experiment_A_separate_value_mlp_proje
 
 ## Historical results
 
-Completed ablations, All2I, All2All, and conservation runs remain under
-`training_results_3s/MSTT/`, including `ablation_100ep/` and
-`conservation_best_backbone/`. Those directories are evidence. This tree no
-longer launches the deleted ablation scripts.
+Completed ablations, All2I, All2All, and conservation runs now live under
+`training_results_3s/datasets/legacy_unknown/physical_legacy_unknown/MSTT/`.
+The config and metrics for each completed run are in
+[TRAINING_RESULTS.md](TRAINING_RESULTS.md). This tree no longer launches the
+deleted ablation scripts.

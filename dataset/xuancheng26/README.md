@@ -120,7 +120,7 @@ python3 run_fcd_simulations_3s.py --smoke-test
    - `generate_stjgcn_predefined_graph.py`（有向中心距离上的 PeMSD7 预定义图，写到 `graph/stjgcn/`）
 8. `generate_training_support_files.py`：节点表、校验报告和各模型配置。
 9. `prepare_rf_features.py`：随机森林的辅助特征。它不训练模型。
-10. `../run_variable_baselines.py`：12 个基线（不含 MSTT、PDFormer）× 4 个波动频率 × I2I/A2A/A2I。默认同时占用 8 张空卡，每天 09:00 把上限调回 4。
+10. `../run_variable_baselines.py`：12 个基线（不含 MSTT、PDFormer）× 4 个波动频率 × I2I/A2A/A2I。默认同时占用 8 张空卡，每天 09:00 把上限调回 4。`max_gpus` 只计算占 GPU 的任务；随机森林在 CPU 上跑，不占卡，也不计入这个上限。
 
 ```bash
 cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
@@ -334,13 +334,14 @@ python3 dataset/xuancheng26/run_variable_baselines.py status
 python3 dataset/xuancheng26/run_variable_baselines.py run
 # 改最大 GPU 数：写 control.json 的 max_gpus，下一轮 30 秒轮询会读到；
 # kill -HUP <scheduler.lock 里的 pid> 会立刻重读。默认 8。每天 09:00 把 max_gpus 调回 4。
+# max_gpus 只计算正在占用 GPU 的任务。随机森林是纯 CPU 任务，不占名额，也不占用空卡。
 ```
 
 ## 6. 数据集身份与波动渗透率
 
 固定七档在 `training_data_3s/datasets/fixed_uniform/sampling_seeds/`。顶层没有 `sampling_seeds` 软链接。`full_flow/`、`graph/` 和 `training_data_3s/shared/` 仍是共用文件；`datasets/fixed_uniform/shared/` 指向其中的 split、target scaler、节点表和 12→12 标签。
 
-波动渗透率每次只建一个 `dataset_id`。当前四套都是 `dataset_status=ready`，渗透率都是 `U(0.10, 0.20)`，观测标识都是 `p10_p20`：
+波动渗透率一份配置对应一个区间。`U(0.10, 0.20)` 的四套观测标识是 `p10_p20`，`U(0.05, 0.15)` 是 `p5_p15`，`U(0.05, 0.35)` 是 `p5_p35`，都是 `dataset_status=ready`。标识由 `data_root.observation_key` 生成，5% 写成 `p5`，已有固定率 `p05` 不改名：
 
 | dataset_id | 一段多长 | 段长（秒） |
 | --- | --- | --- |
@@ -348,17 +349,25 @@ python3 dataset/xuancheng26/run_variable_baselines.py run
 | `variable_1h_p10_p20` | 1 小时 | 3600 |
 | `variable_2h_p10_p20` | 2 小时 | 7200 |
 | `variable_day_p10_p20` | 1 天 | 86400 |
+| `variable_30min_p5_p15` | 30 分钟 | 1800 |
+| `variable_1h_p5_p15` | 1 小时 | 3600 |
+| `variable_2h_p5_p15` | 2 小时 | 7200 |
+| `variable_day_p5_p15` | 1 天 | 86400 |
+| `variable_30min_p5_p35` | 30 分钟 | 1800 |
+| `variable_1h_p5_p35` | 1 小时 | 3600 |
+| `variable_2h_p5_p35` | 2 小时 | 7200 |
+| `variable_day_p5_p35` | 1 天 | 86400 |
 
-日程种子是 `schedule_seed` 42，车辆排列种子是 sampling seed 42–46，拟合输入 scaler 用 seed 42，模型初始化是 `model_seed`。每个 dataset 自己有 `sampling_seeds/seed_<id>/flow/window_data/p10_p20/`。窗口里的 split 和 target scaler 经 `datasets/<dataset_id>/shared/` 链到 `training_data_3s/shared/`。`p10_p20` 是这一段上的观测标识，渗透率在 0.10 和 0.20 之间。
+日程种子是 `schedule_seed` 42，车辆排列种子是 sampling seed 42–46，拟合输入 scaler 用 seed 42，模型初始化是 `model_seed`。每个 dataset 自己有 `sampling_seeds/seed_<id>/flow/window_data/<observation_key>/`。窗口里的 split、节点表和 target scaler 经 `datasets/<dataset_id>/shared/` 链到 `training_data_3s/shared/`，输入 scaler 留在该 dataset 里。
 
 ```bash
-cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
-python3 migrate_xuancheng_training_datasets.py --execute
-python3 generate_variable_penetration_datasets.py --config configs/variable_p10_p20.json --execute --workers 24
-python3 audit_variable_penetration.py --dataset-id variable_30min_p10_p20 --dataset-id variable_1h_p10_p20 --dataset-id variable_2h_p10_p20 --dataset-id variable_day_p10_p20 --recount --publish-ready
+cd /home/tzhang174/TrafficFlow
+python3 dataset/xuancheng26/model_prep/generate_variable_penetration_datasets.py \
+  --config dataset/xuancheng26/model_prep/configs/variable_p5_p35.json \
+  --workers 29 --stage all --prepare-models all-baselines --execute
 ```
 
-其它范围只改配置里的 `p_min`、`p_max` 和 `dataset_id`，例如 `0.125` 到 `0.175` 会得到 `variable_day_p12p5_p17p5`。不要把 `p10_p20` 交给 `int()`。结果目录是：
+其它范围新增一份配置，写入 `p_min`、`p_max` 和由 `variable_dataset_id` 得到的 `dataset_id`。例如 `0.125` 到 `0.175` 得到 `variable_day_p12p5_p17p5`。同一条 `u` 不把区间再送进随机数。不要把 `p10_p20` 交给 `int()`。结果目录是：
 
 ```text
 training_results_3s/datasets/<dataset_id>/physical_<version>/<model>/
@@ -366,4 +375,4 @@ training_results_3s/datasets/<dataset_id>/physical_<version>/<model>/
     seed_<model_seed>/<run_id>/
 ```
 
-固定渗透率的历史运行在 `dataset_id=legacy_unknown`、`physical_legacy_unknown`。波动渗透率用 `physical_independent_fcd_v1`，观测标识 `p10_p20`，实验号 `variable_p10_p20_train42_eval5`。完成结果的模型和指标见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。
+固定渗透率的历史运行在 `dataset_id=legacy_unknown`、`physical_legacy_unknown`。已经跑完的 10%–20% 训练用 `physical_independent_fcd_v1`、观测标识 `p10_p20`、实验号 `variable_p10_p20_train42_eval5`。5%–15% 和 5%–35% 这两轮只准备了数据和辅助输入，没有启动训练。完成结果的模型和指标见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。

@@ -246,14 +246,36 @@ def self_test() -> None:
         raise RuntimeError("boundary clock drifted")
     if bin_index(299) != 0 or bin_index(300) != 1 or bin_index(86399) != 287 or bin_index(86400) != 287:
         raise RuntimeError("event bins drifted")
+    mask_self_test()
+
+
+def mask_self_test() -> None:
+    """Bits 0, 63, 64, and 69 survive both the event adder and the snapshot."""
+    n_groups = 70
+    n_edges = 3
+    full = np.zeros((1, n_edges), dtype=np.int64)
+    partial = np.zeros((n_groups, 1, n_edges), dtype=np.int64)
+    _add(full, partial, 0, 0, (1 << 63) | (1 << 69))
+    if int(full[0, 0]) != 1 or int(partial[63, 0, 0]) != 1 or int(partial[69, 0, 0]) != 1:
+        raise RuntimeError("event mask dropped a bit above 62")
+    if int(partial[0, 0, 0]) != 0:
+        raise RuntimeError("event mask set an unselected group")
+    full_occ = np.zeros((1, n_edges), dtype=np.int64)
+    partial_occ = np.zeros((n_groups, 1, n_edges), dtype=np.int64)
+    occupancy_snapshot(full_occ, partial_occ, 0, [1, 2], [1 << 64, (1 << 0) | (1 << 69)], n_edges, n_groups)
+    if int(full_occ[0, 1]) != 1 or int(full_occ[0, 2]) != 1:
+        raise RuntimeError("snapshot full count drifted")
+    if int(partial_occ[64, 0, 1]) != 1 or int(partial_occ[69, 0, 2]) != 1 or int(partial_occ[0, 0, 2]) != 1:
+        raise RuntimeError("snapshot mask dropped a bit above 63")
+    if int(partial_occ[:, 0, :].sum()) != 3:
+        raise RuntimeError("snapshot mask set an extra group")
 
 
 def _load_id_mask(paths: list[Path]) -> dict[str, int]:
+    """Membership bits are Python ints, so a scan can hold more than 63 groups."""
     from vehicle_sampling import read_ids
 
     masks: dict[str, int] = {}
-    if len(paths) > 63:
-        raise RuntimeError(f"group mask does not fit in 64 bits: {len(paths)}")
     for index, path in enumerate(paths):
         bit = 1 << index
         for vehicle_id in read_ids(path):
@@ -267,6 +289,43 @@ def _add(full: np.ndarray, partial: np.ndarray, slot: int, column: int, mask: in
         bit = mask & -mask
         partial[bit.bit_length() - 1, slot, column] += 1
         mask -= bit
+
+
+def occupancy_snapshot(
+    full_occ: np.ndarray,
+    partial_occ: np.ndarray,
+    index: int,
+    columns: list[int],
+    masks: list[int],
+    n_edges: int,
+    n_groups: int,
+) -> None:
+    """Count one boundary. Group bits above 63 use extra uint64 words and do not wrap."""
+    if n_groups < 0:
+        raise RuntimeError(f"negative group count {n_groups}")
+    if len(columns) != len(masks):
+        raise RuntimeError("snapshot columns and masks differ")
+    if not columns:
+        return
+    column_array = np.asarray(columns, dtype=np.int32)
+    full_occ[index] = np.bincount(column_array, minlength=n_edges)
+    n_words = max(1, (n_groups + 63) // 64)
+    packed = np.zeros((len(masks), n_words), dtype=np.uint64)
+    for row, mask in enumerate(masks):
+        value = int(mask)
+        word = 0
+        while value and word < n_words:
+            packed[row, word] = np.uint64(value & 0xFFFFFFFFFFFFFFFF)
+            value >>= 64
+            word += 1
+        if value:
+            raise RuntimeError(f"group mask does not fit in {n_words} uint64 words")
+    for group_index in range(n_groups):
+        word, offset = divmod(group_index, 64)
+        bit = np.uint64(1) << np.uint64(offset)
+        selected = (packed[:, word] & bit) != 0
+        if np.any(selected):
+            partial_occ[group_index, index] = np.bincount(column_array[selected], minlength=n_edges)
 
 
 def scan_groups(task: dict) -> dict:
@@ -428,25 +487,21 @@ def scan_groups(task: dict) -> dict:
                 return
             index = boundary_of[clock["time"]]
             snapped[index] = 1
-            if not snap_edge:
-                return
-            columns = np.asarray(snap_edge, dtype=np.int32)
-            full_occ[index] = np.bincount(columns, minlength=n_edges)
-            group_masks = np.asarray(snap_mask, dtype=np.uint64)
-            for group_index in range(len(groups)):
-                selected = (group_masks & np.uint64(1 << group_index)) != 0
-                if np.any(selected):
-                    partial_occ[group_index, index] = np.bincount(columns[selected], minlength=n_edges)
+            occupancy_snapshot(full_occ, partial_occ, index, snap_edge, snap_mask, n_edges, len(groups))
 
         nonlocal_seen = [0]
         parser = expat.ParserCreate()
         parser.StartElementHandler = start
         parser.EndElementHandler = end
+        import hashlib
+
         read_bytes = 0
         next_report = 4 << 30
         full.READ_BYTES = 8 << 20
+        fcd_digest = hashlib.sha256()
         for block in full.read_chunks(fcd_path):
             read_bytes += len(block)
+            fcd_digest.update(block)
             parser.Parse(block, False)
             if read_bytes >= next_report:
                 full.log(f"[{date}] independent fcd {read_bytes / 1024**3:.1f} GiB records={counts['records']}")
@@ -487,65 +542,71 @@ def scan_groups(task: dict) -> dict:
         partial_start[:, 1:] = partial_end[:, :-1]
         if np.any(partial_start > full_start) or np.any(partial_end > full_end):
             raise RuntimeError(f"{date} partial occupancy exceeds full")
-        def compared(path: str | None, matrix: np.ndarray) -> dict | None:
-            if not path:
-                return None
-            source = Path(path)
-            if not source.is_file():
-                return {"status": "missing"}
-            old = full.read_flow_csv(source, edges)
-            gap = old - matrix
-            return {
-                "status": "compared",
-                "changed_cells": int(np.count_nonzero(gap)),
-                "abs_sum": int(np.abs(gap).sum()),
-                "max_abs": int(np.abs(gap).max()) if gap.size else 0,
-            }
-
-        out_root = Path(task["out_dir"])
-        written = []
         matrices = {
             "inflow": full_in.astype(np.int64),
             "outflow": full_out.astype(np.int64),
             "accumulation_start": full_start,
             "accumulation_end": full_end,
         }
-        full_dir = out_root / "full"
-        for name, matrix in matrices.items():
-            full.write_matrix(full_dir / f"{name}.csv", matrix, edges)
-            written.append(str(full_dir / f"{name}.csv"))
+        published_full = Path(task["compare_full"]) if task.get("compare_full") else None
+        comparison = {}
+        if published_full is not None:
+            for name, matrix in matrices.items():
+                source = published_full / f"{name}.csv"
+                if not source.is_file():
+                    raise RuntimeError(f"{date} published full state is missing: {source}")
+                old = full.read_flow_csv(source, edges)
+                gap = old - matrix
+                changed = int(np.count_nonzero(gap))
+                comparison[name] = {
+                    "status": "compared",
+                    "changed_cells": changed,
+                    "abs_sum": int(np.abs(gap).sum()),
+                    "max_abs": int(np.abs(gap).max()) if gap.size else 0,
+                }
+                if changed:
+                    raise RuntimeError(
+                        f"{date} scanned full {name} disagrees with the published file "
+                        f"changed_cells={changed} abs_sum={comparison[name]['abs_sum']}"
+                    )
+        out_root = Path(task["out_dir"])
         group_summaries = []
+        actions = {"written": 0, "skipped": 0}
         for group_index, group in enumerate(groups):
-            directory = out_root / group["relative"]
             group_matrices = {
                 "inflow": partial_in[group_index].astype(np.int64),
                 "outflow": partial_out[group_index].astype(np.int64),
                 "accumulation_start": partial_start[group_index],
                 "accumulation_end": partial_end[group_index],
             }
-            for name, matrix in group_matrices.items():
-                full.write_matrix(directory / f"{name}.csv", matrix, edges)
+            publish = Path(group["publish"])
+            action = _publish_partial(publish, group_matrices, edges, group["name"])
+            actions[action] = actions.get(action, 0) + 1
             group_summaries.append({
                 "name": group["name"],
-                "relative": group["relative"],
+                "dataset_id": group.get("dataset_id"),
+                "sampling_seed": group.get("sampling_seed"),
+                "observation_key": group.get("observation_key"),
+                "members_sha256": group.get("members_sha256"),
+                "publish": str(publish),
+                "action": action,
+                "csv_sha256": {name: _sha256_file(publish / f"{name}.csv") for name in CHANNELS},
                 "residual": summarize_residual(residual(
                     group_matrices["accumulation_start"], group_matrices["accumulation_end"],
                     group_matrices["inflow"], group_matrices["outflow"],
                 )),
-                "comparison": {
-                    name: compared(str(Path(group["compare"]) / f"{name}.csv") if group.get("compare") else None, matrix)
-                    for name, matrix in group_matrices.items()
-                },
             })
+        full_residual = summarize_residual(residual(full_start, full_end, matrices["inflow"], matrices["outflow"]))
         breakdown = {
             "physical_definition_version": PHYSICAL_VERSION,
             "definition_sha256": definition_sha256(),
+            "build_id": task.get("build_id"),
             "date": date,
-            "comparison": {
-                name: compared(str(Path(task["compare_full"]) / f"{name}.csv") if task.get("compare_full") else None, matrix)
-                for name, matrix in matrices.items()
-            },
+            "comparison": comparison,
+            "published_full_unchanged": True,
             "fcd": str(fcd_path),
+            "fcd_sha256": fcd_digest.hexdigest(),
+            "fcd_size": int(fcd_path.stat().st_size),
             "samples": nonlocal_seen[0],
             "first_time": 0,
             "last_time": int(clock["time"]),
@@ -557,24 +618,52 @@ def scan_groups(task: dict) -> dict:
             "unknown_lane_ids": sorted(unknown_lanes)[:30],
             "unknown_lane_total": int(sum(unknown_lanes.values())),
             "examples": examples,
-            "full_residual": summarize_residual(residual(full_start, full_end, matrices["inflow"], matrices["outflow"])),
+            "full_residual": full_residual,
             "groups": group_summaries,
         }
-        path = full_dir / "event_breakdown.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(breakdown, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
+        out_root.mkdir(parents=True, exist_ok=True)
+        _atomic_json(out_root / "event_breakdown.json", breakdown)
+        marker = {
+            "date": date,
+            "ok": True,
+            "build_id": task.get("build_id"),
+            "physical_definition_version": PHYSICAL_VERSION,
+            "definition_sha256": definition_sha256(),
+            "node_order_sha256": task.get("node_order_sha256"),
+            "fcd": str(fcd_path),
+            "fcd_sha256": breakdown["fcd_sha256"],
+            "fcd_size": breakdown["fcd_size"],
+            "fcd_mtime_ns": int(fcd_path.stat().st_mtime_ns),
+            "tripinfo": str(task.get("tripinfo") or ""),
+            "tripinfo_size": int(Path(task["tripinfo"]).stat().st_size) if task.get("tripinfo") else None,
+            "tripinfo_mtime_ns": int(Path(task["tripinfo"]).stat().st_mtime_ns) if task.get("tripinfo") else None,
+            "full_comparison": comparison,
+            "groups": [
+                {
+                    "name": item["name"],
+                    "members_sha256": item["members_sha256"],
+                    "publish": item["publish"],
+                    "csv_sha256": item["csv_sha256"],
+                }
+                for item in group_summaries
+            ],
+        }
+        _atomic_json(out_root / "complete.json", marker)
         full.log(
             f"[{date}] independent PASS records={counts['records']} "
             f"in={int(full_in.sum())} out={int(full_out.sum())} "
-            f"residual_nonzero={breakdown['full_residual']['nonzero_cells']}"
+            f"residual_nonzero={full_residual['nonzero_cells']} "
+            f"published={actions}"
         )
-        marker = out_root / "complete.json"
-        temporary = marker.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps({"date": date, "physical_definition_version": PHYSICAL_VERSION, "ok": True}) + "\n", encoding="utf-8")
-        os.replace(temporary, marker)
-        return {"date": date, "ok": True, "out_dir": str(out_root), "counts": counts, "full_residual": breakdown["full_residual"], "comparison": breakdown["comparison"]}
+        return {
+            "date": date,
+            "ok": True,
+            "out_dir": str(out_root),
+            "counts": counts,
+            "full_residual": full_residual,
+            "comparison": comparison,
+            "actions": actions,
+        }
     except Exception:
         return {"date": date, "ok": False, "error": traceback.format_exc(limit=12)}
 
@@ -584,27 +673,142 @@ SEEDS = (42, 43, 44, 45, 46)
 WORKER: dict = {}
 
 
-def _groups(training_root: Path, date: str, dataset_ids: list[str]) -> list[dict]:
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(8 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _atomic_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _publish_partial(directory: Path, matrices: dict[str, np.ndarray], edges: list[str], label: str) -> str:
+    """Write one selected group's four states. A conflicting complete directory is left untouched."""
+    import shutil
+
+    import generate_r_level_full_flow as full
+
+    files = [directory / f"{name}.csv" for name in CHANNELS]
+    if all(path.is_file() and path.stat().st_size > 0 for path in files):
+        if full.states_match(
+            directory,
+            matrices["inflow"],
+            matrices["outflow"],
+            edges,
+            label,
+            start=matrices["accumulation_start"],
+            end=matrices["accumulation_end"],
+        ):
+            return "skipped"
+        raise RuntimeError(f"refusing to replace conflicting states: {directory}")
+    if directory.exists():
+        shutil.rmtree(directory)
+    full.write_state_matrices(
+        directory,
+        matrices["inflow"],
+        matrices["outflow"],
+        edges,
+        label,
+        start=matrices["accumulation_start"],
+        end=matrices["accumulation_end"],
+        legacy_cumsum=False,
+    )
+    return "written"
+
+
+def selected_groups(training_root: Path, date: str, specs: list[dict]) -> list[dict]:
+    """One observation group per selected dataset and sampling seed. Fixed rates are not implied."""
     groups = []
-    fixed = training_root / "datasets" / "fixed_uniform"
-    for seed in SEEDS:
-        for rate in FIXED_RATES:
-            groups.append({
-                "name": f"fixed:{seed}:{rate}",
-                "relative": f"fixed/seed_{seed}/{rate}",
-                "members": str(fixed / "sampling_seeds" / f"seed_{seed}" / "sampled_vehicle" / rate / f"{date}.csv"),
-                "compare": str(fixed / "sampling_seeds" / f"seed_{seed}" / "flow" / "partial_flow" / rate / date),
-            })
-    for dataset_id in dataset_ids:
+    for spec in specs:
+        dataset_id = str(spec["dataset_id"])
+        key = str(spec["observation_key"])
         root = training_root / "datasets" / dataset_id
-        for seed in SEEDS:
+        for seed in spec["sampling_seeds"]:
+            members = root / "sampling_seeds" / f"seed_{int(seed)}" / "sampled_vehicle" / key / f"{date}.csv"
+            publish = root / "sampling_seeds" / f"seed_{int(seed)}" / "flow" / "partial_flow" / key / date
+            if not members.is_file():
+                raise RuntimeError(f"missing vehicle list: {members}")
             groups.append({
-                "name": f"{dataset_id}:{seed}",
-                "relative": f"variable/{dataset_id}/seed_{seed}",
-                "members": str(root / "sampling_seeds" / f"seed_{seed}" / "sampled_vehicle" / "p10_p20" / f"{date}.csv"),
-                "compare": str(root / "sampling_seeds" / f"seed_{seed}" / "flow" / "partial_flow" / "p10_p20" / date),
+                "name": f"{dataset_id}:{int(seed)}:{key}",
+                "dataset_id": dataset_id,
+                "sampling_seed": int(seed),
+                "observation_key": key,
+                "members": str(members),
+                "members_sha256": _sha256_file(members),
+                "publish": str(publish),
             })
     return groups
+
+
+def build_identity(specs: list[dict], *, node_order_sha256: str, net_sha256: str, fcd_root: Path) -> str:
+    """Identity of one incremental scan. A different range or seed list gets its own staging tree."""
+    import hashlib
+
+    payload = {
+        "physical_definition_version": PHYSICAL_VERSION,
+        "definition_sha256": definition_sha256(),
+        "node_order_sha256": node_order_sha256,
+        "net_sha256": net_sha256,
+        "fcd_root": str(fcd_root),
+        "datasets": [
+            {
+                "dataset_id": str(spec["dataset_id"]),
+                "observation_key": str(spec["observation_key"]),
+                "sampling_seeds": [int(seed) for seed in spec["sampling_seeds"]],
+                "schedule_sha256": str(spec["schedule_sha256"]),
+            }
+            for spec in specs
+        ],
+    }
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _source_fingerprint(path: Path) -> dict:
+    stat = path.stat()
+    return {"path": str(path), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+
+
+def day_already_published(out_dir: Path, groups: list[dict], build_id: str, fcd_path: Path, tripinfo: Path) -> bool:
+    marker_path = out_dir / "complete.json"
+    if not marker_path.is_file():
+        return False
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    fcd_stat = _source_fingerprint(fcd_path)
+    trip_stat = _source_fingerprint(tripinfo)
+    if (
+        marker.get("build_id") != build_id
+        or marker.get("ok") is not True
+        or marker.get("definition_sha256") != definition_sha256()
+        or marker.get("fcd_size") != fcd_stat["size"]
+        or marker.get("fcd_mtime_ns") != fcd_stat["mtime_ns"]
+        or marker.get("tripinfo_size") != trip_stat["size"]
+        or marker.get("tripinfo_mtime_ns") != trip_stat["mtime_ns"]
+    ):
+        return False
+    recorded = {item.get("name"): item for item in marker.get("groups") or []}
+    for group in groups:
+        item = recorded.get(group["name"])
+        if not item or item.get("members_sha256") != group["members_sha256"]:
+            return False
+        publish = Path(group["publish"])
+        for name in CHANNELS:
+            path = publish / f"{name}.csv"
+            expected = (item.get("csv_sha256") or {}).get(name)
+            if not path.is_file() or not expected or _sha256_file(path) != expected:
+                return False
+    return True
 
 
 def _init_worker(payload: dict) -> None:
@@ -618,37 +822,52 @@ def _scan_task(task: dict) -> dict:
     return scan_groups(merged)
 
 
-def scan_all(argv: list[str] | None = None) -> int:
-    import argparse
+def _node_order(training_root: Path) -> list[str]:
+    import csv
+
+    path = training_root / "shared" / "node_mapping.csv"
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    edges = [str(row["edge_id"]) for row in rows]
+    if len(edges) != len(set(edges)):
+        raise RuntimeError(f"duplicate edge ids in {path}")
+    return edges
+
+
+def scan_selected(
+    *,
+    training_root: Path,
+    fcd_root: Path,
+    net_file: Path,
+    specs: list[dict],
+    dates: list[str],
+    workers: int,
+    force: bool = False,
+) -> int:
+    """Scan each date once and publish only the selected datasets' partial states."""
+    import multiprocessing as mp
     import traceback
     from concurrent.futures import ProcessPoolExecutor, as_completed
-    import multiprocessing as mp
 
     import generate_r_level_full_flow as full
-    from data_root import data_root
 
-    parser = argparse.ArgumentParser(description="Scan FCD once per day into independent four-state staging")
-    parser.add_argument("--training-root", type=Path, default=data_root() / "xuancheng26/training_data_3s")
-    parser.add_argument("--fcd-root", type=Path, default=data_root() / "xuancheng26/simulation_data/fcd_data_3s")
-    parser.add_argument("--net-file", type=Path, default=Path("/home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_3s.net.xml"))
-    parser.add_argument("--workers", type=int, default=29)
-    parser.add_argument("--dates", nargs="*")
-    parser.add_argument("--force", action="store_true")
-    args = parser.parse_args(argv)
+    if not specs:
+        raise RuntimeError("scan_selected requires at least one dataset spec")
     self_test()
-    training_root = args.training_root.expanduser().resolve()
-    fcd_root = args.fcd_root.expanduser().resolve()
-    split = json.loads((training_root / "shared" / "split_manifest.json").read_text(encoding="utf-8"))
-    dates = list(args.dates) if args.dates else [day for name in ("train", "validation", "test") for day in split[name]]
-    dataset_ids = ["variable_30min_p10_p20", "variable_1h_p10_p20", "variable_2h_p10_p20", "variable_day_p10_p20"]
-    edges, lane_to_edge, internal = full.load_network(args.net_file.expanduser().resolve())
-    staging = training_root / ".staging" / PHYSICAL_VERSION
+    training_root = Path(training_root).expanduser().resolve()
+    fcd_root = Path(fcd_root).expanduser().resolve()
+    net_file = Path(net_file).expanduser().resolve()
+    node_edges = _node_order(training_root)
+    edges, lane_to_edge, internal = full.load_network(net_file)
+    if edges != node_edges:
+        raise RuntimeError("network edge order does not match shared/node_mapping.csv")
+    node_sha = _sha256_file(training_root / "shared" / "node_mapping.csv")
+    net_sha = _sha256_file(net_file)
+    identity = build_identity(specs, node_order_sha256=node_sha, net_sha256=net_sha, fcd_root=fcd_root)
+    staging = training_root / ".staging" / "variable_builds" / identity
     tasks = []
+    skipped = []
     for date in dates:
-        out_dir = staging / date
-        if (out_dir / "complete.json").is_file() and not args.force:
-            full.log(f"[{date}] staging complete, skip")
-            continue
         day_dir = fcd_root / date
         gzip_path = day_dir / f"fcd_{date}.xml.gz"
         plain_path = day_dir / f"fcd_{date}.xml"
@@ -656,15 +875,33 @@ def scan_all(argv: list[str] | None = None) -> int:
         trip = day_dir / f"tripinfo_{date}.xml.gz"
         if not trip.is_file():
             trip = day_dir / f"tripinfo_{date}.xml"
+        if not fcd_path.is_file() or not trip.is_file():
+            raise RuntimeError(f"{date} is missing FCD or tripinfo")
+        groups = selected_groups(training_root, date, specs)
+        out_dir = staging / date
+        if not force and day_already_published(out_dir, groups, identity, fcd_path, trip):
+            skipped.append(date)
+            full.log(f"[{date}] selected states already published, skip")
+            continue
         tasks.append({
             "date": date,
             "fcd": str(fcd_path),
             "tripinfo": str(trip),
             "out_dir": str(out_dir),
-            "groups": _groups(training_root, date, dataset_ids),
+            "groups": groups,
             "compare_full": str(training_root / "full_flow" / "r-level" / date),
+            "build_id": identity,
+            "node_order_sha256": node_sha,
+            "training_root": str(training_root),
+            "fcd_root": str(fcd_root),
+            "net_file": str(net_file),
         })
-    full.log(f"independent scan days={len(tasks)} groups={1 + 35 + 20} workers={min(args.workers, max(1, len(tasks)))} edges={len(edges)}")
+    group_count = len(specs) * len(specs[0]["sampling_seeds"])
+    full.log(
+        f"independent scan days={len(tasks)} skipped={len(skipped)} "
+        f"groups={group_count} workers={min(int(workers), max(1, len(tasks) or 1))} "
+        f"edges={len(edges)} build={identity[:12]}"
+    )
     if not tasks:
         return 0
     payload = {
@@ -673,10 +910,10 @@ def scan_all(argv: list[str] | None = None) -> int:
         "internal": internal,
         "edge_index": {edge: index for index, edge in enumerate(edges)},
     }
-    workers = max(1, min(int(args.workers), len(tasks)))
+    worker_count = max(1, min(int(workers), len(tasks)))
     results = []
     context = mp.get_context("fork")
-    with ProcessPoolExecutor(max_workers=workers, mp_context=context, initializer=_init_worker, initargs=(payload,)) as pool:
+    with ProcessPoolExecutor(max_workers=worker_count, mp_context=context, initializer=_init_worker, initargs=(payload,)) as pool:
         futures = {pool.submit(_scan_task, task): task["date"] for task in tasks}
         for future in as_completed(futures):
             date = futures[future]
@@ -691,13 +928,69 @@ def scan_all(argv: list[str] | None = None) -> int:
                 comparison = row.get("comparison") or {}
                 inflow = (comparison.get("inflow") or {}).get("changed_cells")
                 stock = (comparison.get("accumulation_end") or {}).get("changed_cells")
-                full.log(f"[{date}] done inflow_changed={inflow} accumulation_end_changed={stock}")
+                full.log(f"[{date}] done inflow_changed={inflow} accumulation_end_changed={stock} actions={row.get('actions')}")
     failed = [row["date"] for row in results if not row.get("ok")]
-    summary = staging / "scan_summary.json"
-    summary.parent.mkdir(parents=True, exist_ok=True)
-    summary.write_text(json.dumps({"failed": failed, "rows": results}, ensure_ascii=False) + "\n", encoding="utf-8")
-    full.log(f"scan failed={failed or 'none'} summary={summary}")
+    summary = {
+        "build_id": identity,
+        "failed": failed,
+        "skipped": skipped,
+        "node_order_sha256": node_sha,
+        "net_sha256": net_sha,
+        "datasets": [spec["dataset_id"] for spec in specs],
+        "rows": [{key: row.get(key) for key in ("date", "ok", "error", "actions", "comparison")} for row in results],
+    }
+    _atomic_json(staging / "scan_summary.json", summary)
+    full.log(f"scan failed={failed or 'none'} summary={staging / 'scan_summary.json'}")
     return 1 if failed else 0
+
+
+def _specs_from_manifests(training_root: Path, dataset_ids: list[str]) -> list[dict]:
+    specs = []
+    for dataset_id in dataset_ids:
+        root = training_root / "datasets" / dataset_id
+        manifest = json.loads((root / "dataset_manifest.json").read_text(encoding="utf-8"))
+        schedule = json.loads((root / "penetration_schedule.json").read_text(encoding="utf-8"))
+        if manifest.get("dataset_id") != dataset_id:
+            raise RuntimeError(f"{dataset_id} manifest id is {manifest.get('dataset_id')!r}")
+        keys = [str(item) for item in manifest.get("observation_keys") or []]
+        if len(keys) != 1:
+            raise RuntimeError(f"{dataset_id} must declare one observation key, got {keys}")
+        specs.append({
+            "dataset_id": dataset_id,
+            "observation_key": keys[0],
+            "sampling_seeds": [int(seed) for seed in manifest["sampling_seeds"]],
+            "schedule_sha256": str(schedule["schedule_sha256"]),
+        })
+    return specs
+
+
+def scan_all(argv: list[str] | None = None) -> int:
+    import argparse
+
+    from data_root import data_root
+
+    parser = argparse.ArgumentParser(description="Scan FCD once per day for selected variable datasets")
+    parser.add_argument("--training-root", type=Path, default=data_root() / "xuancheng26/training_data_3s")
+    parser.add_argument("--fcd-root", type=Path, default=data_root() / "xuancheng26/simulation_data/fcd_data_3s")
+    parser.add_argument("--net-file", type=Path, default=Path("/home/tzhang174/TrafficFlow/dataset/xuancheng26/xuancheng_tls_3s.net.xml"))
+    parser.add_argument("--dataset-ids", nargs="+", required=True)
+    parser.add_argument("--workers", type=int, default=29)
+    parser.add_argument("--dates", nargs="*")
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args(argv)
+    training_root = args.training_root.expanduser().resolve()
+    split = json.loads((training_root / "shared" / "split_manifest.json").read_text(encoding="utf-8"))
+    dates = list(args.dates) if args.dates else [day for name in ("train", "validation", "test") for day in split[name]]
+    specs = _specs_from_manifests(training_root, [str(item) for item in args.dataset_ids])
+    return scan_selected(
+        training_root=training_root,
+        fcd_root=args.fcd_root,
+        net_file=args.net_file,
+        specs=specs,
+        dates=dates,
+        workers=int(args.workers),
+        force=bool(args.force),
+    )
 
 
 if __name__ == "__main__":

@@ -31,7 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import generate_r_level_full_flow as full  # noqa: E402
 import generate_r_level_windows as windows  # noqa: E402
 import prep_paths  # noqa: E402
-from data_root import data_root, observation_key, variable_dataset_id  # noqa: E402
+from data_root import data_root  # noqa: E402
+from independent_states import PHYSICAL_VERSION, definition_sha256  # noqa: E402
 from variable_penetration import (  # noqa: E402
     ALGORITHM_VERSION,
     SCHEMA_VERSION,
@@ -39,9 +40,10 @@ from variable_penetration import (  # noqa: E402
     build_schedule,
     population_from_tripinfo,
     sample_day,
-    SEGMENT_SECONDS,
     schedule_sha256,
     segments_for_date,
+    validate_generator_config,
+    verify_depart_prefix,
 )
 from vehicle_sampling import read_ids, write_ids  # noqa: E402
 
@@ -73,24 +75,10 @@ def write_json(path: Path, payload: dict) -> None:
 
 def load_config(path: Path) -> dict:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    low, high = float(payload["p_min"]), float(payload["p_max"])
-    key = observation_key(low, high)
-    if payload.get("algorithm_version") != ALGORITHM_VERSION:
-        raise RuntimeError("algorithm_version does not match this generator")
-    if list(payload["sampling_seeds"]) != [42, 43, 44, 45, 46]:
-        raise RuntimeError("sampling seeds must stay 42..46")
-    if int(payload["fit_sampling_seed"]) != 42 or int(payload["schedule_seed"]) != 42:
-        raise RuntimeError("fit_sampling_seed and schedule_seed stay 42; they are not the model seed")
-    for item in payload["datasets"]:
-        expected = variable_dataset_id(item["mode"], low, high)
-        if item["dataset_id"] != expected or item["dataset_id"].rsplit("_", 2)[-2:] != ["p10", "p20"] and key != "p10_p20":
-            if item["dataset_id"] != expected:
-                raise RuntimeError(f"dataset_id {item['dataset_id']} != {expected}")
-        item["observation_key"] = key
-        expected_seconds = SEGMENT_SECONDS.get(item["mode"])
-        if expected_seconds is None or int(item["segment_seconds"]) != expected_seconds:
-            raise RuntimeError(f"{item['mode']} must use {expected_seconds} second segments")
-    return payload
+    try:
+        return validate_generator_config(payload)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def split_dates(training_root: Path) -> tuple[dict[str, list[str]], list[str]]:
@@ -101,6 +89,12 @@ def split_dates(training_root: Path) -> tuple[dict[str, list[str]], list[str]]:
         raise RuntimeError("authoritative split is not 20/4/5 unique days")
     if payload.get("n_his") != 12 or payload.get("target_mode") != "last-observed-step":
         raise RuntimeError("reconstruction contract changed")
+    from variable_penetration import validate_dates
+
+    try:
+        validate_dates(dates)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
     return splits, dates
 
 
@@ -152,7 +146,7 @@ def link_relative(path: Path, target: Path) -> None:
     path.symlink_to(text)
 
 
-def prepare_dataset(training_root: Path, spec: dict, schedule: dict, splits: dict[str, list[str]]) -> None:
+def prepare_dataset(training_root: Path, spec: dict, schedule: dict, splits: dict[str, list[str]], seeds: list[int]) -> None:
     root = prep_paths.refuse_code_root(dataset_root(training_root, spec["dataset_id"]))
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / "dataset_manifest.json"
@@ -165,12 +159,15 @@ def prepare_dataset(training_root: Path, spec: dict, schedule: dict, splits: dic
         "p_max": schedule["p_max"],
         "segment_seconds": schedule["segment_seconds"],
         "schedule_seed": schedule["schedule_seed"],
-        "sampling_seeds": [42, 43, 44, 45, 46],
+        "sampling_seeds": [int(seed) for seed in seeds],
         "fit_sampling_seed": 42,
         "algorithm_version": ALGORITHM_VERSION,
         "schema_version": SCHEMA_VERSION,
         "schedule_sha256": schedule["schedule_sha256"],
         "distribution": "uniform_continuous",
+        "physical_definition_version": PHYSICAL_VERSION,
+        "definition_sha256": definition_sha256(),
+        "sampling_algorithm_version": ALGORITHM_VERSION,
     }
     schedule_path = root / "penetration_schedule.json"
     if schedule_path.is_file():
@@ -188,13 +185,25 @@ def prepare_dataset(training_root: Path, spec: dict, schedule: dict, splits: dic
         write_json(manifest_path, manifest)
     shared = root / "shared"
     shared.mkdir(exist_ok=True)
-    link_relative(shared / "split_manifest.json", training_root / "shared" / "split_manifest.json")
-    link_relative(shared / "node_mapping.csv", training_root / "shared" / "node_mapping.csv")
-    if (shared / "split_manifest.json").resolve() != (training_root / "shared" / "split_manifest.json").resolve():
-        raise RuntimeError("split manifest link does not reach the authoritative file")
-    for seed in (42, 43, 44, 45, 46):
-        (root / "sampling_seeds" / f"seed_{seed}" / "flow" / "window_data").mkdir(parents=True, exist_ok=True)
-        (root / "sampling_seeds" / f"seed_{seed}" / "sampled_vehicle" / spec["observation_key"]).mkdir(parents=True, exist_ok=True)
+    for name in (
+        "split_manifest.json",
+        "node_mapping.csv",
+        "physical_definition.json",
+        "target_normalization.json",
+        "sequence_targets_12step",
+    ):
+        target = training_root / "shared" / name
+        if not target.exists():
+            raise RuntimeError(f"missing shared input {target}")
+        before = target.stat().st_ino
+        link_relative(shared / name, target)
+        if (shared / name).resolve() != target.resolve():
+            raise RuntimeError(f"{name} link does not reach the shared file")
+        if target.stat().st_ino != before:
+            raise RuntimeError(f"linking {name} replaced the shared file")
+    for seed in seeds:
+        (root / "sampling_seeds" / f"seed_{int(seed)}" / "flow" / "window_data").mkdir(parents=True, exist_ok=True)
+        (root / "sampling_seeds" / f"seed_{int(seed)}" / "sampled_vehicle" / spec["observation_key"]).mkdir(parents=True, exist_ok=True)
     (root / "audit" / "days").mkdir(parents=True, exist_ok=True)
     (root / "logs").mkdir(exist_ok=True)
     del splits
@@ -212,20 +221,6 @@ def publish_ids(path: Path, vehicle_ids: list[str]) -> str:
     return "written"
 
 
-def fixed_nesting_ok(training_root: Path, date: str, seed: int, chosen: list[str], probability: float) -> dict:
-    chosen_set = set(chosen)
-    root = training_root / "datasets" / "fixed_uniform" / "sampling_seeds" / f"seed_{seed}" / "sampled_vehicle"
-    low = set(read_ids(root / "p10" / f"{date}.csv"))
-    high = set(read_ids(root / "p20" / f"{date}.csv"))
-    count = None
-    return {
-        "contains_fixed_p10": low <= chosen_set,
-        "within_fixed_p20": chosen_set <= high,
-        "target_p": probability,
-        "population_note": count,
-    }
-
-
 def process_vehicle_day(task: dict) -> dict:
     try:
         population = population_from_tripinfo(Path(task["tripinfo"]))
@@ -239,6 +234,14 @@ def process_vehicle_day(task: dict) -> dict:
                     population["ids"], population["depart"], date=task["date"], sampling_seed=seed,
                     segments=segments, segment_seconds=int(spec["schedule"]["segment_seconds"]),
                 )
+                prefix = verify_depart_prefix(
+                    population["ids"], population["depart"], date=task["date"], sampling_seed=seed,
+                    segments=segments, segment_seconds=int(spec["schedule"]["segment_seconds"]), chosen=chosen,
+                    p_min=float(spec["schedule"]["p_min"]) if spec["mode"] == "day" else None,
+                    p_max=float(spec["schedule"]["p_max"]) if spec["mode"] == "day" else None,
+                )
+                if prefix["derived_seed"] != derived:
+                    raise RuntimeError(f"{task['date']} seed {seed} permutation seed drifted")
                 path = Path(spec["vehicle_paths"][str(seed)])
                 action = publish_ids(path, chosen)
                 record = {
@@ -250,13 +253,8 @@ def process_vehicle_day(task: dict) -> dict:
                     "sha256": sha256_file(path),
                     "action": action,
                     "segments": stats,
+                    "prefix_check": prefix["check"],
                 }
-                if spec["mode"] == "day":
-                    record["fixed_prefix"] = fixed_nesting_ok(
-                        Path(task["training_root"]), task["date"], seed, chosen, segments[0]["p"],
-                    )
-                    if not record["fixed_prefix"]["contains_fixed_p10"] or not record["fixed_prefix"]["within_fixed_p20"]:
-                        raise RuntimeError(f"{task['date']} seed {seed} day sample is not nested in fixed p10/p20")
                 results.append(record)
         sets = {}
         for record in results:
@@ -389,27 +387,41 @@ def fit_scaler(training_root: Path, spec: dict, schedule: dict, train_days: list
             bucket[2] += count
             del raw
     fitted = {name: windows._mean_std(*totals[name]) for name in CHANNELS}
-    source = training_root / "shared" / "state_normalization.json"
+    source = training_root / "shared" / "target_normalization.json"
+    before = sha256_file(source)
     authoritative = json.loads(source.read_text(encoding="utf-8"))
+    if authoritative.get("physical_definition_version") != PHYSICAL_VERSION or authoritative.get("definition_sha256") != definition_sha256():
+        raise RuntimeError(f"shared target scaler is not {PHYSICAL_VERSION}")
+    if list(authoritative.get("training_days") or []) != list(train_days):
+        raise RuntimeError("shared target scaler was not fit on the authoritative training days")
+    import subprocess
+
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=CODE_ROOT, text=True).strip()
     payload = {
+        "physical_definition_version": PHYSICAL_VERSION,
+        "definition_sha256": definition_sha256(),
+        "dataset_status": "building",
+        "dataset_id": spec["dataset_id"],
         "fit_split": "train",
         "ddof": 0,
         "formula": "(value - mean) / std",
         "scope": "global_scalar_per_variable",
         "channels": list(CHANNELS),
         "training_days": list(train_days),
-        "dataset_id": spec["dataset_id"],
-        "observation_key": key,
         "fit_sampling_seed": 42,
-        "input_source": "sampling_seed 42 training-window x_raw, overlap retained, ddof 0",
-        "target_source": str(source),
-        "target_source_sha256": sha256_file(source),
+        "observation_key": key,
+        "input_source": "sampling seed 42 training-window x_raw, overlap retained, ddof 0",
+        "target_source": "shared/target_normalization.json",
+        "target_source_sha256": before,
         "schedule_sha256": schedule["schedule_sha256"],
         "target": authoritative["target"],
         "input": {key: {name: {"mean": fitted[name][0], "std": fitted[name][1]} for name in CHANNELS}},
+        "git_commit": commit,
     }
     if authoritative["target"] != payload["target"]:
         raise RuntimeError("target scaler copy diverged")
+    if sha256_file(source) != before:
+        raise RuntimeError("shared target scaler changed while it was being copied")
     destination = root / "shared" / "state_normalization.json"
     if destination.is_symlink():
         raise RuntimeError(f"refusing scaler symlink: {destination}")
@@ -417,13 +429,17 @@ def fit_scaler(training_root: Path, spec: dict, schedule: dict, train_days: list
         existing = json.loads(destination.read_text(encoding="utf-8"))
         if existing.get("input") != payload["input"] or existing.get("target") != payload["target"] or existing.get("fit_sampling_seed") != 42:
             raise RuntimeError(f"scaler conflict: {destination}")
+        if existing.get("physical_definition_version") not in (None, PHYSICAL_VERSION):
+            raise RuntimeError(f"scaler physical version conflict: {destination}")
+        if existing.get("definition_sha256") not in (None, definition_sha256()):
+            raise RuntimeError(f"scaler definition hash conflict: {destination}")
         if existing.get("schedule_sha256") not in (None, schedule["schedule_sha256"]):
             raise RuntimeError(f"scaler was fit for a different schedule: {destination}")
+        payload = existing
     else:
-        before = sha256_file(source)
         write_json(destination, payload)
         if sha256_file(source) != before:
-            raise RuntimeError("authoritative normalization changed while fitting")
+            raise RuntimeError("authoritative target scaler changed while fitting")
     manifest = {
         "train": train_days,
         "validation": json.loads((training_root / "shared" / "split_manifest.json").read_text())["validation"],
@@ -440,10 +456,12 @@ def fit_scaler(training_root: Path, spec: dict, schedule: dict, train_days: list
         "split_directory_name": "validation",
         "rates": [key],
         "dataset_id": spec["dataset_id"],
-        "sampling_seeds": [42, 43, 44, 45, 46],
+        "sampling_seeds": list(json.loads((root / "dataset_manifest.json").read_text(encoding="utf-8"))["sampling_seeds"]),
         "schedule_sha256": schedule["schedule_sha256"],
         "normalization_file": str(destination),
         "fit_sampling_seed": 42,
+        "physical_definition_version": PHYSICAL_VERSION,
+        "definition_sha256": definition_sha256(),
     }
     manifest_path = root / "shared" / "state_window_manifest.json"
     if manifest_path.is_symlink():
@@ -453,11 +471,13 @@ def fit_scaler(training_root: Path, spec: dict, schedule: dict, train_days: list
     if not summary.exists():
         write_json(summary, {
             "overall_validation_passed": False,
-            "failures": ["pending independent audit"],
+            "dataset_status": "building",
+            "failures": ["windows and release checks are not finished"],
             "dataset_id": spec["dataset_id"],
-            "stage": "scaler_frozen",
+            "physical_definition_version": PHYSICAL_VERSION,
+            "definition_sha256": definition_sha256(),
         })
-    for seed in (42, 43, 44, 45, 46):
+    for seed in json.loads((root / "dataset_manifest.json").read_text(encoding="utf-8"))["sampling_seeds"]:
         window = root / "sampling_seeds" / f"seed_{seed}" / "flow" / "window_data"
         for name in ("split_manifest.json", "node_mapping.csv", "state_normalization.json", "state_window_manifest.json", "validation_summary.json"):
             link_relative(window / name, root / "shared" / name)
@@ -469,21 +489,54 @@ def fit_scaler(training_root: Path, spec: dict, schedule: dict, train_days: list
     return payload
 
 
+def _window_identity(day_dir: Path) -> dict | None:
+    path = day_dir / "day_identity.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _source_stat(path: Path) -> dict:
+    stat = path.stat()
+    return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+
+
 def process_window_day(task: dict) -> dict:
     import numpy as np
 
     try:
         date = task["date"]
-        edges = RUNTIME["edges"]
+        edges = task.get("edges") or RUNTIME["edges"]
+        full_root = Path(task.get("full_root") or RUNTIME["full_root"])
         weekday = windows.weekday_index(date)
-        full_states = {name: windows.load_aligned_matrix(Path(RUNTIME["full_root"]) / date / f"{name}.csv", edges) for name in CHANNELS}
+        full_states = {name: windows.load_aligned_matrix(full_root / date / f"{name}.csv", edges) for name in CHANNELS}
         written = skipped = 0
         for spec in task["datasets"]:
             stats = spec["scaler"]
             key = spec["observation_key"]
             for seed in task["sampling_seeds"]:
                 partial_root = Path(spec["dataset_root"]) / "sampling_seeds" / f"seed_{seed}" / "flow" / "partial_flow" / key / date
+                members = Path(spec["dataset_root"]) / "sampling_seeds" / f"seed_{seed}" / "sampled_vehicle" / key / f"{date}.csv"
                 partial = {name: windows.load_aligned_matrix(partial_root / f"{name}.csv", edges) for name in CHANNELS}
+                identity = {
+                    "dataset_id": spec["dataset_id"],
+                    "sampling_seed": int(seed),
+                    "observation_key": key,
+                    "date": date,
+                    "split": task["split"],
+                    "schedule_sha256": spec["schedule_sha256"],
+                    "vehicle_list_sha256": sha256_file(members),
+                    "physical_definition_version": PHYSICAL_VERSION,
+                    "definition_sha256": definition_sha256(),
+                    "node_order_sha256": task["node_order_sha256"],
+                    "scaler_sha256": spec["scaler_sha256"],
+                    "full_source": {
+                        name: _source_stat(full_root / date / f"{name}.csv") for name in CHANNELS
+                    },
+                }
                 single = {}
                 starts = targets = None
                 for name in CHANNELS:
@@ -495,6 +548,8 @@ def process_window_day(task: dict) -> dict:
                     np.concatenate([single[name][1] for name in CHANNELS], axis=-1),
                 )
                 day_dir = Path(spec["dataset_root"]) / "sampling_seeds" / f"seed_{seed}" / "flow" / "window_data" / key / task["split"] / date
+                stored_identity = _window_identity(day_dir)
+                identity_ok = stored_identity == identity
                 day_index = np.full(windows.N_WINDOWS, weekday, dtype=np.int32)
                 for state_name, (x_raw, y_raw) in bundles.items():
                     names = CHANNELS if state_name == "all" else (state_name,)
@@ -504,7 +559,7 @@ def process_window_day(task: dict) -> dict:
                     std_y = np.asarray([stats["target"][name]["std"] for name in names], dtype=np.float32)
                     path = day_dir / f"{state_name}.npz"
                     channels = 4 if state_name == "all" else 1
-                    if windows._file_matches(path, channels=channels, weekday=weekday, mean_x=mean_x, std_x=std_x, mean_y=mean_y, std_y=std_y):
+                    if identity_ok and windows._file_matches(path, channels=channels, weekday=weekday, mean_x=mean_x, std_x=std_x, mean_y=mean_y, std_y=std_y):
                         skipped += 1
                         continue
                     windows.write_npz(path, {
@@ -519,6 +574,7 @@ def process_window_day(task: dict) -> dict:
                     if not windows._file_matches(path, channels=channels, weekday=weekday, mean_x=mean_x, std_x=std_x, mean_y=mean_y, std_y=std_y):
                         raise RuntimeError(f"window verification failed: {path}")
                     written += 1
+                write_json(day_dir / "day_identity.json", identity)
         log(f"[{date}] windows written={written} skipped={skipped}")
         return {"date": date, "ok": True, "written": written, "skipped": skipped}
     except Exception:
@@ -538,8 +594,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fcd-root", type=Path, default=data_root() / "xuancheng26/simulation_data/fcd_data_3s")
     parser.add_argument("--net-file", type=Path, default=CODE_ROOT / "dataset/xuancheng26/xuancheng_tls_3s.net.xml")
     parser.add_argument("--dates", nargs="+")
-    parser.add_argument("--workers", type=int, default=24)
-    parser.add_argument("--stage", choices=("all", "prepare", "vehicles", "flow", "scaler", "windows"), default="all")
+    parser.add_argument("--workers", type=int, default=29)
+    parser.add_argument("--stage", choices=("all", "prepare", "vehicles", "flow", "scaler", "windows", "ready", "models"), default="all")
+    parser.add_argument("--prepare-models", choices=("none", "all-baselines"), default="none")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--cross-check-date")
     args = parser.parse_args(argv)
@@ -570,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             spec["schedule"] = schedule
             schedules.append(schedule)
-            prepare_dataset(training_root, spec, schedule, splits)
+            prepare_dataset(training_root, spec, schedule, splits, list(config["sampling_seeds"]))
         if args.stage == "prepare":
             log("prepare complete")
             return 0
@@ -610,26 +667,37 @@ def main(argv: list[str] | None = None) -> int:
         RUNTIME.update(edges=edges, lane_to_edge=lane_to_edge, internal=internal, edge_index={edge: index for index, edge in enumerate(edges)},
                        full_root=str(training_root / "full_flow" / "r-level"), fcd_root=str(fcd_root))
         if args.stage in {"all", "flow"}:
-            from independent_states import scan_all
-            scan_argv = [
-                "--training-root", str(training_root),
-                "--fcd-root", str(fcd_root),
-                "--net-file", str(args.net_file),
-                "--workers", str(resources["workers"]),
-            ]
-            if args.dates:
-                scan_argv.extend(["--dates", *dates])
-            if scan_all(scan_argv):
+            from independent_states import scan_selected
+
+            scan_specs = [{
+                "dataset_id": spec["dataset_id"],
+                "observation_key": spec["observation_key"],
+                "sampling_seeds": list(config["sampling_seeds"]),
+                "schedule_sha256": spec["schedule"]["schedule_sha256"],
+            } for spec in config["datasets"]]
+            if scan_selected(
+                training_root=training_root,
+                fcd_root=fcd_root,
+                net_file=args.net_file,
+                specs=scan_specs,
+                dates=dates,
+                workers=resources["workers"],
+            ):
                 return 1
-            _save_stage(training_root, config["datasets"], "flow", {"complete_dataset": complete, "writer": "independent_states.scan", "resources": resources}, complete=complete)
-            log("flow ok via independent scan")
+            _save_stage(training_root, config["datasets"], "flow", {"complete_dataset": complete, "writer": "independent_states.scan_selected", "resources": resources}, complete=complete)
+            log("flow published for the selected datasets")
         if args.stage == "flow":
             return 0
         if args.stage in {"all", "scaler", "windows"}:
             if not set(splits["train"]).issubset(set(dates) if args.stage != "windows" else set(all_dates)):
                 if args.stage == "scaler" or not set(splits["train"]).issubset(set(all_dates)):
                     raise RuntimeError("refusing to fit a scaler before every training day exists")
-            missing_train = [day for day in splits["train"] if not (_group_dir(dataset_root(training_root, config["datasets"][0]["dataset_id"]), 42, config["datasets"][0]["observation_key"], day) / "inflow.csv").is_file()]
+            missing_train = []
+            for spec in config["datasets"]:
+                for day in splits["train"]:
+                    path = _group_dir(dataset_root(training_root, spec["dataset_id"]), 42, spec["observation_key"], day) / "inflow.csv"
+                    if not path.is_file():
+                        missing_train.append(str(path))
             if missing_train:
                 raise RuntimeError(f"training CSVs missing, scaler not fit: {missing_train[:5]}")
             scalers = []
@@ -642,17 +710,27 @@ def main(argv: list[str] | None = None) -> int:
             if "edges" not in RUNTIME:
                 edges, lane_to_edge, internal = full.load_network(args.net_file)
                 RUNTIME.update(edges=edges, lane_to_edge=lane_to_edge, internal=internal, full_root=str(training_root / "full_flow" / "r-level"))
+            node_order_sha256 = sha256_file(training_root / "shared" / "node_mapping.csv")
             window_tasks = []
             for date in (dates if args.stage == "all" else all_dates):
                 window_tasks.append({
                     "date": date,
                     "split": split_of[date],
                     "sampling_seeds": list(config["sampling_seeds"]),
+                    "node_order_sha256": node_order_sha256,
+                    "edges": list(RUNTIME["edges"]),
+                    "full_root": RUNTIME["full_root"],
                     "datasets": [{
                         "dataset_id": spec["dataset_id"],
                         "dataset_root": str(dataset_root(training_root, spec["dataset_id"])),
                         "observation_key": spec["observation_key"],
+                        "schedule_sha256": spec["schedule"]["schedule_sha256"],
                         "scaler": scalers[index],
+                        "scaler_sha256": hashlib.sha256(json.dumps({
+                            "input": scalers[index]["input"],
+                            "target": scalers[index]["target"],
+                            "definition_sha256": scalers[index].get("definition_sha256"),
+                        }, sort_keys=True).encode("utf-8")).hexdigest(),
                     } for index, spec in enumerate(config["datasets"])],
                 })
             window_rows = _run(process_window_day, window_tasks, resources["workers"])
@@ -662,7 +740,39 @@ def main(argv: list[str] | None = None) -> int:
                 for row in failed:
                     log(f"WINDOW FAIL {row['date']} {row.get('error','')[:800]}")
                 return 1
-            log("windows complete; independent audit still required before ready")
+            log("windows written")
+        if args.stage in {"all", "windows", "ready", "models"} and complete:
+            from variable_release import audit_and_release
+
+            report = audit_and_release(
+                training_root, config["datasets"], splits, RUNTIME["edges"], resources["workers"],
+            )
+            if report["failures"]:
+                for item in report["failures"][:20]:
+                    log(f"RELEASE FAIL {item}")
+                return 1
+            log(f"datasets ready counts={report['counts']}")
+        elif args.stage in {"all", "windows", "ready", "models"}:
+            log("partial date list; dataset status stays unfinished")
+        prepare_models = args.prepare_models == "all-baselines" or args.stage == "models"
+        if prepare_models and not complete:
+            log("skipping model preparation until every date is present")
+            return 0
+        if prepare_models:
+            from prepare_baseline_resources import prepare_models as prepare_baseline_models
+
+            model_report = prepare_baseline_models(
+                training_root=training_root,
+                fcd_root=fcd_root,
+                net_file=args.net_file,
+                dataset_ids=[spec["dataset_id"] for spec in config["datasets"]],
+                workers=resources["workers"],
+            )
+            if model_report["failures"]:
+                for item in model_report["failures"][:20]:
+                    log(f"MODEL FAIL {item}")
+                return 1
+            log("baseline resources ready")
         return 0
 
 

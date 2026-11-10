@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Build RF speed features for every published dataset, key, and sampling seed.
+"""Build RF speed features for explicitly selected datasets.
 
-One FCD pass per day updates all 55 observation groups. Fixed rates are nested
-only inside the same sampling seed. Variable groups are not nested with them.
+One FCD pass per day updates that day's selected observation groups. Fixed
+rates are nested only inside the same sampling seed. Variable groups are not
+nested with them.
 """
 
 from __future__ import annotations
@@ -28,13 +29,6 @@ from data_root import data_root  # noqa: E402
 from independent_states import PHYSICAL_VERSION  # noqa: E402
 
 SEEDS = (42, 43, 44, 45, 46)
-DATASETS = (
-    ("fixed_uniform", ("p05", "p10", "p20", "p30", "p40", "p50", "p70")),
-    ("variable_30min_p10_p20", ("p10_p20",)),
-    ("variable_1h_p10_p20", ("p10_p20",)),
-    ("variable_2h_p10_p20", ("p10_p20",)),
-    ("variable_day_p10_p20", ("p10_p20",)),
-)
 
 
 def sha256_file(path: Path) -> str:
@@ -71,12 +65,28 @@ def load_indices(path: Path) -> tuple[list[int], dict[int, str]]:
     return indices, owners
 
 
-def groups_for(training: Path, date: str) -> list[dict]:
+def specs_from_ids(training: Path, dataset_ids: list[str]) -> list[dict]:
+    specs = []
+    for dataset_id in dataset_ids:
+        manifest_path = training / "datasets" / dataset_id / "dataset_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("dataset_id") != dataset_id:
+            raise rf.FeatureError(f"{manifest_path} dataset_id is {manifest.get('dataset_id')!r}")
+        keys = tuple(str(item) for item in manifest.get("observation_keys") or ())
+        seeds = tuple(int(item) for item in manifest.get("sampling_seeds") or ())
+        if not keys or not seeds:
+            raise rf.FeatureError(f"{dataset_id} manifest has no observation keys or sampling seeds")
+        specs.append({"dataset_id": dataset_id, "keys": keys, "seeds": seeds})
+    return specs
+
+
+def groups_for(training: Path, date: str, specs: list[dict]) -> list[dict]:
     groups = []
-    for dataset_id, keys in DATASETS:
-        for seed in SEEDS:
+    for spec in specs:
+        dataset_id = spec["dataset_id"]
+        for seed in spec["seeds"]:
             previous: set[int] | None = None
-            for key in keys:
+            for key in spec["keys"]:
                 members = training / "datasets" / dataset_id / "sampling_seeds" / f"seed_{seed}" / "sampled_vehicle" / key / f"{date}.csv"
                 inflow = training / "datasets" / dataset_id / "sampling_seeds" / f"seed_{seed}" / "flow" / "partial_flow" / key / date / "inflow.csv"
                 out = training / "datasets" / dataset_id / "sampling_seeds" / f"seed_{seed}" / "model_prepared" / "RF" / key / f"{date}.npz"
@@ -98,33 +108,60 @@ def groups_for(training: Path, date: str) -> list[dict]:
     return groups
 
 
-def complete(path: Path, dataset_id: str, seed: int, key: str, members_sha: str) -> bool:
+def complete(path: Path, group: dict, *, edges: list[str], source_fcd: Path, node_sha: str) -> bool:
     if not path.is_file():
         return False
     try:
         import numpy as np
+        stat = source_fcd.stat()
         with np.load(path, allow_pickle=False) as payload:
+            stored_edges = [str(item) for item in payload["edge_ids"].tolist()]
             return (
-                str(payload["dataset_id"]) == dataset_id
-                and int(payload["sampling_seed"]) == seed
-                and str(payload["penetration"]) == key
-                and str(payload["vehicle_list_sha256"]) == members_sha
+                str(payload["dataset_id"]) == group["dataset_id"]
+                and int(payload["sampling_seed"]) == int(group["sampling_seed"])
+                and str(payload["penetration"]) == group["key"]
+                and str(payload["vehicle_list_sha256"]) == group["members_sha256"]
                 and str(payload["physical_definition_version"]) == PHYSICAL_VERSION
                 and int(payload["complete_day"]) == 1
+                and stored_edges == edges
+                and str(payload["source_fcd"]) == str(source_fcd)
+                and int(payload["fcd_size"]) == int(stat.st_size)
+                and int(payload["fcd_mtime_ns"]) == int(stat.st_mtime_ns)
+                and str(payload["node_order_sha256"]) == node_sha
             )
     except Exception:
         return False
 
 
+def _init_worker(payload: dict) -> None:
+    rf.FCD_ROOT = Path(payload["fcd_root"])
+    rf.TRAIN_ROOT = Path(payload["training_root"])
+    rf.NET_FILE = Path(payload["net_file"])
+    rf.LANE_TO_INDEX = payload["lane_to_index"]
+    rf.INTERNAL_LANES = payload["internal_lanes"]
+    rf.BASE_MS = payload["base_ms"]
+    rf.BASE_KMH = payload["base_kmh"]
+    rf.EDGES = payload["edges"]
+
+
 def process_day(task: dict) -> dict:
     date = task["date"]
     try:
-        groups = groups_for(Path(task["training_root"]), date)
-        pending = [group for group in groups if task["force"] or not complete(Path(group["out"]), group["dataset_id"], group["sampling_seed"], group["key"], group["members_sha256"])]
+        groups = list(task["groups"])
+        source_expected = Path(task["source_fcd"])
+        pending = [
+            group for group in groups
+            if task["force"] or not complete(
+                Path(group["out"]), group, edges=list(task["edges"]),
+                source_fcd=source_expected, node_sha=task["node_order_sha256"],
+            )
+        ]
         if not pending:
             return {"date": date, "ok": True, "action": "skipped", "groups": len(groups)}
         mask = rf.build_mask([group["indices"] for group in pending])
-        source = rf.resolve_fcd(date, task["fcd_format"])
+        source = Path(task["source_fcd"])
+        if not source.is_file():
+            raise rf.FeatureError(f"missing FCD {source}")
         rf.log(f"[{date}] rf groups={len(pending)} fcd={source.name}")
         sums, counts, stats = rf.parse_fcd_stream(
             rf.iter_file_blocks(source),
@@ -165,6 +202,7 @@ def process_day(task: dict) -> dict:
                 sampling_seed=group["sampling_seed"],
                 vehicle_list_sha256=group["members_sha256"],
                 physical_definition_version=PHYSICAL_VERSION,
+                node_order_sha256=task["node_order_sha256"],
             )
         rf.log(f"[{date}] rf written={len(pending)}")
         return {"date": date, "ok": True, "action": "written", "groups": len(pending)}
@@ -172,16 +210,18 @@ def process_day(task: dict) -> dict:
         return {"date": date, "ok": False, "error": traceback.format_exc(limit=8)}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     import argparse
-    parser = argparse.ArgumentParser(description="RF speeds for published Xuancheng26 datasets")
+    import multiprocessing as mp
+    parser = argparse.ArgumentParser(description="RF speeds for selected Xuancheng26 datasets")
     parser.add_argument("--training-root", type=Path, default=data_root() / "xuancheng26/training_data_3s")
     parser.add_argument("--fcd-root", type=Path, default=data_root() / "xuancheng26/simulation_data/fcd_data_3s")
     parser.add_argument("--net-file", type=Path, default=CODE / "dataset/xuancheng26/xuancheng_tls_3s.net.xml")
+    parser.add_argument("--dataset-ids", nargs="+", required=True)
     parser.add_argument("--workers", type=int, default=29)
     parser.add_argument("--dates", nargs="*")
     parser.add_argument("--force", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     rf.FCD_ROOT = args.fcd_root.expanduser().resolve()
     rf.TRAIN_ROOT = args.training_root.expanduser().resolve()
     rf.NET_FILE = args.net_file.expanduser().resolve()
@@ -194,14 +234,45 @@ def main() -> int:
     rf.BASE_MS = speed_ms
     rf.BASE_KMH = speed_ms * rf.MS_TO_KMH
     rf.EDGES = edges
+    import csv
+
+    mapped = []
+    with (rf.TRAIN_ROOT / "shared" / "node_mapping.csv").open(encoding="utf-8", newline="") as handle:
+        mapped = [row["edge_id"] for row in csv.DictReader(handle)]
+    if mapped != edges:
+        raise rf.FeatureError("r_nodes.csv order differs from shared/node_mapping.csv")
+    node_sha = sha256_file(rf.TRAIN_ROOT / "shared" / "node_mapping.csv")
+    specs = specs_from_ids(rf.TRAIN_ROOT, [str(item) for item in args.dataset_ids])
     manifest = json.loads((rf.TRAIN_ROOT / "shared" / "split_manifest.json").read_text(encoding="utf-8"))
     dates = list(args.dates) if args.dates else [day for name in ("train", "validation", "test") for day in manifest[name]]
     fcd_format = rf.benchmark_fcd(dates[0])
-    rf.log(f"rf published days={len(dates)} workers={args.workers} fcd_format={fcd_format}")
-    tasks = [{"date": date, "training_root": str(rf.TRAIN_ROOT), "fcd_format": fcd_format, "force": args.force} for date in dates]
+    tasks = []
+    for date in dates:
+        source = rf.resolve_fcd(date, fcd_format)
+        tasks.append({
+            "date": date,
+            "training_root": str(rf.TRAIN_ROOT),
+            "fcd_root": str(rf.FCD_ROOT),
+            "source_fcd": str(source),
+            "force": args.force,
+            "edges": edges,
+            "node_order_sha256": node_sha,
+            "groups": groups_for(rf.TRAIN_ROOT, date, specs),
+        })
+    rf.log(f"rf selected datasets={args.dataset_ids} days={len(dates)} workers={args.workers} fcd_format={fcd_format}")
     failed = []
     workers = max(1, min(args.workers, len(tasks)))
-    with ProcessPoolExecutor(max_workers=workers) as pool:
+    payload = {
+        "fcd_root": str(rf.FCD_ROOT),
+        "training_root": str(rf.TRAIN_ROOT),
+        "net_file": str(rf.NET_FILE),
+        "lane_to_index": lane_to_index,
+        "internal_lanes": internal_lanes,
+        "base_ms": speed_ms,
+        "base_kmh": rf.BASE_KMH,
+        "edges": edges,
+    }
+    with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("fork"), initializer=_init_worker, initargs=(payload,)) as pool:
         futures = {pool.submit(process_day, task): task["date"] for task in tasks}
         for future in as_completed(futures):
             row = future.result()

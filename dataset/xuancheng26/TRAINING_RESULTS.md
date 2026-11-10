@@ -1,6 +1,6 @@
 # 宣城基线训练结果
 
-整理时间：2026-11-09 23:36 +0800。下面是运行状态为 completed、并且已经写出测试指标的基线。
+整理时间：2026-11-09 23:36 +0800。下面是运行状态为 completed、并且已经写出测试指标的基线。MSTT 的配置和数字在 [MSTT/TRAINING_RESULTS.md](../../MSTT/TRAINING_RESULTS.md)。
 
 数字都在数据盘 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/`。一条运行的目录是：
 

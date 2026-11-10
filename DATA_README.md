@@ -66,10 +66,9 @@ simulation_data/
 training_data_3s/
 ├── datasets/
 │   ├── fixed_uniform/sampling_seeds/seed_42 … seed_46/
-│   ├── variable_30min_p10_p20/
-│   ├── variable_1h_p10_p20/
-│   ├── variable_2h_p10_p20/
-│   └── variable_day_p10_p20/
+│   ├── variable_30min_p10_p20/ … variable_day_p10_p20/
+│   ├── variable_30min_p5_p15/  … variable_day_p5_p15/
+│   └── variable_30min_p5_p35/  … variable_day_p5_p35/
 ├── shared/
 ├── full_flow/{r-level,m-level,mr-level}/
 ├── partial_flow/{m-level,mr-level}/
@@ -97,7 +96,20 @@ seed_42/
 
 单通道 `inflow.npz` 的 `x` 是 `(277, 12, 1406, 1)`。`all.npz` 最后一维是 4。
 
-四套可变渗透率的观测键都是 `p10_p20`，种子同样是 42–46。段长分别是 1800、3600、7200、86400 秒，渗透率在 0.10–0.20 之间连续均匀抽取。
+可变渗透率按配置里的 `p_min`、`p_max` 生成，观测键由 `data_root.observation_key` 决定。0.10–0.20 是 `p10_p20`，0.05–0.15 是 `p5_p15`，0.05–0.35 是 `p5_p35`（5% 写成 `p5`，不是 `p05`）。固定渗透率文件仍用原来的 `p05`。每种频率一套 dataset，段长分别是 1800、3600、7200、86400 秒，种子都是 42–46。`p5_p15` 和 `p5_p35` 各四套的 `dataset_status` 和 13 个基线辅助资源都是 ready。静态图、训练全日统计和 RF 道路属性继续共用，不按采样种子复制。RF 速度在各自的 `model_prepared/RF/<observation_key>/`。
+
+换一个区间时新增一份 JSON，不改生成脚本：
+
+```bash
+cd /home/tzhang174/TrafficFlow
+python3 dataset/xuancheng26/model_prep/generate_variable_penetration_datasets.py \
+  --config dataset/xuancheng26/model_prep/configs/variable_p5_p35.json \
+  --workers 29 --stage all --prepare-models all-baselines --execute
+```
+
+`variable_p5_p15.json` 用同一条命令。
+
+断点续跑把 `--stage` 换成 `vehicles`、`flow`、`scaler`、`windows`、`ready` 或 `models`。只补辅助资源用 `--stage models`。训练入口只改 `--dataset-id` 和输出目录；未传 `--rates` 时，单一观测键从该 dataset 的 manifest 读取。
 
 `shared/` 有 `split_manifest.json`、`physical_definition.json`、`node_mapping.csv`、`state_normalization.json`、`target_normalization.json`、`state_window_manifest.json`、`validation_summary.json`、`sequence_targets_12step/{train,validation,test}/YYYY_MM_DD.npz` 和 `provenance/`。序列标签的 `full_raw` 是 `(288, 1406, 4)`。
 

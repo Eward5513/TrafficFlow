@@ -10,9 +10,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 
 from vehicle_sampling import daily_seed, permute
+
+DATE_PATTERN = re.compile(r"^\d{4}_\d{2}_\d{2}$")
 
 ALGORITHM_VERSION = "xuancheng26_variable_penetration_v1"
 SCHEMA_VERSION = "xuancheng26_variable_windows_v1"
@@ -63,6 +66,145 @@ def schedule_sha256(payload: dict) -> str:
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def validate_dates(dates: list[str]) -> list[str]:
+    """Reject blank, duplicate, or non ``YYYY_MM_DD`` labels."""
+    if not dates:
+        raise ValueError("dates must be non-empty")
+    cleaned = [str(item) for item in dates]
+    if len(cleaned) != len(set(cleaned)):
+        raise ValueError(f"duplicate dates: {cleaned}")
+    illegal = [item for item in cleaned if not DATE_PATTERN.fullmatch(item)]
+    if illegal:
+        raise ValueError(f"illegal dates: {illegal}")
+    return cleaned
+
+
+def validate_sampling_seeds(seeds: list[int], *, expected: tuple[int, ...] | None = None) -> list[int]:
+    """Seeds must be unique non-negative integers. ``expected`` pins the official list."""
+    try:
+        values = [int(item) for item in seeds]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"illegal sampling seeds: {seeds}") from exc
+    if any(item < 0 or item > 2**31 - 1 for item in values):
+        raise ValueError(f"illegal sampling seeds: {values}")
+    if len(values) != len(set(values)) or values != sorted(values):
+        raise ValueError(f"sampling seeds must be strictly increasing and unique: {values}")
+    if expected is not None and values != [int(item) for item in expected]:
+        raise ValueError(f"sampling seeds must be {list(expected)}, got {values}")
+    return values
+
+
+def validate_dataset_spec(dataset_id: str, mode: str, p_min: float, p_max: float, segment_seconds: int) -> str:
+    """Return the observation key. The dataset id and segment length must match the range."""
+    from data_root import observation_key, variable_dataset_id
+
+    key = observation_key(p_min, p_max)
+    expected = variable_dataset_id(mode, p_min, p_max)
+    if str(dataset_id) != expected:
+        raise ValueError(f"dataset_id {dataset_id} != {expected}")
+    expected_seconds = SEGMENT_SECONDS.get(mode)
+    if expected_seconds is None or int(segment_seconds) != expected_seconds:
+        raise ValueError(f"{mode} must use {expected_seconds} second segments, got {segment_seconds}")
+    return key
+
+
+def validate_generator_config(payload: dict) -> dict:
+    """Check one range config. Observation keys come only from ``observation_key``."""
+    from data_root import SAMPLING_SEEDS, TRAIN_SAMPLING_SEED
+
+    low = float(payload["p_min"])
+    high = float(payload["p_max"])
+    if payload.get("algorithm_version") != ALGORITHM_VERSION:
+        raise ValueError(f"algorithm_version {payload.get('algorithm_version')!r} != {ALGORITHM_VERSION}")
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(f"schema_version {payload.get('schema_version')!r} != {SCHEMA_VERSION}")
+    seeds = validate_sampling_seeds(list(payload["sampling_seeds"]), expected=SAMPLING_SEEDS)
+    payload["sampling_seeds"] = seeds
+    if int(payload["fit_sampling_seed"]) != int(TRAIN_SAMPLING_SEED):
+        raise ValueError("fit_sampling_seed stays 42; it is not the model seed")
+    if int(payload["schedule_seed"]) != 42:
+        raise ValueError("schedule_seed stays 42; it does not resample vehicles")
+    if int(payload["fit_sampling_seed"]) not in seeds:
+        raise ValueError("fit_sampling_seed is not one of sampling_seeds")
+    datasets = payload.get("datasets")
+    if not isinstance(datasets, list) or not datasets:
+        raise ValueError("config datasets must be a non-empty list")
+    seen: set[str] = set()
+    for item in datasets:
+        key = validate_dataset_spec(
+            str(item["dataset_id"]), str(item["mode"]), low, high, int(item["segment_seconds"]),
+        )
+        if item["dataset_id"] in seen:
+            raise ValueError(f"duplicate dataset_id {item['dataset_id']}")
+        seen.add(item["dataset_id"])
+        item["observation_key"] = key
+        item["p_min"] = low
+        item["p_max"] = high
+    if payload.get("dates") is not None:
+        payload["dates"] = validate_dates(list(payload["dates"]))
+    return payload
+
+
+def verify_depart_prefix(
+    eligible_ids: list[str],
+    depart_of: dict[str, float],
+    *,
+    date: str,
+    sampling_seed: int,
+    segments: list[dict],
+    segment_seconds: int,
+    chosen: list[str],
+    p_min: float | None = None,
+    p_max: float | None = None,
+) -> dict:
+    """Check ``chosen`` against one permutation's depart-group prefixes.
+
+    Day mode also derives the ``p_min`` and ``p_max`` prefixes in memory.
+    Segment modes do not inherit that day-level nesting.
+    """
+    ordered = list(eligible_ids)
+    if ordered != sorted(ordered):
+        raise RuntimeError("eligible ids must already be sorted")
+    rows = sorted(segments, key=lambda item: int(item["segment_index"]))
+    derived = daily_seed(date, sampling_seed)
+    permutation = permute(ordered, derived)
+    chosen_sorted = sorted(chosen)
+    if len(rows) == 1 and int(segment_seconds) == DAY_SECONDS:
+        expected, selected, ratio = take_prefix(permutation, rows[0]["p"])
+        if chosen_sorted != sorted(expected):
+            raise RuntimeError(f"{date} seed {sampling_seed} day sample is not the permutation prefix")
+        if p_min is not None and p_max is not None:
+            low, _low_n, _low_ratio = take_prefix(permutation, p_min)
+            high, _high_n, _high_ratio = take_prefix(permutation, p_max)
+            chosen_set = set(expected)
+            if not set(low) <= chosen_set <= set(high):
+                raise RuntimeError(
+                    f"{date} seed {sampling_seed} day sample is outside the in-memory endpoint prefixes"
+                )
+        return {"check": "day_prefix", "selected_count": selected, "realized_ratio": ratio, "derived_seed": derived}
+    groups: list[list[str]] = [[] for _ in rows]
+    for vehicle_id in permutation:
+        groups[segment_index_for(depart_of[vehicle_id], segment_seconds)].append(vehicle_id)
+    expected: list[str] = []
+    checked = []
+    for segment, group in zip(rows, groups):
+        take, selected, ratio = take_prefix(group, segment["p"])
+        if selected != (math.floor(len(group) * float(segment["p"])) if group else 0):
+            raise RuntimeError(f"{date} segment {segment['segment_index']} prefix length drifted")
+        expected.extend(take)
+        checked.append({
+            "segment_index": int(segment["segment_index"]),
+            "eligible_count": len(group),
+            "selected_count": selected,
+            "realized_ratio": ratio,
+        })
+    if len(expected) != len(set(expected)):
+        raise RuntimeError(f"{date} seed {sampling_seed} segment sample has duplicate ids")
+    if chosen_sorted != sorted(expected):
+        raise RuntimeError(f"{date} seed {sampling_seed} segment sample is not the depart-group prefix")
+    return {"check": "segment_prefix", "segments": checked, "derived_seed": derived}
+
+
 def build_schedule(
     *,
     dataset_id: str,
@@ -75,8 +217,12 @@ def build_schedule(
     observation_key: str,
     algorithm_version: str = ALGORITHM_VERSION,
 ) -> dict:
-    if not dates or len(set(dates)) != len(dates):
-        raise ValueError("schedule dates must be non-empty and unique")
+    key = validate_dataset_spec(dataset_id, mode, p_min, p_max, segment_seconds)
+    if observation_key != key:
+        raise ValueError(f"observation_key {observation_key} != {key}")
+    dates = validate_dates(list(dates))
+    if int(schedule_seed) < 0:
+        raise ValueError(f"illegal schedule_seed {schedule_seed}")
     bounds = segment_bounds(segment_seconds)
     segments = []
     for date in sorted(dates):

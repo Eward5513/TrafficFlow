@@ -13,6 +13,8 @@ TrafficFlow 的主要代码和数据位于 `analysis/`，STGCN 数据整理在 `
 
 除非特别说明，下文中的模块与文件路径都以 `analysis/` 为根目录，例如 `road_network/` 实际对应 `analysis/road_network/`。OCR 辅助脚本单独放在仓库根目录的 `ocr/`；STGCN 脚本与产物在 `reimplementation/stgcn/`。
 
+宣城 3 秒波动渗透率不按区间复制脚本。新区间写一份 JSON，再运行 `dataset/xuancheng26/model_prep/generate_variable_penetration_datasets.py`。5%–15% 和 5%–35% 的配置分别是 `configs/variable_p5_p15.json`、`configs/variable_p5_p35.json`，数据在 `xuancheng26/training_data_3s/datasets/`。细节和目录见 `DATA_README.md`。
+
 SUMO 相关的 `netconvert` / `randomTrips.py` / `sumo` / `xml2csv.py` 典型命令已整理在下文的「SUMO 命令备忘」。
 
 数据从左到右流动：

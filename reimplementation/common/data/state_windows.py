@@ -91,7 +91,11 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
         config["sampling_root"] = str(sampling_root_from_window(args.data_root))
         explicit.append("sampling_root")
     config["explicit_path_keys"] = explicit
+    explicit_rates = getattr(args, "rates", None) is not None or getattr(args, "rate", None) is not None
     config = configure_sampling(config, model_name=model_name)
+    keys = [str(item) for item in config.get("observation_keys") or []]
+    if not explicit_rates and len(keys) == 1:
+        config["rates"] = list(keys)
     input_type = input_flag or config.get("input_type") or "inflow"
     target_type = target_flag or config.get("target_type") or "inflow"
     if model_name in _INCOMPATIBLE_ALL and (input_type == "all" or target_type == "all"):
@@ -133,11 +137,16 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
     if config.get("rates") is not None:
         from reimplementation.common.data.sampling_seeds import tag_configured_rates
 
-        config["rates"] = tag_configured_rates(
-            list(config["rates"]),
-            dataset_id=config.get("dataset_id"),
-            sampling_root=config.get("sampling_root"),
-        )
+        try:
+            config["rates"] = tag_configured_rates(
+                list(config["rates"]),
+                dataset_id=config.get("dataset_id"),
+                sampling_root=config.get("sampling_root"),
+            )
+        except ValueError as exc:
+            raise ReimplementationError(
+                f"observation key does not match dataset {config.get('dataset_id')}: {exc}"
+            ) from exc
     run_dir = ""
     rates = [str(item) for item in (config.get("rates") or [])]
     if len(rates) == 1 and config.get("run_id") and config.get("output_root"):
