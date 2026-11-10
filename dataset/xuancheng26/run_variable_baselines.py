@@ -113,6 +113,10 @@ DATASETS = (
     {"dataset_id": "variable_2h_p10_p20", "period_seconds": 7200},
     {"dataset_id": "variable_day_p10_p20", "period_seconds": 86400},
 )
+DEFAULT_CAMPAIGN_ID = CAMPAIGN_ID
+DEFAULT_OBSERVATION_KEY = OBSERVATION_KEY
+DEFAULT_DATASETS = DATASETS
+PERIOD_SECONDS = {"30min": 1800, "1h": 3600, "2h": 7200, "day": 86400}
 IOS = (
     {"io": "I2I", "input_type": "inflow", "target_type": "inflow"},
     {"io": "A2A", "input_type": "all", "target_type": "all"},
@@ -279,7 +283,7 @@ def dataset_problems(training_root: Path, dataset_id: str, period_seconds: int) 
             message = f"{dataset_id} manifest id is {manifest.get('dataset_id')!r}"
             return message, message
         if list(manifest.get("observation_keys") or []) != [OBSERVATION_KEY]:
-            message = f"{dataset_id} observation_keys={manifest.get('observation_keys')!r}"
+            message = f"{dataset_id} observation_keys={manifest.get('observation_keys')!r} expected {OBSERVATION_KEY}"
             return message, message
         if manifest.get("physical_definition_version") != PHYSICAL_VERSION:
             message = f"{dataset_id} physical={manifest.get('physical_definition_version')!r}"
@@ -397,6 +401,9 @@ def build_tasks(training_root: Path, results_root: Path) -> list[dict]:
 
 
 def command_for(task: dict, python: Path, training_root: Path, results_root: Path, threads: int) -> list[str]:
+    observation_key = str(task["observation_key"])
+    experiment_id = str(task["experiment_id"])
+    sampling_root = training_root / "datasets" / task["dataset_id"] / "sampling_seeds"
     if task["cpu"]:
         return [
             str(python),
@@ -408,7 +415,7 @@ def command_for(task: dict, python: Path, training_root: Path, results_root: Pat
             "--results-root",
             str(results_root / "RF"),
             "--penetrations",
-            OBSERVATION_KEY,
+            observation_key,
             "--input-type",
             task["input_type"],
             "--target-type",
@@ -422,7 +429,7 @@ def command_for(task: dict, python: Path, training_root: Path, results_root: Pat
             "--run-id",
             task["run_id"],
             "--experiment-id",
-            EXPERIMENT_ID,
+            experiment_id,
             "--n-clusters",
             "50",
         ]
@@ -435,8 +442,10 @@ def command_for(task: dict, python: Path, training_root: Path, results_root: Pat
         task["config"],
         "--dataset-id",
         task["dataset_id"],
+        "--sampling-root",
+        str(sampling_root),
         "--experiment-id",
-        EXPERIMENT_ID,
+        experiment_id,
         "--run-id",
         task["run_id"],
         "--model-seed",
@@ -444,11 +453,13 @@ def command_for(task: dict, python: Path, training_root: Path, results_root: Pat
         "--seed",
         str(MODEL_SEED),
         "--rates",
-        OBSERVATION_KEY,
+        observation_key,
         "--input-type",
         task["input_type"],
         "--target-type",
         task["target_type"],
+        "--output-root",
+        str(results_root / task["model"]),
         "--device",
         "cuda:0",
     ]
@@ -1102,49 +1113,112 @@ def requeue_failed(ops: Path) -> None:
 
 def print_plan(training_root: Path, results_root: Path) -> None:
     tasks = build_tasks(training_root, results_root)
-    print(f"tasks={len(tasks)} counts={counts_of(tasks)} preview_run_ids_are_not_saved")
+    print(
+        f"campaign={CAMPAIGN_ID} observation_key={OBSERVATION_KEY} "
+        f"tasks={len(tasks)} counts={counts_of(tasks)} preview_run_ids_are_not_saved"
+    )
+    print(f"state_dir={operations_dir(results_root, CAMPAIGN_ID)}")
     for task in tasks:
         if task["status"] == "blocked":
             print(f"BLOCKED {task['task_id']} {task['error']}")
     print(f"example_run_dir={tasks[0]['run_dir']}")
 
 
-def apply_range_config(path: Path | None) -> None:
-    """Point the scheduler at one range config. The default remains the 10–20 campaign."""
-    global CAMPAIGN_ID, EXPERIMENT_ID, OBSERVATION_KEY, DATASETS
-    if path is None:
-        return
-    import sys
-    prep = Path(__file__).resolve().parent / "model_prep"
-    if str(prep) not in sys.path:
-        sys.path.insert(0, str(prep))
-    from variable_penetration import validate_generator_config
+def datasets_from_manifests(training_root: Path, key: str) -> tuple[dict, ...]:
+    """Read one published penetration range from dataset manifests."""
+    root = training_root / "datasets"
+    if not root.is_dir():
+        raise SystemExit(f"missing datasets directory {root}")
+    rows = []
+    for manifest_path in sorted(root.glob("*/dataset_manifest.json")):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        keys = [str(item) for item in manifest.get("observation_keys") or []]
+        if keys != [key]:
+            continue
+        segment = manifest.get("segment_seconds", manifest.get("period_seconds"))
+        if segment is None:
+            raise SystemExit(f"{manifest_path} has no segment_seconds")
+        rows.append({
+            "dataset_id": str(manifest.get("dataset_id") or manifest_path.parent.name),
+            "period_seconds": int(segment),
+        })
+    found = {int(item["period_seconds"]) for item in rows}
+    if len(rows) != 4 or found != set(PERIOD_SECONDS.values()):
+        raise SystemExit(f"{key} published datasets are {rows}, expected the four configured periods")
+    rows.sort(key=lambda item: int(item["period_seconds"]))
+    return tuple(rows)
 
-    config = validate_generator_config(json.loads(path.read_text(encoding="utf-8")))
-    keys = {item["observation_key"] for item in config["datasets"]}
-    if len(keys) != 1:
-        raise SystemExit(f"{path} must contain one observation key, got {sorted(keys)}")
-    key = keys.pop()
+
+def _assign_campaign(key: str, datasets: tuple[dict, ...]) -> None:
+    global CAMPAIGN_ID, EXPERIMENT_ID, OBSERVATION_KEY, DATASETS
     CAMPAIGN_ID = f"variable_{key}_train42_eval5"
     EXPERIMENT_ID = CAMPAIGN_ID
     OBSERVATION_KEY = key
-    DATASETS = tuple(
-        {"dataset_id": item["dataset_id"], "period_seconds": int(item["segment_seconds"])}
-        for item in config["datasets"]
-    )
+    DATASETS = datasets
+
+
+def select_campaign(
+    *,
+    training_root: Path,
+    range_config: Path | None = None,
+    observation_key: str | None = None,
+) -> None:
+    """Choose one fluctuation range. The default command stays on 10–20%."""
+    global CAMPAIGN_ID, EXPERIMENT_ID, OBSERVATION_KEY, DATASETS
+    if range_config is None and observation_key is None:
+        CAMPAIGN_ID = DEFAULT_CAMPAIGN_ID
+        EXPERIMENT_ID = DEFAULT_CAMPAIGN_ID
+        OBSERVATION_KEY = DEFAULT_OBSERVATION_KEY
+        DATASETS = DEFAULT_DATASETS
+        return
+    if range_config is not None:
+        prep = Path(__file__).resolve().parent / "model_prep"
+        if str(prep) not in sys.path:
+            sys.path.insert(0, str(prep))
+        from variable_penetration import validate_generator_config
+
+        config = validate_generator_config(json.loads(Path(range_config).read_text(encoding="utf-8")))
+        keys = {item["observation_key"] for item in config["datasets"]}
+        if len(keys) != 1:
+            raise SystemExit(f"{range_config} must contain one observation key, got {sorted(keys)}")
+        key = keys.pop()
+        if observation_key is not None and observation_key != key:
+            raise SystemExit(f"--observation-key {observation_key} does not match {range_config} ({key})")
+        periods = {int(item["segment_seconds"]) for item in config["datasets"]}
+        if periods != set(PERIOD_SECONDS.values()) or len(config["datasets"]) != 4:
+            raise SystemExit(f"{range_config} does not contain the four configured periods")
+        _assign_campaign(key, tuple(
+            {"dataset_id": item["dataset_id"], "period_seconds": int(item["segment_seconds"])}
+            for item in sorted(config["datasets"], key=lambda item: int(item["segment_seconds"]))
+        ))
+        return
+    _assign_campaign(str(observation_key), datasets_from_manifests(training_root, str(observation_key)))
+
+
+def apply_range_config(path: Path | None) -> None:
+    """Backward-compatible wrapper. Prefer ``select_campaign``."""
+    if path is None:
+        select_campaign(training_root=xuancheng26_training_3s_root())
+        return
+    select_campaign(training_root=xuancheng26_training_3s_root(), range_config=path)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Schedule variable-penetration baseline tasks.")
     parser.add_argument("command", choices=("run", "status", "plan", "requeue-failed"))
     parser.add_argument("--campaign-id", default=None)
-    parser.add_argument("--range-config", type=Path, default=None)
+    parser.add_argument("--range-config", type=Path, default=None, help="generator JSON for one penetration range, such as variable_p5_p15.json")
+    parser.add_argument("--observation-key", default=None, help="published range such as p5_p15; default remains p10_p20")
     args = parser.parse_args(argv)
-    apply_range_config(args.range_config)
+    training_root = xuancheng26_training_3s_root()
+    select_campaign(
+        training_root=training_root,
+        range_config=args.range_config,
+        observation_key=args.observation_key,
+    )
     selected = args.campaign_id or CAMPAIGN_ID
     if selected != CAMPAIGN_ID:
         raise SystemExit(f"this entry only resumes {CAMPAIGN_ID}")
-    training_root = xuancheng26_training_3s_root()
     results_root = xuancheng26_training_results_3s_root()
     ops = operations_dir(results_root, CAMPAIGN_ID)
     if args.command == "plan":

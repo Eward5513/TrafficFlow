@@ -160,7 +160,6 @@ python3 analysis/simulation/run_simulations.py --generate-only # 备齐数据和
 | `count_edge_departures_by_cycle.py` | 给定渗透率，读 `analysis/simulation/output/<pen>/fcd.csv` + `junction_tls.json`，按周期切分相位窗口，识别每辆车跨过停车线的事件，按 `(cycleIndex, phaseIndex, direction, fromLane→toEdge)` 累加，结果写到 `analysis/flow/<pen>/<junctionId>_edge_departures_by_cycle.json` |
 | `calculate_sample_error_metrics.py` | 对单个路口（默认 `cluster_1247897642_2350807770`），用 `simulation/penetration/<pen>_<seed>_sample.txt` 做"观测样本"，对比 `flow/<pen>/<junctionId>_edge_departures_by_cycle.json` 的真实计数，分两种估计 `obsonly` / `scale`（按渗透率倒数放大），输出 MAE / RMSE / NMAE 等指标，写到 `analysis/metrics/<pen>/...sample_error_metrics.json` |
 | `calculate_queue_augmented_estimates.py` | 在 `scale` 基础上，对直行/左转独占车道，用周期开始前 1 秒采样车排队队尾位置反推一个队长估计（`floor(distance / spacing) + 1`），替换该 movement 的直接计数；同样输出到 `analysis/metrics/<pen>/...queue_estimates.json` |
-| `check_route.py` | 调试用：从 `simulation/output/50/fcd.csv` 中按 vin 抽出该车实际经过的 edge 序列 |
 
 辅助文件：
 

@@ -6,6 +6,7 @@ A failure marks the selected dataset failed and leaves every other dataset alone
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -28,6 +29,14 @@ def _write_json(path: Path, payload: dict) -> None:
 
 def _dataset_root(training_root: Path, dataset_id: str) -> Path:
     return training_root / "datasets" / dataset_id
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def audit_flow_day(task: dict) -> dict:
@@ -113,6 +122,7 @@ def _spot_windows(training_root: Path, spec: dict, splits: dict[str, list[str]],
                 for name in CHANNELS
             }
             day_dir = root / "sampling_seeds" / f"seed_{seed}" / "flow" / "window_data" / key / split / date
+            partial_dir = root / "sampling_seeds" / f"seed_{seed}" / "flow" / "partial_flow" / key / date
             identity_path = day_dir / "day_identity.json"
             if not identity_path.is_file():
                 failures.append(f"missing window identity {identity_path}")
@@ -126,6 +136,15 @@ def _spot_windows(training_root: Path, spec: dict, splits: dict[str, list[str]],
                 or identity.get("physical_definition_version") != PHYSICAL_VERSION
             ):
                 failures.append(f"{day_dir} identity does not match the dataset manifest")
+            partial = {
+                name: windows.load_aligned_matrix(partial_dir / f"{name}.csv", edges)
+                for name in CHANNELS
+            }
+            recorded_partial = identity.get("partial_csv_sha256")
+            if isinstance(recorded_partial, dict):
+                current_partial = {name: _sha256_file(partial_dir / f"{name}.csv") for name in CHANNELS}
+                if recorded_partial != current_partial:
+                    failures.append(f"{day_dir} partial CSV fingerprint does not match the observation files")
             for state in STATES:
                 path = day_dir / f"{state}.npz"
                 names = CHANNELS if state == "all" else (state,)
@@ -144,8 +163,11 @@ def _spot_windows(training_root: Path, spec: dict, splits: dict[str, list[str]],
                         if not np.array_equal(starts, np.arange(windows.N_WINDOWS)) or not np.array_equal(targets, starts + 11):
                             raise RuntimeError("target slot is not window_start_slot + 11")
                         for channel, name in enumerate(names):
+                            expected_x, expected_y, _starts, _targets = windows.make_windows(partial[name], full_states[name])
+                            if not np.array_equal(payload["x_raw"][:, :, :, channel], expected_x[:, :, :, 0]):
+                                raise RuntimeError(f"{name} x_raw is not the current observation CSV")
                             observed = payload["y_raw"][:, 0, :, channel]
-                            expected = np.stack([full_states[name][int(slot)] for slot in targets]).astype(np.float32)
+                            expected = expected_y[:, 0, :, 0]
                             if not np.array_equal(observed, expected):
                                 raise RuntimeError(f"{name} label is not the full state at the target slot")
                             mean = np.float32(normalization["input"][key][name]["mean"])

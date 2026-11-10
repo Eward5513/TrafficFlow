@@ -98,17 +98,60 @@ def split_dates(training_root: Path) -> tuple[dict[str, list[str]], list[str]]:
     return splits, dates
 
 
-def plan_workers(root: Path, requested: int, tasks: int, estimate: int) -> dict:
+# Uncompressed np.savez is the raw array payload plus zip local headers.
+# Measured single-channel and four-channel NPZ files sit about 0.09% above the
+# payload; 2% covers that header. float32 is 4 bytes per element and is applied
+# once. A replacement keeps the old file until os.replace, so each worker can
+# need one extra copy of the day it is rewriting. New files are already counted
+# in ``new_bytes`` and do not add that copy again.
+ARCHIVE_FACTOR = 1.02
+IDENTITY_BYTES = 8192
+READY_BYTES = 1 << 20
+
+
+def _window_payload_bytes(channels: int) -> int:
+    count = windows.N_WINDOWS
+    nodes = windows.N_NODES
+    history = windows.N_HIS
+    x_bytes = count * history * nodes * channels * 4
+    y_bytes = count * nodes * channels * 4
+    index_bytes = count * 4 * 3
+    return x_bytes + y_bytes + x_bytes + y_bytes + index_bytes
+
+
+def day_window_bytes() -> int:
+    """Four single-channel packages plus one four-channel package and the identity JSON."""
+    payload = 4 * _window_payload_bytes(1) + _window_payload_bytes(4) + IDENTITY_BYTES
+    return int(payload * ARCHIVE_FACTOR)
+
+
+def flow_day_bytes() -> int:
+    """Four state CSVs. 16 bytes per cell is above the files on disk."""
+    return 4 * windows.N_BINS * (2 + windows.N_NODES) * 16
+
+
+def rf_day_bytes() -> int:
+    cells = 288 * windows.N_NODES
+    payload = cells * 4 * 3 + windows.N_NODES * 128 + windows.N_NODES * 4 + 4096
+    return int(payload * ARCHIVE_FACTOR)
+
+
+def plan_workers(root: Path, requested: int, tasks: int, *, new_bytes: int, temp_per_worker: int) -> dict:
+    """Date-level workers limited by CPUs, free memory, and this stage's disk margin.
+
+    Four CPUs stay free for the OS and page cache. The estimate does not read FCD.
+    ``temp_per_worker`` is one in-flight replacement, not a second copy of the batch.
+    """
     mem = {}
     for line in Path("/proc/meminfo").read_text().splitlines():
         fields = line.split()
         mem[fields[0].rstrip(":")] = int(fields[1]) * 1024
     cpus = os.cpu_count() or 1
     memory_workers = max(1, int((mem["MemAvailable"] - (32 << 30)) // (3 << 30)))
-    workers = max(1, min(int(requested), tasks, max(1, cpus - 4), memory_workers))
+    workers = max(1, min(int(requested), max(1, tasks), max(1, cpus - 4), memory_workers))
+    temp_margin = int(workers) * int(temp_per_worker)
+    required = int(new_bytes) + temp_margin
     free = shutil.disk_usage(root).free
-    if free < estimate + (20 << 30):
-        raise RuntimeError(f"insufficient disk: free={free} estimate={estimate}")
     return {
         "workers": workers,
         "requested_workers": int(requested),
@@ -117,17 +160,15 @@ def plan_workers(root: Path, requested: int, tasks: int, estimate: int) -> dict:
         "available_memory_bytes": mem["MemAvailable"],
         "reserved_memory_bytes": 32 << 30,
         "disk_free_bytes": free,
-        "estimated_bytes": estimate,
+        "estimated_new_bytes": int(new_bytes),
+        "temp_margin_bytes": temp_margin,
+        "required_free_bytes": required,
+        "disk_sufficient": free >= required,
+        "archive_factor": ARCHIVE_FACTOR,
+        "io_policy": "one worker per date; 4 CPUs reserved; disk estimate does not scan FCD",
         "gpu_used": False,
         "fcd_read_buffer_bytes": 64 << 20,
     }
-
-
-def estimate_bytes(datasets: int, days: int, seeds: int) -> int:
-    one = 4 * (277 * 12 * 1406 * 4 + 277 * 1406 * 4) * 2
-    all_states = one * 4
-    per_day_seed = one * 4 + all_states
-    return int(datasets * days * seeds * per_day_seed * 1.4) + (8 << 30)
 
 
 def dataset_root(training_root: Path, dataset_id: str) -> Path:
@@ -428,7 +469,10 @@ def fit_scaler(training_root: Path, spec: dict, schedule: dict, train_days: list
     if destination.is_file():
         existing = json.loads(destination.read_text(encoding="utf-8"))
         if existing.get("input") != payload["input"] or existing.get("target") != payload["target"] or existing.get("fit_sampling_seed") != 42:
-            raise RuntimeError(f"scaler conflict: {destination}")
+            raise RuntimeError(
+                f"scaler conflict: {destination}. The seed-42 training scaler changed, "
+                "so windows are not republished against a different fit."
+            )
         if existing.get("physical_definition_version") not in (None, PHYSICAL_VERSION):
             raise RuntimeError(f"scaler physical version conflict: {destination}")
         if existing.get("definition_sha256") not in (None, definition_sha256()):
@@ -504,6 +548,31 @@ def _source_stat(path: Path) -> dict:
     return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
 
 
+def _partial_csv_identity(directory: Path) -> dict:
+    """Content hash of the four observation CSVs, plus size and mtime for the disk estimate."""
+    fingerprints = {}
+    stats = {}
+    for name in CHANNELS:
+        path = directory / f"{name}.csv"
+        fingerprints[name] = sha256_file(path)
+        stats[name] = _source_stat(path)
+    return {"partial_csv_sha256": fingerprints, "partial_csv_stat": stats}
+
+
+def _partial_stats_match(directory: Path, recorded: object) -> bool:
+    if not isinstance(recorded, dict):
+        return False
+    for name in CHANNELS:
+        path = directory / f"{name}.csv"
+        item = recorded.get(name)
+        if not path.is_file() or not isinstance(item, dict):
+            return False
+        current = _source_stat(path)
+        if int(item.get("size", -1)) != current["size"] or int(item.get("mtime_ns", -1)) != current["mtime_ns"]:
+            return False
+    return True
+
+
 def process_window_day(task: dict) -> dict:
     import numpy as np
 
@@ -521,6 +590,7 @@ def process_window_day(task: dict) -> dict:
                 partial_root = Path(spec["dataset_root"]) / "sampling_seeds" / f"seed_{seed}" / "flow" / "partial_flow" / key / date
                 members = Path(spec["dataset_root"]) / "sampling_seeds" / f"seed_{seed}" / "sampled_vehicle" / key / f"{date}.csv"
                 partial = {name: windows.load_aligned_matrix(partial_root / f"{name}.csv", edges) for name in CHANNELS}
+                observed = _partial_csv_identity(partial_root)
                 identity = {
                     "dataset_id": spec["dataset_id"],
                     "sampling_seed": int(seed),
@@ -533,6 +603,8 @@ def process_window_day(task: dict) -> dict:
                     "definition_sha256": definition_sha256(),
                     "node_order_sha256": task["node_order_sha256"],
                     "scaler_sha256": spec["scaler_sha256"],
+                    "partial_csv_sha256": observed["partial_csv_sha256"],
+                    "partial_csv_stat": observed["partial_csv_stat"],
                     "full_source": {
                         name: _source_stat(full_root / date / f"{name}.csv") for name in CHANNELS
                     },
@@ -559,7 +631,24 @@ def process_window_day(task: dict) -> dict:
                     std_y = np.asarray([stats["target"][name]["std"] for name in names], dtype=np.float32)
                     path = day_dir / f"{state_name}.npz"
                     channels = 4 if state_name == "all" else 1
-                    if identity_ok and windows._file_matches(path, channels=channels, weekday=weekday, mean_x=mean_x, std_x=std_x, mean_y=mean_y, std_y=std_y):
+                    if identity_ok and windows._file_matches(
+                        path, channels=channels, weekday=weekday, mean_x=mean_x, std_x=std_x, mean_y=mean_y, std_y=std_y,
+                    ):
+                        skipped += 1
+                        continue
+                    # Old identities have no partial CSV hash. Keep a file only when its raw
+                    # values, index, and scaler still match the CSVs, then record the hash.
+                    if windows.window_file_current(
+                        path,
+                        channels=channels,
+                        weekday=weekday,
+                        mean_x=mean_x,
+                        std_x=std_x,
+                        mean_y=mean_y,
+                        std_y=std_y,
+                        x_raw=x_raw,
+                        y_raw=y_raw,
+                    ):
                         skipped += 1
                         continue
                     windows.write_npz(path, {
@@ -571,14 +660,241 @@ def process_window_day(task: dict) -> dict:
                         "window_start_slot": starts,
                         "target_slot": targets,
                     })
-                    if not windows._file_matches(path, channels=channels, weekday=weekday, mean_x=mean_x, std_x=std_x, mean_y=mean_y, std_y=std_y):
+                    if not windows.window_file_current(
+                        path,
+                        channels=channels,
+                        weekday=weekday,
+                        mean_x=mean_x,
+                        std_x=std_x,
+                        mean_y=mean_y,
+                        std_y=std_y,
+                        x_raw=x_raw,
+                        y_raw=y_raw,
+                    ):
                         raise RuntimeError(f"window verification failed: {path}")
                     written += 1
-                write_json(day_dir / "day_identity.json", identity)
+                if not identity_ok:
+                    write_json(day_dir / "day_identity.json", identity)
         log(f"[{date}] windows written={written} skipped={skipped}")
         return {"date": date, "ok": True, "written": written, "skipped": skipped}
     except Exception:
         return {"date": task["date"], "ok": False, "error": traceback.format_exc(limit=8)}
+
+
+def _window_increment(day_dir: Path, partial_dir: Path) -> tuple[int, int]:
+    """Return ``(new_bytes, replace_bytes)`` for one seed-day without reading FCD."""
+    states = (*CHANNELS, "all")
+    files_ok = all((day_dir / f"{name}.npz").is_file() and (day_dir / f"{name}.npz").stat().st_size > 0 for name in states)
+    if not files_ok:
+        return day_window_bytes(), 0
+    stored = _window_identity(day_dir)
+    fingerprint = stored.get("partial_csv_sha256") if isinstance(stored, dict) else None
+    if not isinstance(fingerprint, dict):
+        return IDENTITY_BYTES, 0
+    if _partial_stats_match(partial_dir, stored.get("partial_csv_stat")):
+        return 0, 0
+    if not all((partial_dir / f"{name}.csv").is_file() for name in CHANNELS):
+        return day_window_bytes(), 0
+    current = _partial_csv_identity(partial_dir)["partial_csv_sha256"]
+    if current == fingerprint:
+        return IDENTITY_BYTES, 0
+    return 0, day_window_bytes()
+
+
+def _flow_published(training_root: Path, fcd_root: Path, identity: str, specs: list[dict], date: str) -> bool:
+    from independent_states import day_already_published, selected_groups
+
+    try:
+        groups = selected_groups(training_root, date, specs)
+    except RuntimeError:
+        return False
+    gzip_path = fcd_root / date / f"fcd_{date}.xml.gz"
+    plain_path = fcd_root / date / f"fcd_{date}.xml"
+    fcd_path = gzip_path if gzip_path.is_file() else plain_path
+    trip = fcd_root / date / f"tripinfo_{date}.xml.gz"
+    if not trip.is_file():
+        trip = fcd_root / date / f"tripinfo_{date}.xml"
+    if not fcd_path.is_file() or not trip.is_file():
+        return False
+    staging = training_root / ".staging" / "variable_builds" / identity / date
+    return day_already_published(staging, groups, identity, fcd_path, trip)
+
+
+def _rf_pending_bytes(training_root: Path, dataset_ids: list[str], dates: list[str]) -> tuple[int, int]:
+    """Bytes of RF NPZ that cannot be shown to match the current sampling and inflow."""
+    from prepare_published_rf_features import groups_for, rf_npz_current, specs_from_ids
+
+    try:
+        specs = specs_from_ids(training_root, dataset_ids)
+    except Exception:
+        count = len(dataset_ids) * 5 * max(1, len(dates))
+        return count * rf_day_bytes(), rf_day_bytes()
+    import csv
+
+    edges = []
+    node_file = training_root / "shared" / "node_mapping.csv"
+    if node_file.is_file():
+        with node_file.open(encoding="utf-8", newline="") as handle:
+            edges = [row["edge_id"] for row in csv.DictReader(handle)]
+    node_sha = sha256_file(node_file) if node_file.is_file() else ""
+    new_bytes = 0
+    replace = 0
+    for date in dates:
+        try:
+            groups = groups_for(training_root, date, specs)
+        except Exception:
+            new_bytes += len(dataset_ids) * 5 * rf_day_bytes()
+            replace = max(replace, rf_day_bytes())
+            continue
+        for group in groups:
+            path = Path(group["out"])
+            if rf_npz_current(path, group, edges=edges, node_sha=node_sha):
+                continue
+            if path.is_file() and path.stat().st_size > 0:
+                replace = max(replace, rf_day_bytes())
+            else:
+                new_bytes += rf_day_bytes()
+    return new_bytes, replace
+
+
+def estimate_stage_bytes(
+    *,
+    training_root: Path,
+    fcd_root: Path,
+    net_file: Path,
+    config: dict,
+    dates: list[str],
+    schedule_dates: list[str],
+    stage: str,
+    prepare_models: bool,
+    complete: bool,
+) -> dict:
+    """Incremental bytes for the selected datasets, dates, seeds, and stage.
+
+    ``ready`` is the audit JSON. ``models`` is RF speed files still to write.
+    A full window rebuild is not charged to either of those stages. Flow and
+    window replacement add a per-worker temporary copy, not another full batch.
+    """
+    from variable_penetration import build_schedule
+
+    active = set()
+    if stage == "all":
+        active.update({"vehicles", "flow", "scaler", "windows"})
+        if complete:
+            active.add("ready")
+        if prepare_models:
+            active.add("models")
+    elif stage == "models":
+        active.add("models")
+    elif stage == "ready":
+        active.add("ready")
+    else:
+        active.add(stage)
+        if stage == "windows":
+            active.add("scaler")
+    seeds = [int(seed) for seed in config["sampling_seeds"]]
+    specs = [
+        {"dataset_id": spec["dataset_id"], "observation_key": spec["observation_key"]}
+        for spec in config["datasets"]
+    ]
+    new_bytes = 0
+    replace_unit = 0
+    if "vehicles" in active:
+        for spec in specs:
+            for seed in seeds:
+                for date in dates:
+                    path = (
+                        training_root / "datasets" / spec["dataset_id"] / "sampling_seeds"
+                        / f"seed_{seed}" / "sampled_vehicle" / spec["observation_key"] / f"{date}.csv"
+                    )
+                    if not path.is_file() or path.stat().st_size <= 0:
+                        new_bytes += 1 << 20
+    if "flow" in active:
+        from independent_states import build_identity
+
+        full_specs = []
+        for spec in config["datasets"]:
+            schedule = build_schedule(
+                dataset_id=spec["dataset_id"],
+                mode=spec["mode"],
+                p_min=float(config["p_min"]),
+                p_max=float(config["p_max"]),
+                segment_seconds=int(spec["segment_seconds"]),
+                schedule_seed=int(config["schedule_seed"]),
+                dates=list(schedule_dates),
+                observation_key=spec["observation_key"],
+            )
+            full_specs.append({
+                "dataset_id": spec["dataset_id"],
+                "observation_key": spec["observation_key"],
+                "sampling_seeds": seeds,
+                "schedule_sha256": schedule["schedule_sha256"],
+            })
+        node_sha = sha256_file(training_root / "shared" / "node_mapping.csv")
+        net_sha = sha256_file(net_file)
+        identity = build_identity(full_specs, node_order_sha256=node_sha, net_sha256=net_sha, fcd_root=fcd_root)
+        per_date = len(full_specs) * len(seeds) * flow_day_bytes()
+        for date in dates:
+            if _flow_published(training_root, fcd_root, identity, full_specs, date):
+                continue
+            missing = False
+            for spec in full_specs:
+                for seed in seeds:
+                    directory = _group_dir(dataset_root(training_root, spec["dataset_id"]), seed, spec["observation_key"], date)
+                    if not all((directory / name).is_file() and (directory / name).stat().st_size > 0 for name in STATE_FILES):
+                        missing = True
+                        break
+                if missing:
+                    break
+            if missing:
+                new_bytes += per_date
+            else:
+                replace_unit = max(replace_unit, per_date)
+    if "scaler" in active:
+        for spec in config["datasets"]:
+            path = dataset_root(training_root, spec["dataset_id"]) / "shared" / "state_normalization.json"
+            if not path.is_file():
+                new_bytes += 1 << 16
+    if "windows" in active:
+        split_payload = json.loads((training_root / "shared" / "split_manifest.json").read_text(encoding="utf-8"))
+        split_of = {day: name for name, days in split_payload.items() if name in {"train", "validation", "test"} for day in days}
+        for spec in specs:
+            for seed in seeds:
+                for date in dates:
+                    split = split_of.get(date)
+                    if split is None:
+                        continue
+                    day_dir = (
+                        dataset_root(training_root, spec["dataset_id"]) / "sampling_seeds" / f"seed_{seed}"
+                        / "flow" / "window_data" / spec["observation_key"] / split / date
+                    )
+                    partial_dir = _group_dir(dataset_root(training_root, spec["dataset_id"]), seed, spec["observation_key"], date)
+                    added, replacing = _window_increment(day_dir, partial_dir)
+                    new_bytes += added
+                    replace_unit = max(replace_unit, replacing)
+    if "ready" in active:
+        new_bytes += READY_BYTES * max(1, len(config["datasets"]))
+    if "models" in active:
+        added, replacing = _rf_pending_bytes(training_root, [spec["dataset_id"] for spec in config["datasets"]], dates)
+        new_bytes += added
+        replace_unit = max(replace_unit, replacing)
+    return {
+        "stage": stage,
+        "active_stages": sorted(active),
+        "datasets": [spec["dataset_id"] for spec in config["datasets"]],
+        "dates": list(dates),
+        "sampling_seeds": seeds,
+        "new_bytes": int(new_bytes),
+        "temp_per_worker": int(replace_unit),
+        "archive_factor": ARCHIVE_FACTOR,
+        "note": (
+            "float32 is counted once at 4 bytes for x, y, x_raw, and y_raw. "
+            f"ARCHIVE_FACTOR={ARCHIVE_FACTOR} is the uncompressed np.savez header margin. "
+            "temp_per_worker is one parallel replacement of a day that already exists; "
+            "ready and an identity backfill do not reserve a full window rebuild. "
+            "The estimate stats selected products and does not scan FCD."
+        ),
+    }
 
 
 def _save_stage(training_root: Path, datasets: list[dict], name: str, payload: dict, *, complete: bool) -> None:
@@ -609,11 +925,46 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         raise RuntimeError(f"dates outside the authoritative manifest: {unknown}")
     complete = dates == all_dates
-    resources = plan_workers(training_root, args.workers, max(1, len(dates)), estimate_bytes(len(config["datasets"]), len(all_dates), 5))
+    prepare_models = args.prepare_models == "all-baselines" or args.stage == "models"
+    estimate = estimate_stage_bytes(
+        training_root=training_root,
+        fcd_root=fcd_root,
+        net_file=args.net_file.expanduser().resolve(),
+        config=config,
+        dates=dates,
+        schedule_dates=all_dates,
+        stage=args.stage,
+        prepare_models=prepare_models and complete,
+        complete=complete,
+    )
+    resources = plan_workers(
+        training_root,
+        args.workers,
+        max(1, len(dates)),
+        new_bytes=estimate["new_bytes"],
+        temp_per_worker=estimate["temp_per_worker"],
+    )
     log(f"resources {resources}")
     if not args.execute:
-        print(json.dumps({"dry_run": True, "dates": dates, "datasets": [item["dataset_id"] for item in config["datasets"]], "resources": resources}, indent=2))
+        print(json.dumps({
+            "dry_run": True,
+            "stage": args.stage,
+            "dates": dates,
+            "complete_dataset": complete,
+            "datasets": [item["dataset_id"] for item in config["datasets"]],
+            "estimated_new_bytes": estimate["new_bytes"],
+            "temp_margin_bytes": resources["temp_margin_bytes"],
+            "required_free_bytes": resources["required_free_bytes"],
+            "workers": resources["workers"],
+            "estimate": estimate,
+            "resources": resources,
+        }, indent=2))
         return 0
+    if not resources["disk_sufficient"]:
+        raise RuntimeError(
+            f"insufficient disk for stage {args.stage}: free={resources['disk_free_bytes']} "
+            f"required={resources['required_free_bytes']}"
+        )
     lock_path = training_root / "datasets" / ".variable_penetration.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a") as handle:
@@ -689,9 +1040,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.stage == "flow":
             return 0
         if args.stage in {"all", "scaler", "windows"}:
-            if not set(splits["train"]).issubset(set(dates) if args.stage != "windows" else set(all_dates)):
-                if args.stage == "scaler" or not set(splits["train"]).issubset(set(all_dates)):
-                    raise RuntimeError("refusing to fit a scaler before every training day exists")
             missing_train = []
             for spec in config["datasets"]:
                 for day in splits["train"]:
@@ -712,7 +1060,7 @@ def main(argv: list[str] | None = None) -> int:
                 RUNTIME.update(edges=edges, lane_to_edge=lane_to_edge, internal=internal, full_root=str(training_root / "full_flow" / "r-level"))
             node_order_sha256 = sha256_file(training_root / "shared" / "node_mapping.csv")
             window_tasks = []
-            for date in (dates if args.stage == "all" else all_dates):
+            for date in dates:
                 window_tasks.append({
                     "date": date,
                     "split": split_of[date],
@@ -754,7 +1102,6 @@ def main(argv: list[str] | None = None) -> int:
             log(f"datasets ready counts={report['counts']}")
         elif args.stage in {"all", "windows", "ready", "models"}:
             log("partial date list; dataset status stays unfinished")
-        prepare_models = args.prepare_models == "all-baselines" or args.stage == "models"
         if prepare_models and not complete:
             log("skipping model preparation until every date is present")
             return 0

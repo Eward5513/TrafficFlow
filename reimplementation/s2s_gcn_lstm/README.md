@@ -73,6 +73,8 @@ These are not statements the paper explicitly confirms:
 
 Table II ranges are sampled uniformly at random. Results for one penetration go under that model's existing result directory, for example `xuancheng26/training_results/s2s_gcn_lstm/p70/hyperparameter_search/`. Test metrics are not used.
 
+Training uses the widths, dropout, batch size, and learning rate already recorded in `configs/r_only_s2s_gcn_lstm.json`. `search_hyperparameters.py` remains only to reproduce the paper's Table II random search; the training entry does not call it.
+
 ```bash
 python3 reimplementation/s2s_gcn_lstm/search_hyperparameters.py --dry-run --device cpu --penetration p70
 CUDA_VISIBLE_DEVICES=2 python3 reimplementation/s2s_gcn_lstm/search_hyperparameters.py --device cuda --penetration p70 --num-trials 30

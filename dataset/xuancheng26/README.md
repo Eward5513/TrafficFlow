@@ -330,8 +330,14 @@ python3 generate_mr_level_partial_flow.py --training-root /data5/tzhang174/Traff
 
 ```bash
 cd /home/tzhang174/TrafficFlow
+# 默认仍是 10%–20%，状态目录是 operations/variable_p10_p20_train42_eval5/
+python3 dataset/xuancheng26/run_variable_baselines.py plan
 python3 dataset/xuancheng26/run_variable_baselines.py status
 python3 dataset/xuancheng26/run_variable_baselines.py run
+# 5%–15% 用已发布 manifest，或用生成配置。状态目录换成 operations/variable_p5_p15_train42_eval5/，不和 10%–20% 共用。
+python3 dataset/xuancheng26/run_variable_baselines.py plan --observation-key p5_p15
+python3 dataset/xuancheng26/run_variable_baselines.py plan \
+  --range-config dataset/xuancheng26/model_prep/configs/variable_p5_p15.json
 # 改最大 GPU 数：写 control.json 的 max_gpus，下一轮 30 秒轮询会读到；
 # kill -HUP <scheduler.lock 里的 pid> 会立刻重读。默认 8。每天 09:00 把 max_gpus 调回 4。
 # max_gpus 只计算正在占用 GPU 的任务。随机森林是纯 CPU 任务，不占名额，也不占用空卡。

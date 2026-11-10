@@ -46,8 +46,7 @@ reimplementation/
 │   ├── engine.py / validation.py
 │   ├── train_r_only_stgcn.py
 │   ├── evaluate_r_only_stgcn.py
-│   ├── monitor_training.py
-│   ├── configs/                    # 正式配置在宣城 training_data/config/stgcn/
+│   ├── configs/                    # 正式配置在宣城 training_data_3s/config/stgcn/
 │   ├── tests/
 │                                 # 数据集不在这个目录生成
 └── experiments/                    # 未来训练输出；本次不得创建正式结果
@@ -153,18 +152,14 @@ python3 reimplementation/stgcn/train_r_only_stgcn.py \
 
 ```bash
 python3 reimplementation/stgcn/evaluate_r_only_stgcn.py \
-  --config /data5/tzhang174/TrafficFlow/xuancheng26/training_data/config/stgcn/r_only_stgcn.json \
+  --config /data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s/config/stgcn/r_only_stgcn.json \
   --checkpoint training_results/stgcn/p05/seed_42/best_checkpoint.pt \
   --output-dir training_results/stgcn/p05/seed_42 \
   --rate 5 \
   --overwrite
-
-python3 reimplementation/stgcn/monitor_training.py \
-  --output-root training_results/stgcn \
-  --once
 ```
 
-监控脚本只读状态、日志和 checkpoint 时间，不改训练文件、不启动第二份训练。
+波动实验的队列状态用 `python3 dataset/xuancheng26/run_variable_baselines.py status`。它只读调度状态，不改训练文件，也不再另挂一个目录监控进程。
 
 ## 未来输出
 

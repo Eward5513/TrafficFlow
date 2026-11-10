@@ -102,33 +102,91 @@ def groups_for(training: Path, date: str, specs: list[dict]) -> list[dict]:
                     "members": str(members),
                     "members_sha256": sha256_file(members),
                     "inflow": str(inflow),
+                    "inflow_sha256": sha256_file(inflow),
                     "out": str(out),
                     "indices": indices,
                 })
     return groups
 
 
+def _rf_payload_current(payload, group: dict, *, edges: list[str], source_fcd: Path, node_sha: str) -> bool:
+    """Provenance, loader fields, and shapes. A non-empty file is not enough."""
+    import numpy as np
+
+    required = (
+        "average_speed",
+        "normalized_speed",
+        "speed_observation_count",
+        "edge_ids",
+        "time_bins",
+        "hour",
+        "base_speed_kmh",
+        "complete_day",
+        "date",
+        "penetration",
+        "dataset_id",
+        "sampling_seed",
+        "vehicle_list_sha256",
+        "inflow_sha256",
+        "source_fcd",
+        "fcd_size",
+        "fcd_mtime_ns",
+        "node_order_sha256",
+    )
+    if any(key not in payload.files for key in required):
+        return False
+    stat = source_fcd.stat()
+    stored_edges = [str(item) for item in payload["edge_ids"].tolist()]
+    speed = payload["average_speed"]
+    norm = payload["normalized_speed"]
+    count = payload["speed_observation_count"]
+    n_edges = len(edges)
+    return (
+        str(payload["dataset_id"]) == group["dataset_id"]
+        and int(payload["sampling_seed"]) == int(group["sampling_seed"])
+        and str(payload["penetration"]) == group["key"]
+        and str(payload["date"]) == Path(group["members"]).stem
+        and str(payload["vehicle_list_sha256"]) == group["members_sha256"]
+        and str(payload["inflow_sha256"]) == group["inflow_sha256"]
+        and str(payload["physical_definition_version"]) == PHYSICAL_VERSION
+        and int(payload["complete_day"]) == 1
+        and stored_edges == edges
+        and tuple(speed.shape) == (rf.N_BINS, n_edges)
+        and tuple(norm.shape) == tuple(speed.shape)
+        and tuple(count.shape) == tuple(speed.shape)
+        and np.array_equal(payload["time_bins"], np.arange(rf.N_BINS))
+        and np.array_equal(payload["hour"], np.arange(rf.N_BINS) // 12)
+        and str(payload["source_fcd"]) == str(source_fcd)
+        and int(payload["fcd_size"]) == int(stat.st_size)
+        and int(payload["fcd_mtime_ns"]) == int(stat.st_mtime_ns)
+        and str(payload["node_order_sha256"]) == node_sha
+    )
+
+
 def complete(path: Path, group: dict, *, edges: list[str], source_fcd: Path, node_sha: str) -> bool:
-    if not path.is_file():
+    if not path.is_file() or path.stat().st_size <= 0:
         return False
     try:
         import numpy as np
-        stat = source_fcd.stat()
-        with np.load(path, allow_pickle=False) as payload:
-            stored_edges = [str(item) for item in payload["edge_ids"].tolist()]
-            return (
-                str(payload["dataset_id"]) == group["dataset_id"]
-                and int(payload["sampling_seed"]) == int(group["sampling_seed"])
-                and str(payload["penetration"]) == group["key"]
-                and str(payload["vehicle_list_sha256"]) == group["members_sha256"]
-                and str(payload["physical_definition_version"]) == PHYSICAL_VERSION
-                and int(payload["complete_day"]) == 1
-                and stored_edges == edges
-                and str(payload["source_fcd"]) == str(source_fcd)
-                and int(payload["fcd_size"]) == int(stat.st_size)
-                and int(payload["fcd_mtime_ns"]) == int(stat.st_mtime_ns)
-                and str(payload["node_order_sha256"]) == node_sha
-            )
+
+        with np.load(path, mmap_mode="r", allow_pickle=False) as payload:
+            return _rf_payload_current(payload, group, edges=edges, source_fcd=source_fcd, node_sha=node_sha)
+    except Exception:
+        return False
+
+
+def rf_npz_current(path: Path, group: dict, *, edges: list[str], node_sha: str) -> bool:
+    """True when the file proves it was built from the current vehicle list, inflow, and FCD stat."""
+    if not path.is_file() or path.stat().st_size <= 0 or not edges:
+        return False
+    try:
+        import numpy as np
+
+        with np.load(path, mmap_mode="r", allow_pickle=False) as payload:
+            if "source_fcd" not in payload.files:
+                return False
+            source = Path(str(payload["source_fcd"]))
+        return complete(path, group, edges=edges, source_fcd=source, node_sha=node_sha)
     except Exception:
         return False
 
@@ -144,10 +202,17 @@ def _init_worker(payload: dict) -> None:
     rf.EDGES = payload["edges"]
 
 
+def _dataset_status(groups: list[dict], *, ok: bool, action: str, error: str | None = None) -> dict:
+    status = {}
+    for group in groups:
+        status[group["dataset_id"]] = {"ok": ok, "action": action, "error": error}
+    return status
+
+
 def process_day(task: dict) -> dict:
     date = task["date"]
+    groups = list(task["groups"])
     try:
-        groups = list(task["groups"])
         source_expected = Path(task["source_fcd"])
         pending = [
             group for group in groups
@@ -157,7 +222,7 @@ def process_day(task: dict) -> dict:
             )
         ]
         if not pending:
-            return {"date": date, "ok": True, "action": "skipped", "groups": len(groups)}
+            return {"date": date, "ok": True, "action": "skipped", "groups": len(groups), "datasets": _dataset_status(groups, ok=True, action="skipped")}
         mask = rf.build_mask([group["indices"] for group in pending])
         source = Path(task["source_fcd"])
         if not source.is_file():
@@ -177,40 +242,88 @@ def process_day(task: dict) -> dict:
         if int(stats["unknown_lane"]) > 0:
             raise rf.FeatureError(f"unknown lanes {stats['unknown_examples']}")
         weekday = rf.weekday_index(date)
+        datasets = _dataset_status(groups, ok=True, action="skipped")
         for index, group in enumerate(pending):
-            average, normalized, _capped = rf.finalize_speeds(sums[index], counts[index], rf.BASE_KMH)
-            count32 = counts[index].astype("int32", copy=False)
-            inflow = rf.load_inflow(Path(group["inflow"]), rf.EDGES)
-            bad, examples = rf.flow_without_speed(count32, inflow)
-            if bad:
-                raise rf.FeatureError(f"{date} {group['dataset_id']} {group['key']} seed {group['sampling_seed']} inflow without speed {bad} {examples}")
-            rf.write_rate_npz(
-                Path(group["out"]),
-                average=average,
-                normalized=normalized,
-                count=count32,
-                edges=rf.EDGES,
-                base_kmh=rf.BASE_KMH,
-                day_name=date,
-                rate=group["key"],
-                weekday=weekday,
-                source_fcd=source,
-                complete=True,
-                parse_stats=stats,
-                rate_index=index,
-                dataset_id=group["dataset_id"],
-                sampling_seed=group["sampling_seed"],
-                vehicle_list_sha256=group["members_sha256"],
-                physical_definition_version=PHYSICAL_VERSION,
-                node_order_sha256=task["node_order_sha256"],
-            )
-        rf.log(f"[{date}] rf written={len(pending)}")
-        return {"date": date, "ok": True, "action": "written", "groups": len(pending)}
+            dataset_id = group["dataset_id"]
+            try:
+                average, normalized, _capped = rf.finalize_speeds(sums[index], counts[index], rf.BASE_KMH)
+                count32 = counts[index].astype("int32", copy=False)
+                inflow = rf.load_inflow(Path(group["inflow"]), rf.EDGES)
+                bad, examples = rf.flow_without_speed(count32, inflow)
+                if bad:
+                    raise rf.FeatureError(
+                        f"{date} {dataset_id} {group['key']} seed {group['sampling_seed']} "
+                        f"inflow without speed {bad} {examples}"
+                    )
+                rf.write_rate_npz(
+                    Path(group["out"]),
+                    average=average,
+                    normalized=normalized,
+                    count=count32,
+                    edges=rf.EDGES,
+                    base_kmh=rf.BASE_KMH,
+                    day_name=date,
+                    rate=group["key"],
+                    weekday=weekday,
+                    source_fcd=source,
+                    complete=True,
+                    parse_stats=stats,
+                    rate_index=index,
+                    dataset_id=dataset_id,
+                    sampling_seed=group["sampling_seed"],
+                    vehicle_list_sha256=group["members_sha256"],
+                    physical_definition_version=PHYSICAL_VERSION,
+                    node_order_sha256=task["node_order_sha256"],
+                    inflow_sha256=group["inflow_sha256"],
+                )
+                if datasets.get(dataset_id, {}).get("ok", True):
+                    datasets[dataset_id] = {"ok": True, "action": "written", "error": None}
+            except Exception as exc:
+                datasets[dataset_id] = {"ok": False, "action": "failed", "error": f"{date}: {exc}"}
+        failed = [item for item in datasets.values() if not item["ok"]]
+        rf.log(f"[{date}] rf pending={len(pending)} failed_datasets={len(failed)}")
+        return {
+            "date": date,
+            "ok": not failed,
+            "action": "written",
+            "groups": len(pending),
+            "datasets": datasets,
+        }
     except Exception:
-        return {"date": date, "ok": False, "error": traceback.format_exc(limit=8)}
+        error = traceback.format_exc(limit=8)
+        return {
+            "date": date,
+            "ok": False,
+            "error": error,
+            "datasets": _dataset_status(groups, ok=False, action="failed", error=f"{date}: {error}"),
+        }
 
 
-def main(argv: list[str] | None = None) -> int:
+def _aggregate(dataset_ids: list[str], rows: list[dict]) -> dict:
+    summary = {dataset_id: {"ok": True, "errors": [], "dates_failed": []} for dataset_id in dataset_ids}
+    for row in rows:
+        datasets = row.get("datasets")
+        if not isinstance(datasets, dict):
+            message = row.get("error") or "RF day failed without a per-dataset result"
+            for dataset_id in dataset_ids:
+                summary[dataset_id]["ok"] = False
+                summary[dataset_id]["errors"].append(f"{row.get('date')}: {message}")
+                summary[dataset_id]["dates_failed"].append(row.get("date"))
+            continue
+        for dataset_id, item in datasets.items():
+            if dataset_id not in summary:
+                summary[dataset_id] = {"ok": True, "errors": [], "dates_failed": []}
+            if not item.get("ok"):
+                summary[dataset_id]["ok"] = False
+                summary[dataset_id]["errors"].append(str(item.get("error") or row.get("error") or "RF generation failed"))
+                summary[dataset_id]["dates_failed"].append(row.get("date"))
+    for dataset_id, item in summary.items():
+        item["error"] = "; ".join(item["errors"][:4])
+        item["ok"] = not item["errors"]
+    return {"ok": all(item["ok"] for item in summary.values()), "datasets": summary}
+
+
+def run_prepare(argv: list[str] | None = None) -> dict:
     import argparse
     import multiprocessing as mp
     parser = argparse.ArgumentParser(description="RF speeds for selected Xuancheng26 datasets")
@@ -259,8 +372,9 @@ def main(argv: list[str] | None = None) -> int:
             "node_order_sha256": node_sha,
             "groups": groups_for(rf.TRAIN_ROOT, date, specs),
         })
-    rf.log(f"rf selected datasets={args.dataset_ids} days={len(dates)} workers={args.workers} fcd_format={fcd_format}")
-    failed = []
+    dataset_ids = [str(item) for item in args.dataset_ids]
+    rf.log(f"rf selected datasets={dataset_ids} days={len(dates)} workers={args.workers} fcd_format={fcd_format}")
+    rows = []
     workers = max(1, min(args.workers, len(tasks)))
     payload = {
         "fcd_root": str(rf.FCD_ROOT),
@@ -276,12 +390,21 @@ def main(argv: list[str] | None = None) -> int:
         futures = {pool.submit(process_day, task): task["date"] for task in tasks}
         for future in as_completed(futures):
             row = future.result()
+            rows.append(row)
             if not row.get("ok"):
-                failed.append(row["date"])
                 rf.log(f"[{row['date']}] FAIL {(row.get('error') or '')[-400:]}")
             else:
                 rf.log(f"[{row['date']}] {row.get('action')} groups={row.get('groups')}")
-    return 1 if failed else 0
+    report = _aggregate(dataset_ids, rows)
+    for dataset_id, item in report["datasets"].items():
+        if not item["ok"]:
+            rf.log(f"RF dataset {dataset_id} failed {item['error']}")
+    return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    report = run_prepare(argv)
+    return 0 if report.get("ok") else 1
 
 
 if __name__ == "__main__":

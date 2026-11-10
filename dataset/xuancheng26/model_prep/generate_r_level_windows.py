@@ -293,6 +293,44 @@ def _file_matches(
     return True
 
 
+def window_file_current(
+    path: Path,
+    *,
+    channels: int,
+    weekday: int,
+    mean_x: np.ndarray,
+    std_x: np.ndarray,
+    mean_y: np.ndarray,
+    std_y: np.ndarray,
+    x_raw: np.ndarray,
+    y_raw: np.ndarray,
+) -> bool:
+    """True when the NPZ agrees with the arrays just built from the current CSVs.
+
+    ``_file_matches`` checks shape, index, and the frozen scaler. This also
+    requires the stored raw windows to be those arrays, so a corrected CSV
+    cannot keep an older NPZ.
+    """
+    if not _file_matches(
+        path,
+        channels=channels,
+        weekday=weekday,
+        mean_x=mean_x,
+        std_x=std_x,
+        mean_y=mean_y,
+        std_y=std_y,
+    ):
+        return False
+    try:
+        with np.load(path, allow_pickle=False) as payload:
+            return bool(
+                np.array_equal(payload["x_raw"], np.ascontiguousarray(x_raw))
+                and np.array_equal(payload["y_raw"], np.ascontiguousarray(y_raw))
+            )
+    except Exception:
+        return False
+
+
 def write_day(task: tuple) -> dict[str, object]:
     day_name, stats = task
     try:

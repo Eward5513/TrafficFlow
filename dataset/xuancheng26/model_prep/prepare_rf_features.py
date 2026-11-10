@@ -815,6 +815,7 @@ def write_rate_npz(
     vehicle_list_sha256: str = "",
     physical_definition_version: str = "",
     node_order_sha256: str = "",
+    inflow_sha256: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.stem}.partial.npz")
@@ -848,6 +849,7 @@ def write_rate_npz(
             fcd_size=np.int64(source_fcd.stat().st_size),
             fcd_mtime_ns=np.int64(source_fcd.stat().st_mtime_ns),
             node_order_sha256=np.asarray(node_order_sha256),
+            inflow_sha256=np.asarray(inflow_sha256),
         )
         with np.load(temporary, allow_pickle=False) as payload:
             validate_arrays(

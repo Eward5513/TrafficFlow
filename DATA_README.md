@@ -109,7 +109,7 @@ python3 dataset/xuancheng26/model_prep/generate_variable_penetration_datasets.py
 
 `variable_p5_p15.json` 用同一条命令。
 
-断点续跑把 `--stage` 换成 `vehicles`、`flow`、`scaler`、`windows`、`ready` 或 `models`。只补辅助资源用 `--stage models`。训练入口只改 `--dataset-id` 和输出目录；未传 `--rates` 时，单一观测键从该 dataset 的 manifest 读取。
+断点续跑把 `--stage` 换成 `vehicles`、`flow`、`scaler`、`windows`、`ready` 或 `models`。`--dates` 只处理列出的日期；scaler 仍用完整训练 split 和 sampling seed 42。窗口身份包含当天四个 partial CSV 的 sha256，旧身份缺这个字段时，只在本次日期范围内核对原始窗口，一致就补记身份、不重写 NPZ。只有 29 天都在参数里时才发布全量 ready。只补辅助资源用 `--stage models`。训练入口只改 `--dataset-id` 和输出目录；未传 `--rates` 时，单一观测键从该 dataset 的 manifest 读取。波动训练默认仍是 `p10_p20`；`run_variable_baselines.py plan --observation-key p5_p15` 使用另一套 `operations/variable_p5_p15_train42_eval5/` 状态。
 
 `shared/` 有 `split_manifest.json`、`physical_definition.json`、`node_mapping.csv`、`state_normalization.json`、`target_normalization.json`、`state_window_manifest.json`、`validation_summary.json`、`sequence_targets_12step/{train,validation,test}/YYYY_MM_DD.npz` 和 `provenance/`。序列标签的 `full_raw` 是 `(288, 1406, 4)`。
 
