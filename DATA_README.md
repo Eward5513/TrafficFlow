@@ -220,16 +220,18 @@ datasets/variable_1h_p10_p20/physical_independent_fcd_v1/dcrnn/
 
 叶子里的文件就是上一棵树列出的那些。五种子平均在 `validation_sampling_metrics.json` 和 `test_sampling_metrics.json`。随机森林的四份启动汇总在 `reports/RF/<run_id>/`，run id 是 `20261109T225358_ffe1a013`（30 分钟）、`f03af6f8`（1 小时）、`0cc4c3ec`（2 小时）、`80a226ab`（全天）。
 
-MSTT 单独跑 A2A，实验号 `conservation_projected`，配置是 `MSTT/configs/conservation_best_backbone/projected.json`。它不进上面的 144 条队列。
+MSTT 单独跑 A2A，实验号 `conservation_projected`，配置是 `MSTT/configs/conservation_best_backbone/projected.json`。它不进上面的 144 条队列。四个周期都已写出 `test_sampling_metrics.json`：
 
 ```text
-datasets/variable_30min_p10_p20/physical_independent_fcd_v1/MSTT/
-    in_all__out_all/p10_p20/conservation_projected/seed_42/20261110T132316_29bc19aa/
+datasets/variable_30min_p10_p20/.../seed_42/20261110T132316_29bc19aa/
+datasets/variable_1h_p10_p20/.../seed_42/20261110T161911_f3edf8f9/
+datasets/variable_2h_p10_p20/.../seed_42/20261110T183956_a9bd76cc/
+datasets/variable_day_p10_p20/.../seed_42/20261110T210053_dceca753/
 ```
 
-30 分钟这一条已经有 `test_sampling_metrics.json`。1 小时的 `20261110T161911_f3edf8f9` 在 18:18 仍在训练，目录里是 checkpoint、`resolved_config.json` 和 history。同一条 shell 队列接着跑 2 小时和全天，那两个 dataset 下还没有 `MSTT/`。日志是 `reports/mstt_variable_projected_a2a.log` 和 `reports/mstt_variable_projected_a2a_1h_2h_day.log`。
+共同前缀是 `physical_independent_fcd_v1/MSTT/in_all__out_all/p10_p20/conservation_projected/`。日志是 `reports/mstt_variable_projected_a2a.log` 和 `reports/mstt_variable_projected_a2a_1h_2h_day.log`。
 
-指标摘录在代码树的 [dataset/xuancheng26/TRAINING_RESULTS.md](dataset/xuancheng26/TRAINING_RESULTS.md)，MSTT 在 [MSTT/TRAINING_RESULTS.md](MSTT/TRAINING_RESULTS.md)。那份基线摘录整理到 2026-11-10 12:28，当时记下 26 条已完成的 I2I；此后又有运行写完测试指标。目录和完成状态以本节和 `campaign_summary.json` 为准。
+指标摘录在代码树的 [dataset/xuancheng26/TRAINING_RESULTS.md](dataset/xuancheng26/TRAINING_RESULTS.md)，MSTT 在 [MSTT/TRAINING_RESULTS.md](MSTT/TRAINING_RESULTS.md)。基线摘录整理到 2026-11-11 14:11，当时 71 条已经写出五种子测试指标：四个周期的 I2I 都完成了，A2A 完成 23 条，A2I 还没有。上面的 18:18 快照只说明当时的目录，完成数字以摘录和 `campaign_summary.json` 为准。
 
 ### 历史固定渗透率：`legacy_unknown` / `physical_legacy_unknown`（190G）
 
