@@ -59,7 +59,10 @@ new traffic input into `mstt.py`; add it beside `InputEmbedding`.
   They are not the default 12→1 trainer.
 - Results:
   `training_results_3s/datasets/<dataset_id>/physical_<version>/MSTT/in_<input>__out_<target>/<observation_key>/<experiment_id>/seed_<model_seed>/<run_id>/`.
-  `seed_<model_seed>` is the initialization seed. The config records
+  `seed_<model_seed>` is the initialization seed. `--experiment-id` defaults to
+  `baseline`; a projected run with that default is stored as
+  `conservation_projected`. Pass another id to keep a separate directory.
+  The config records
   `train_sampling_seed=42`, `evaluation_sampling_seeds=[42,43,44,45,46]`, and
   `physical_definition_version`. A new run gets its own `run_id` and does not
   overwrite an existing one. Historical 3s runs that did not record a physical

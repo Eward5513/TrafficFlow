@@ -193,6 +193,9 @@ TRAIN_DEFAULTS: dict[str, Any] = {
 }
 
 DATA_DEFAULTS: dict[str, Any] = {
+    # baseline plus a conservation mode is stored as conservation_<mode>.
+    # Any other id is kept, so a new run does not share that directory.
+    "experiment_id": "baseline",
     "dataset_id": "fixed_uniform",
     "sampling_root": str(xuancheng26_sampling_root()),
     "model_seed": 42,
