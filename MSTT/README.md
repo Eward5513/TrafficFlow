@@ -150,6 +150,48 @@ python MSTT/train.py --config MSTT/configs/experiment_A_separate_value_mlp_proje
   --task All2All --penetration p05 --gpu <GPU>
 ```
 
+## Six-channel input: `all_sp_c`
+
+`all_sp_c` is an MSTT input, not a new target. The channel order is inflow,
+outflow, accumulation_start, accumulation_end, average_speed_raw,
+speed_observation_count. The first four arrays are copied from `all.npz`.
+The last two are the uncapped snapshot-mean speed in km/h and the raw
+snapshot count. Targets still come from `all.npz` or `inflow.npz`.
+
+`value_embedding_mode=separate_mlp` builds one `Linear(1, 8) → SiLU →
+Linear(8, 8)` per input channel and concatenates them. Four channels stay
+32-d. Six channels are 48-d. With road 16, TOD 8, and DOW 8 the base
+embedding is 80, the adaptive table stays 64, and `d_model` is 144. Head
+dimension is 36. The FFN hidden width stays 176. There is no 48→32
+projection.
+
+Conservation still corrects the four output states. `AllSpC2All` may use
+`projected` with supervision `all` or `inflow_only`. `AllSpC2I` stays a
+single-output task without that projection. Checkpoint selection for both
+new tasks is the mean validation inflow MAE over sampling seeds 42–46.
+Speed and count are not loss targets.
+
+The four `p10_p20` frequencies are launched by
+`MSTT/run_all_sp_c_d144_variable.sh`. It uses the projected all-state config
+above. GPU 5 runs 30 minutes, then 1 hour. GPU 7 runs 2 hours, then one day.
+The two cards start together. A card does not start its second run until the
+first run has exited.
+
+```bash
+bash MSTT/run_all_sp_c_d144_variable.sh
+```
+
+A run is written to
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all_sp_c__out_all/p10_p20/separate_mlp_d144_projected_all/seed_42/<run_id>/
+```
+
+`in_all_sp_c__out_inflow` and the experiment ids
+`separate_mlp_d144_projected_inflow_only` and `separate_mlp_d144_none` follow
+the same layout. These runs do not resume a four-channel checkpoint.
+
 ## Historical results
 
 Completed ablations, All2I, All2All, and conservation runs now live under

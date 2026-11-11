@@ -90,8 +90,13 @@ class MSTT(nn.Module):
         self.config = config
         if config.conservation_mode not in ("none", "soft", "projected"):
             raise ValueError(f"unknown conservation_mode {config.conservation_mode!r}")
-        if config.conservation_mode != "none" and (config.in_channels != 4 or config.out_channels != 4):
-            raise ValueError("soft/projected conservation requires All2All (four input/output channels)")
+        if config.conservation_mode != "none" and (
+            config.out_channels != 4 or config.in_channels not in (4, 6)
+        ):
+            raise ValueError(
+                "soft/projected conservation requires four output states and four or six input channels, "
+                f"got in={config.in_channels} out={config.out_channels}"
+            )
         if config.projection_mlp_hidden_dim < 1:
             raise ValueError("projection_mlp_hidden_dim must be positive")
         self.graph_direction = None if graph is None else str(graph.direction)

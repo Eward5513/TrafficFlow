@@ -2,12 +2,14 @@
 
 ``value_embedding_mode="joint_linear"`` (default) maps every input channel with
 one ``Linear(C_in, value_dim)`` stored as ``value_projection``.
-``value_embedding_mode="separate_mlp"`` requires four channels and concat
-fusion. Each channel keeps its own ``Linear(1, width) -> SiLU -> Linear(width, width)``,
-``width = value_dim / 4``, and the four outputs are concatenated back to
-``value_dim``. Slice order is the dataset channel axis: inflow, outflow,
-accumulation_start, accumulation_end. The MLPs share no parameters. Dropout
-stays on the finished base embedding; the MLPs themselves have none.
+``value_embedding_mode="separate_mlp"`` requires concat fusion. Each input
+channel keeps its own ``Linear(1, width) -> SiLU -> Linear(width, width)``,
+``width = value_dim / C_in``, and the outputs are concatenated back to
+``value_dim``. There is no projection back to a shorter vector. Four state
+channels use width 8 and stay 32-d. The six-channel ``all_sp_c`` input uses
+width 8 and is 48-d. Slice order is the dataset channel axis. The MLPs share
+no parameters. Dropout stays on the finished base embedding; the MLPs
+themselves have none.
 
 ``fusion="add"`` (v0.1): every part maps to ``d_model`` and the parts are
 summed. ``fusion="concat"`` (v0.2 default): each part has its own width,
@@ -26,7 +28,6 @@ from torch import nn
 
 FUSION_MODES = ("add", "concat")
 VALUE_EMBEDDING_MODES = ("joint_linear", "separate_mlp")
-_SEPARATE_VALUE_CHANNELS = 4
 
 
 def resolve_embedding_dims(d_model, base_dim=None, adaptive_dim=None, *, adaptive=False, fusion="add"):
@@ -100,7 +101,7 @@ class InputEmbedding(nn.Module):
         if self.value_embedding_mode == "joint_linear":
             value = self.value_projection(x)
         elif self.value_embedding_mode == "separate_mlp":
-            # One shared MLP per input channel. Index 0..3 follows STATE_CHANNELS.
+            # One MLP per input channel, in dataset channel order.
             value = torch.cat(
                 [mlp(x[..., channel:channel + 1]) for channel, mlp in enumerate(self.value_mlps)],
                 dim=-1,
@@ -132,23 +133,22 @@ class InputEmbedding(nn.Module):
         return self.dropout(torch.cat(parts, dim=-1))
 
     def _separate_value_mlps(self) -> nn.ModuleList:
-        if self.in_channels != _SEPARATE_VALUE_CHANNELS:
-            raise ValueError(
-                f"separate_mlp value embedding requires in_channels={_SEPARATE_VALUE_CHANNELS}, got {self.in_channels}"
-            )
+        channels = int(self.in_channels)
+        if channels < 1:
+            raise ValueError("separate_mlp value embedding requires at least one input channel")
         if self.fusion != "concat":
             raise ValueError(f"separate_mlp value embedding requires fusion='concat', got {self.fusion!r}")
         value_dim = int(self.widths["value"])
-        if value_dim % _SEPARATE_VALUE_CHANNELS != 0 or value_dim // _SEPARATE_VALUE_CHANNELS < 1:
+        if value_dim % channels != 0 or value_dim // channels < 1:
             raise ValueError(
                 "separate_mlp value width must be a positive multiple of "
-                f"{_SEPARATE_VALUE_CHANNELS}, got {value_dim}"
+                f"in_channels={channels}, got {value_dim}"
             )
-        branch_dim = value_dim // _SEPARATE_VALUE_CHANNELS
+        branch_dim = value_dim // channels
         self.value_branch_dim = branch_dim
-        # A new Sequential on every iteration. Reusing one module would tie the four channels together.
-        mlps = [_separate_value_mlp(branch_dim) for _ in range(_SEPARATE_VALUE_CHANNELS)]
-        if len({id(mlp) for mlp in mlps}) != _SEPARATE_VALUE_CHANNELS:
+        # A new Sequential on every iteration. Reusing one module would tie the channels together.
+        mlps = [_separate_value_mlp(branch_dim) for _ in range(channels)]
+        if len({id(mlp) for mlp in mlps}) != channels:
             raise RuntimeError("separate value MLPs must be distinct module objects")
         return nn.ModuleList(mlps)
 
@@ -175,7 +175,7 @@ class InputEmbedding(nn.Module):
         summary.update(
             branch_count=len(mlps),
             independent_parameters=(
-                len(mlps) == _SEPARATE_VALUE_CHANNELS
+                len(mlps) == int(self.in_channels)
                 and len({id(mlp) for mlp in mlps}) == len(mlps)
                 and len(parameter_ptrs) == len(set(parameter_ptrs))
             ),

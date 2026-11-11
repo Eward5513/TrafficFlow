@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from MSTT.config import STATE_CHANNELS, TaskSpec, rate_tag
+from MSTT.config import ALL_SP_C_CHANNELS, STATE_CHANNELS, TaskSpec, rate_tag
 from reimplementation.common.data.r_only_npz_dataset import (
     SPLITS,
     build_dataloader,
@@ -26,12 +26,19 @@ from reimplementation.common.data.r_only_npz_dataset import (
     load_json,
 )
 from reimplementation.common.data.state_windows import (
+    ALL_SP_C_CHANNELS as WINDOW_ALL_SP_C_CHANNELS,
     AlignedStateWindowDataset,
     open_split_dataset,
+    read_all_sp_c_input_scaler,
     read_state_target_scaler,
 )
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.common.utils.hashing import sha256_file
+
+if WINDOW_ALL_SP_C_CHANNELS != ALL_SP_C_CHANNELS:
+    raise ReimplementationError(
+        f"all_sp_c channel order drifted: windows {WINDOW_ALL_SP_C_CHANNELS} != MSTT {ALL_SP_C_CHANNELS}"
+    )
 
 
 def validate_state_package(data_root: Path, *, num_nodes: int, n_his: int) -> dict[str, Any]:
@@ -72,6 +79,12 @@ def validate_state_package(data_root: Path, *, num_nodes: int, n_his: int) -> di
 
 
 def input_scaler(data_root: Path, rate: str, task: TaskSpec) -> tuple[np.ndarray, np.ndarray]:
+    if task.input_type == "all_sp_c":
+        if task.input_channels != ALL_SP_C_CHANNELS:
+            raise ReimplementationError(f"all_sp_c input order {task.input_channels} != {ALL_SP_C_CHANNELS}")
+        if any(name in task.output_channels for name in ALL_SP_C_CHANNELS[len(STATE_CHANNELS) :]):
+            raise ReimplementationError("speed and snapshot count are not prediction targets")
+        return read_all_sp_c_input_scaler(data_root, rate)
     payload = load_json(Path(data_root) / "state_normalization.json")
     table = (payload.get("input") or {}).get(rate_tag(rate))
     if not table:

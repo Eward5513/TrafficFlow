@@ -80,6 +80,18 @@ sample standard deviation (`ddof=1`). Test never selects the checkpoint.
 are All2All task losses, not extra backbone branches. Launch them with
 `conservation_best_backbone.py` and an empty output root.
 
+`all_sp_c` is an input-only task pair: `AllSpC2All` and `AllSpC2I`. Its six
+channels are the four states plus uncapped `average_speed_raw` (km/h) and
+`speed_observation_count`. Windows live beside `all.npz` as `all_sp_c.npz`.
+The two new scales are `datasets/<dataset_id>/all_sp_c_normalization.json`,
+fit on sampling seed 42's raw 288 training bins. The four-state scaler is
+unchanged. Separate MLPs follow the input width: 32-d for four channels and
+48-d for six, with `d_model=144` in
+`configs/all_sp_c_separate_mlp_d144_*.json`. Conservation stays on the four
+outputs and is allowed for `AllSpC2All`. Selection for these inputs is the
+five-seed mean validation inflow MAE. Do not resume a four-channel checkpoint
+into these runs.
+
 `projection_supervision` is `all` or `inflow_only`. Missing or `all` keeps
 original C: four-state final MAE + `projection_raw_loss_weight` * raw MAE +
 `projection_consistency_weight` * pre-projection conservation MAE.

@@ -30,6 +30,11 @@ STATE_TYPES = (
     "all",
 )
 CHANNELS = STATE_TYPES[:4]
+# MSTT input only. It is intentionally absent from STATE_TYPES so other models'
+# CLI choices do not advertise a six-channel task.
+ALL_SP_C_INPUT = "all_sp_c"
+ALL_SP_C_EXTRA_CHANNELS = ("average_speed_raw", "speed_observation_count")
+ALL_SP_C_CHANNELS = CHANNELS + ALL_SP_C_EXTRA_CHANNELS
 _INCOMPATIBLE_ALL = {
     "pdformer": (
         "PDFormer keeps a one-channel traffic stream: pattern keys were built for "
@@ -45,6 +50,8 @@ def state_types_selected(config: Mapping[str, Any]) -> bool:
 
 
 def channel_count(kind: str) -> int:
+    if kind == ALL_SP_C_INPUT:
+        return len(ALL_SP_C_CHANNELS)
     if kind not in STATE_TYPES:
         raise ReimplementationError(f"unknown state type {kind}")
     return 4 if kind == "all" else 1
@@ -98,6 +105,10 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
         config["rates"] = list(keys)
     input_type = input_flag or config.get("input_type") or "inflow"
     target_type = target_flag or config.get("target_type") or "inflow"
+    if target_type == ALL_SP_C_INPUT or (input_type == ALL_SP_C_INPUT and model_name != "MSTT"):
+        raise ReimplementationError(
+            "all_sp_c is an MSTT input only. It is not a target and not a shared baseline input."
+        )
     if model_name in _INCOMPATIBLE_ALL and (input_type == "all" or target_type == "all"):
         raise ReimplementationError(_INCOMPATIBLE_ALL[model_name])
     config["input_type"] = input_type
@@ -197,6 +208,54 @@ def assert_physical_package(data_root: Path) -> None:
             raise ReimplementationError(f"refusing {root}: validation_summary is not ready")
 
 
+def all_sp_c_normalization_file(data_root: Path) -> Path:
+    """Resolve ``datasets/<id>/all_sp_c_normalization.json`` from a seed window root."""
+    root = Path(data_root).resolve()
+    if (
+        root.name != "window_data"
+        or root.parent.name != "flow"
+        or not root.parents[1].name.startswith("seed_")
+        or root.parents[2].name != "sampling_seeds"
+    ):
+        raise ReimplementationError(f"cannot resolve all_sp_c normalization from {data_root}")
+    return root.parents[3] / "all_sp_c_normalization.json"
+
+
+def read_all_sp_c_input_scaler(data_root: Path, rate: str) -> tuple[np.ndarray, np.ndarray]:
+    """Four published input scales plus the two raw speed-channel scales, in file order."""
+    root = Path(data_root)
+    payload = load_json(root / "state_normalization.json")
+    tag = rate_tag(rate, allowed=declared_observation_keys(root))
+    table = (payload.get("input") or {}).get(tag)
+    if not isinstance(table, dict):
+        raise ReimplementationError(f"state_normalization.json has no input scaler for {tag}")
+    extra_path = all_sp_c_normalization_file(root)
+    if not extra_path.is_file():
+        raise ReimplementationError(f"missing {extra_path}")
+    extra = load_json(extra_path)
+    if int(extra.get("fit_sampling_seed", -1)) != 42 or extra.get("fit_split") != "train":
+        raise ReimplementationError(f"{extra_path} was not fit on sampling seed 42 training days")
+    if tuple(extra.get("channels") or ()) != ALL_SP_C_EXTRA_CHANNELS:
+        raise ReimplementationError(f"{extra_path} channels {extra.get('channels')} != {ALL_SP_C_EXTRA_CHANNELS}")
+    dataset_id = root.parents[3].name
+    if extra.get("dataset_id") not in (None, dataset_id):
+        raise ReimplementationError(f"{extra_path} dataset_id {extra.get('dataset_id')} != {dataset_id}")
+    stats = extra.get("input") or {}
+    means: list[float] = []
+    stds: list[float] = []
+    for name in ALL_SP_C_CHANNELS:
+        item = table[name] if name in CHANNELS else stats.get(name)
+        if not isinstance(item, dict) or "mean" not in item or "std" not in item:
+            raise ReimplementationError(f"missing all_sp_c input scale for {name}")
+        means.append(float(item["mean"]))
+        stds.append(float(item["std"]))
+    mean = np.asarray(means, dtype=np.float64)
+    std = np.asarray(stds, dtype=np.float64)
+    if not np.isfinite(mean).all() or not np.isfinite(std).all() or np.any(std <= 0.0):
+        raise ReimplementationError("invalid all_sp_c input scaler")
+    return mean, std
+
+
 def read_state_target_scaler(data_root: Path, target_type: str) -> tuple[float, float] | tuple[np.ndarray, np.ndarray]:
     payload = load_json(Path(data_root) / "state_normalization.json")
     if payload.get("fit_split") != "train":
@@ -293,6 +352,13 @@ class AlignedStateWindowDataset(Dataset):
             incoming = load_npz(directory / f"{input_type}.npz")
             outgoing = incoming if input_type == target_type else load_npz(directory / f"{target_type}.npz")
             _assert_same_windows(directory, incoming, outgoing)
+            if input_type == ALL_SP_C_INPUT:
+                stored = incoming.get("channels")
+                names = () if stored is None else tuple(str(item) for item in np.asarray(stored).tolist())
+                if names != ALL_SP_C_CHANNELS:
+                    raise ReimplementationError(
+                        f"{directory / input_type}.npz channels {names} != {ALL_SP_C_CHANNELS}"
+                    )
             if int(incoming["x"].shape[-1]) != input_channels:
                 raise ReimplementationError(
                     f"{directory / input_type}.npz x channels {incoming['x'].shape[-1]} != {input_channels}"
@@ -327,6 +393,11 @@ class AlignedStateWindowDataset(Dataset):
             raise ReimplementationError(f"{self.rate}/{split} y shape {self.y.shape} != {expected_y}")
         if not np.array_equal(self.target_slot, self.window_start_slot + (int(n_his) - 1)):
             raise ReimplementationError(f"{self.rate}/{split} target_slot is not the last history slot")
+        if input_type == ALL_SP_C_INPUT:
+            in_mean, in_std = read_all_sp_c_input_scaler(self.data_root, self.rate)
+            probe = self.x[:8].astype(np.float64) * in_std + in_mean
+            if float(np.max(np.abs(probe - self.x_raw[:8]))) > 1e-3:
+                raise ReimplementationError(f"{self.rate}/{split} all_sp_c x is not z-scored with the merged input scaler")
         mean, std = read_state_target_scaler(self.data_root, target_type)
         recovered = invert_target(self.y[:8], mean, std)
         if float(np.max(np.abs(np.asarray(recovered) - self.y_raw[:8]))) > 1e-3:

@@ -396,6 +396,30 @@ def rf_observation_feature_path(
     )
 
 
+def traffic_observation_feature_path(
+    training_root: Path | str,
+    dataset_id: str,
+    sampling_seed: int,
+    observation_key: str,
+    date: str,
+) -> Path:
+    """Uncapped daily speed mean and snapshot count for one sampled day."""
+    return (
+        Path(training_root) / "datasets" / str(dataset_id) / "sampling_seeds" / f"seed_{int(sampling_seed)}"
+        / "model_prepared" / "traffic_observations" / str(observation_key) / f"{date}.npz"
+    )
+
+
+def all_sp_c_normalization_path(training_root: Path | str, dataset_id: str) -> Path:
+    """Dataset-level scaler for the two extra ``all_sp_c`` input channels."""
+    return Path(training_root) / "datasets" / str(dataset_id) / "all_sp_c_normalization.json"
+
+
+def all_sp_c_ready_path(training_root: Path | str, dataset_id: str) -> Path:
+    """Separate readiness record. It does not replace the four-state dataset status."""
+    return Path(training_root) / "datasets" / str(dataset_id) / "all_sp_c_ready.json"
+
+
 def sampling_root_from_window(window_root: Path | str) -> Path:
     path = Path(window_root).absolute()
     if path.name != "window_data" or path.parent.name != "flow" or path.parent.parent.name not in {f"seed_{s}" for s in SAMPLING_SEEDS}:

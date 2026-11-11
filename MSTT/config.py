@@ -18,6 +18,8 @@ from typing import Any, Mapping
 from data_root import xuancheng26_model_results_3s_dir, xuancheng26_training_3s_root, xuancheng26_sampling_root, sampling_window_root
 
 STATE_CHANNELS = ("inflow", "outflow", "accumulation_start", "accumulation_end")
+# Input-only extension. It is not a prediction target and not a baseline state type.
+ALL_SP_C_CHANNELS = STATE_CHANNELS + ("average_speed_raw", "speed_observation_count")
 RATES = ("p05", "p10", "p20", "p30", "p40", "p50", "p70")
 
 
@@ -42,7 +44,11 @@ class TaskSpec:
 
     @property
     def input_channels(self) -> tuple[str, ...]:
-        return STATE_CHANNELS if self.input_type == "all" else (self.input_type,)
+        if self.input_type == "all":
+            return STATE_CHANNELS
+        if self.input_type == "all_sp_c":
+            return ALL_SP_C_CHANNELS
+        return (self.input_type,)
 
     @property
     def output_channels(self) -> tuple[str, ...]:
@@ -74,6 +80,8 @@ TASKS: dict[str, TaskSpec] = {
         TaskSpec("All2O", "all", "outflow"),
         TaskSpec("All2AS", "all", "accumulation_start"),
         TaskSpec("All2AE", "all", "accumulation_end"),
+        TaskSpec("AllSpC2All", "all_sp_c", "all"),
+        TaskSpec("AllSpC2I", "all_sp_c", "inflow"),
     )
 }
 
@@ -381,11 +389,8 @@ def validate_config(config: Mapping[str, Any]) -> None:
         if str(config.get("embedding_fusion", "add")) != "concat":
             raise ValueError("value_embedding_mode=separate_mlp requires embedding_fusion=concat")
         value_dim = int(config.get("value_embedding_dim", 0))
-        if value_dim % 4 != 0 or value_dim // 4 < 1:
-            raise ValueError(
-                "value_embedding_mode=separate_mlp requires value_embedding_dim to be a positive "
-                f"multiple of 4, got {value_dim}"
-            )
+        if value_dim < 1:
+            raise ValueError("value_embedding_mode=separate_mlp requires a positive value_embedding_dim")
     from MSTT.model.embedding import resolve_embedding_dims
 
     base_dim, _ = resolve_embedding_dims(
@@ -424,19 +429,40 @@ def with_legacy_defaults(saved: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
+_CONSERVATION_TASKS = frozenset({"All2All", "AllSpC2All"})
+
+
 def validate_conservation_task(config: Mapping[str, Any], task: TaskSpec) -> None:
-    if config.get("conservation_mode", "none") != "none" and task.name != "All2All":
-        raise ValueError(f"conservation_mode={config['conservation_mode']} is only allowed for All2All, got {task.name}")
+    mode = config.get("conservation_mode", "none")
+    if mode == "none":
+        return
+    if task.name not in _CONSERVATION_TASKS:
+        raise ValueError(
+            f"conservation_mode={mode} is only allowed for {sorted(_CONSERVATION_TASKS)}, got {task.name}"
+        )
+    if task.output_channels != STATE_CHANNELS:
+        raise ValueError(
+            "conservation requires four-state outputs "
+            f"{list(STATE_CHANNELS)} in that order, got {list(task.output_channels)}"
+        )
 
 
 def validate_value_embedding_task(config: Mapping[str, Any], task: TaskSpec) -> None:
-    """Channel count and order are known once the task is. Fusion and width stay in ``validate_config``."""
+    """Channel count and order are known once the task is. Fusion stays in ``validate_config``."""
     if str(config.get("value_embedding_mode", "joint_linear")) != "separate_mlp":
         return
-    if task.input_channels != STATE_CHANNELS:
+    allowed = (STATE_CHANNELS, ALL_SP_C_CHANNELS)
+    if task.input_channels not in allowed:
         raise ValueError(
             "value_embedding_mode=separate_mlp requires input channels "
-            f"{list(STATE_CHANNELS)} in that order, task {task.name} has {list(task.input_channels)}"
+            f"{[list(item) for item in allowed]}, task {task.name} has {list(task.input_channels)}"
+        )
+    channels = len(task.input_channels)
+    value_dim = int(config.get("value_embedding_dim", 0))
+    if value_dim % channels != 0 or value_dim // channels < 1:
+        raise ValueError(
+            "value_embedding_mode=separate_mlp requires value_embedding_dim to be a positive "
+            f"multiple of the {channels} input channels, got {value_dim}"
         )
 
 

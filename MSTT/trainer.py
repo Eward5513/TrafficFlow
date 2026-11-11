@@ -67,6 +67,11 @@ from reimplementation.common.utils.checkpoint import assert_checkpoint_compatibl
 from reimplementation.common.utils.reproducibility import seed_everything
 from reimplementation.common.utils.structured_logging import JsonlLogger
 
+def selects_inflow_mae(task: TaskSpec) -> bool:
+    """Four-state and six-channel inputs that predict inflow select on inflow MAE."""
+    return task.input_type in {"all", "all_sp_c"} and "inflow" in task.output_channels
+
+
 BATCH_KEYS = ("x", "y", "y_raw", "day_index", "window_start_slot", "target_slot", "sample_index")
 REQUIRED_OUTPUTS = ("best_checkpoint.pt", "last_checkpoint.pt", "training_history.json", "validation_sampling_metrics.json", "test_sampling_metrics.json")
 
@@ -348,7 +353,7 @@ class TaskRun:
         amp = str(self.config["amp"])
         mean, std = self.scaler_args()
         diagnostics = {}
-        if self.task.name == "All2All":
+        if self.task.name in {"All2All", "AllSpC2All"}:
             packed, diagnostics = collect_conservation_predictions(
                 _limited(loader, limit),
                 lambda batch: predict_with_aux(model, batch, amp=amp, device=self.device),
@@ -377,11 +382,13 @@ class TaskRun:
     def selection_value(self, metrics: Mapping[str, Any]) -> float:
         """Checkpoint rule. The training loss stays the mean raw MAE.
 
-        Four-channel inputs that predict inflow keep that loss, but the saved
-        epoch is the one with the smallest validation inflow MAE. After the
-        five-seed aggregation this is the mean of the five inflow MAEs.
+        Inputs that contain the four states and predict inflow keep that loss,
+        but the saved epoch is the one with the smallest validation inflow MAE.
+        ``all_sp_c`` uses the same rule. After the five-seed aggregation this
+        is the mean of the five inflow MAEs. Speed and snapshot count are not
+        selection targets.
         """
-        if self.task.input_type == "all" and "inflow_mae" in metrics:
+        if selects_inflow_mae(self.task) and "inflow_mae" in metrics:
             return float(metrics["inflow_mae"])
         return float(metrics["mae"])
 
@@ -749,7 +756,7 @@ def train_task(
                 **conservation_settings(cfg),
                 "selection_prediction": "final",
                 "effective_selection_metric": (
-                    "val_inflow_mae" if run.task.input_type == "all" and "inflow" in run.task.output_channels
+                    "val_inflow_mae" if selects_inflow_mae(run.task)
                     else ("val_mae" if cfg.get("conservation_mode", "none") != "none" else cfg["selection_metric"])
                 ),
                 "embedding": model.embedding_summary(),
