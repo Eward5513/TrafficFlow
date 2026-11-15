@@ -93,19 +93,38 @@ five-seed mean validation inflow MAE. Do not resume a four-channel checkpoint
 into these runs.
 
 `backbone_mode=state_independent` is an All2All experiment on the four-state
-`all.npz` windows. Four `StateTSFBranch` modules each encode one
-state channel with their own value MLP, node/TOD/DOW tables, adaptive table,
-and one T→S→FFN. The totals in the config are split by 4: value 8, node 4,
-TOD 2, DOW 2, base 16, adaptive 16, branch width 32. The four outputs are
-concatenated to `d_model` and then read by `head_type=flatten_mlp`
-(`1536→128→4` at the 128-d setting). `ffn_hidden_dim` stays the width of
-each FFN, 176 in the experiment JSON. Conservation still projects the four
-outputs. Configs:
-`configs/experiment_state_independent_tsf_mlp_projected.json` and the shared
-control `configs/experiment_shared_tsf_mlp_projected.json`. The frozen
-default stays `backbone_mode=shared` and `head_type=flatten`. Do not resume
-one backbone into the other. `state_aux_gate` cannot be combined with
-`state_independent`.
+`all.npz` windows. Four `StateTSFBranch` modules each encode one state
+channel with their own value MLP, road table, and one T→S→FFN. Config
+widths are totals and are split by 4. `ffn_hidden_dim` and
+`attention_head_dim` are not split.
+
+`state_context_sharing` controls only the TOD, DOW, and adaptive tables:
+
+- `independent` (default), including
+  `configs/experiment_state_independent_tsf_mlp_projected.json`: each branch
+  owns its tables. The 128-d run is value 8, road 4, TOD 2, DOW 2, adaptive
+  16, branch width 32, concatenated to 128, head `1536→128→4`.
+- `independent` with a full context vector,
+  `configs/experiment_state_independent_full_context_independent_tsf_mlp_projected.json`:
+  each branch owns TOD 8, DOW 8, and adaptive 64. The branch is 92-d
+  (`attention_head_dim=24`, inner width 96, FFN 176). Four branches
+  concatenate to 368. The head is `4416→128→4`. The projection MLP reads 372.
+  At N=1406 this model has 5,408,264 parameters.
+- `shared`,
+  `configs/experiment_state_independent_full_context_shared_tsf_mlp_projected.json`:
+  the same 4×92 branches, but one parent TOD `[288, 8]`, DOW `[7, 8]`, and
+  adaptive `[12, N, 64]` is read in full by every branch. Gradients sum into
+  that one copy. At N=1406 the model has 2,161,760 parameters, exactly
+  3,246,504 fewer than the four-copy model. The backbone mode remains
+  `state_independent`.
+
+`configs/experiment_shared_tsf_mlp_projected.json` is the one-TSF control.
+`backbone_mode=shared` accepts only `state_context_sharing=independent` as an
+unused placeholder. The frozen default stays `backbone_mode=shared` and
+`head_type=flatten`. Do not resume one of these structures into another.
+`state_aux_gate` cannot be combined with `state_independent`.
+`python MSTT/tests/test_state_context_sharing.py` checks the two full-context
+models on CPU.
 
 `value_embedding_mode=state_aux_gate` is a separate `AllSpC2All` experiment
 on the same `all_sp_c.npz` windows and merged scaler. Four independent state

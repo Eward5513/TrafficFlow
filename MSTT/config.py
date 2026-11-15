@@ -146,6 +146,7 @@ MODEL_DEFAULTS: dict[str, Any] = {
     "conservation_mode": "none",
     "projection_mlp_hidden_dim": 32,
     "backbone_mode": "shared",
+    "state_context_sharing": "independent",
     "fusion_mlp_hidden_dim": 128,
 }
 
@@ -169,6 +170,8 @@ LEGACY_DEFAULTS: dict[str, Any] = {
     "value_embedding_mode": "joint_linear",
     "conservation_mode": "none", "projection_mlp_hidden_dim": 32,
     "backbone_mode": "shared",
+    # Runs saved before this field keep a private TOD/DOW/adaptive table on each branch.
+    "state_context_sharing": "independent",
     "fusion_mlp_hidden_dim": 128,
 }
 
@@ -270,6 +273,7 @@ _CHOICES = {
     "spatial_direction": ("forward", "backward", "bidirectional"),
     "head_type": ("flatten", "last", "flatten_mlp"),
     "backbone_mode": ("shared", "state_independent"),
+    "state_context_sharing": ("independent", "shared"),
     "embedding_fusion": ("add", "concat"),
     "value_embedding_mode": ("joint_linear", "separate_mlp", "state_aux_gate"),
     "loss": ("mae_raw", "huber_raw", "mse_raw"),
@@ -373,9 +377,10 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if str(config["target_mode"]) != "last-observed-step":
         raise ValueError("MSTT reconstructs the last observed slot; target_mode must be last-observed-step")
     backbone = str(config.get("backbone_mode", "shared"))
-    if backbone == "state_independent":
-        from MSTT.model.mstt import validate_independent_backbone
+    from MSTT.model.mstt import validate_independent_backbone, validate_state_context_sharing
 
+    validate_state_context_sharing(config)
+    if backbone == "state_independent":
         validate_independent_backbone(config)
     else:
         if int(config["d_model"]) % int(config["num_heads"]) != 0:
@@ -494,6 +499,9 @@ def validate_value_embedding_task(config: Mapping[str, Any], task: TaskSpec) -> 
 
 def validate_backbone_task(config: Mapping[str, Any], task: TaskSpec) -> None:
     """Task constraints for ``state_independent``. Shared runs are unchanged."""
+    from MSTT.model.mstt import validate_independent_backbone, validate_state_context_sharing
+
+    validate_state_context_sharing(config)
     mode = str(config.get("backbone_mode", "shared"))
     if mode == "shared":
         return
@@ -513,8 +521,6 @@ def validate_backbone_task(config: Mapping[str, Any], task: TaskSpec) -> None:
             f"{list(STATE_CHANNELS)} in that order, got task {task.name} "
             f"in={list(task.input_channels)} out={list(task.output_channels)}"
         )
-    from MSTT.model.mstt import validate_independent_backbone
-
     validate_independent_backbone(config)
 
 

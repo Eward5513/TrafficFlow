@@ -20,6 +20,7 @@ from MSTT.model.head import PredictionHead
 from MSTT.model.joint_attention import JointSTAttention
 from MSTT.model.conservation import ConservationProjection
 from MSTT.model.state_branch import StateTSFBranch
+from MSTT.model.state_context import SharedStateContextEmbedding
 from MSTT.model.transformer_block import JointSTBlock, build_factorized_block
 
 STATE_BRANCH_COUNT = 4
@@ -84,6 +85,7 @@ class MSTTConfig:
     conservation_mode: str = "none"
     projection_mlp_hidden_dim: int = 32
     backbone_mode: str = "shared"
+    state_context_sharing: str = "independent"
     fusion_mlp_hidden_dim: int = 128
 
     @classmethod
@@ -189,10 +191,39 @@ def validate_independent_backbone(config: MSTTConfig | Mapping[str, Any]) -> Non
             )
 
 
+def validate_state_context_sharing(config: MSTTConfig | Mapping[str, Any]) -> None:
+    """Assign TOD, DOW, and adaptive tables. It does not change widths.
+
+    ``independent`` keeps one table set inside each state branch.
+    ``shared`` keeps one parent table set and feeds every branch the full
+    vectors. ``backbone_mode=shared`` is one TSF and does not use the switch;
+    only the placeholder ``independent`` is accepted there.
+    """
+    sharing = str(_cfg_get(config, "state_context_sharing", "independent"))
+    if sharing not in ("independent", "shared"):
+        raise ValueError(f"state_context_sharing must be 'independent' or 'shared', got {sharing!r}")
+    backbone = str(_cfg_get(config, "backbone_mode", "shared"))
+    if backbone != "state_independent" and sharing != "independent":
+        raise ValueError(
+            "state_context_sharing='shared' requires backbone_mode='state_independent' "
+            "(four TSFs sharing TOD/DOW/adaptive tables). backbone_mode='shared' "
+            "only accepts the unused placeholder 'independent'"
+        )
+
+
 def _assert_distinct_parameters(modules) -> None:
     pointers = [param.data_ptr() for module in modules for param in module.parameters()]
     if len(pointers) != len(set(pointers)):
         raise RuntimeError("state branches must not share parameter storage")
+
+
+def _assert_parameters_disjoint(module: nn.Module, others) -> None:
+    owned = [param.data_ptr() for param in module.parameters()]
+    if len(owned) != len(set(owned)):
+        raise RuntimeError("shared context parameters are duplicated inside the context module")
+    other = {param.data_ptr() for branch in others for param in branch.parameters()}
+    if set(owned) & other:
+        raise RuntimeError("shared context parameters are also registered on a state branch")
 
 
 class MSTT(nn.Module):
@@ -234,6 +265,7 @@ class MSTT(nn.Module):
         mode = str(config.backbone_mode)
         if mode not in ("shared", "state_independent"):
             raise ValueError(f"unknown backbone_mode {mode!r}")
+        validate_state_context_sharing(config)
         if mode == "state_independent":
             validate_independent_backbone(config)
             branch_cfg = replace(
@@ -247,10 +279,22 @@ class MSTT(nn.Module):
                 tod_embedding_dim=config.tod_embedding_dim // STATE_BRANCH_COUNT,
                 dow_embedding_dim=config.dow_embedding_dim // STATE_BRANCH_COUNT,
             )
+            external_context = config.state_context_sharing == "shared"
             self.branches = nn.ModuleList(
-                StateTSFBranch(branch_cfg, graph) for _ in range(STATE_BRANCH_COUNT)
+                StateTSFBranch(branch_cfg, graph, external_context=external_context)
+                for _ in range(STATE_BRANCH_COUNT)
             )
             _assert_distinct_parameters(list(self.branches))
+            if external_context:
+                self.shared_state_context = SharedStateContextEmbedding(
+                    steps_per_day=int(config.steps_per_day),
+                    tod_dim=int(config.tod_embedding_dim) // STATE_BRANCH_COUNT,
+                    dow_dim=int(config.dow_embedding_dim) // STATE_BRANCH_COUNT,
+                    input_window=int(config.input_window),
+                    num_nodes=int(config.num_nodes),
+                    adaptive_dim=int(config.adaptive_embedding_dim) // STATE_BRANCH_COUNT,
+                )
+                _assert_parameters_disjoint(self.shared_state_context, self.branches)
         else:
             temporal_heads = config.num_heads if config.temporal_num_heads is None else int(config.temporal_num_heads)
             self.embedding = InputEmbedding(
@@ -343,10 +387,17 @@ class MSTT(nn.Module):
         if self.config.backbone_mode == "state_independent":
             if int(x.shape[-1]) != STATE_BRANCH_COUNT:
                 raise ValueError("state_independent expects four state channels")
-            hidden_parts = [
-                branch(x[..., channel:channel + 1], time_of_day, day_of_week)
-                for channel, branch in enumerate(self.branches)
-            ]
+            if self.config.state_context_sharing == "shared":
+                context = self.shared_state_context(x, time_of_day, day_of_week)
+                hidden_parts = [
+                    branch(x[..., channel:channel + 1], time_of_day, day_of_week, context=context)
+                    for channel, branch in enumerate(self.branches)
+                ]
+            else:
+                hidden_parts = [
+                    branch(x[..., channel:channel + 1], time_of_day, day_of_week)
+                    for channel, branch in enumerate(self.branches)
+                ]
             hidden = torch.cat(hidden_parts, dim=-1)
             if int(hidden.shape[-1]) != int(self.config.d_model):
                 raise RuntimeError(
@@ -377,11 +428,22 @@ class MSTT(nn.Module):
             "ffn_hidden_dims": [int(ffn.w_gate.out_features) for ffn in ffns],
             "total_parameters": self.parameter_count(),
         }
+        if self.projection is not None:
+            first, last = self.projection.mlp[0], self.projection.mlp[-1]
+            summary["projection_mlp"] = {
+                "input_dim": int(first.in_features),
+                "hidden_dim": int(first.out_features),
+                "output_dim": int(last.out_features),
+            }
         if self.config.backbone_mode == "state_independent":
             branches = [branch.summary() for branch in self.branches]
+            embedding = summary["embedding"]
             summary.update(
                 branch_count=len(self.branches),
                 branch_d_model=int(self.config.d_model) // STATE_BRANCH_COUNT,
+                state_context_sharing=embedding["state_context_sharing"],
+                state_channels=list(embedding["state_channels"]),
+                context_tables=embedding["context_tables"],
                 joint_attention_count=0,
                 temporal_attention_count=len(self.branches),
                 spatial_attention_count=len(self.branches),
@@ -469,17 +531,93 @@ class MSTT(nn.Module):
             )
         return summary
 
+    def _context_table_summary(self) -> dict[str, Any]:
+        """Owned TOD/DOW/adaptive tables. A shared table is counted once."""
+        sharing = str(self.config.state_context_sharing)
+        probe = self.branches[0]
+        widths = probe.embedding.widths
+        adaptive_shape = [int(size) for size in probe.context_adaptive_shape]
+        per_branch = {
+            "value": int(widths["value"]),
+            "node": int(widths["node"]),
+            "tod": int(widths["tod"]),
+            "dow": int(widths["dow"]),
+            "base": int(probe.embedding.d_model),
+            "adaptive": int(adaptive_shape[-1]),
+            "d_model": int(probe.block.temporal.d_model),
+        }
+        if per_branch["base"] + per_branch["adaptive"] != per_branch["d_model"]:
+            raise RuntimeError(
+                f"branch base {per_branch['base']} + adaptive {per_branch['adaptive']} "
+                f"!= d_model {per_branch['d_model']}"
+            )
+        tod_shape = [int(self.config.steps_per_day), per_branch["tod"]]
+        dow_shape = [7, per_branch["dow"]]
+        per_copy = tod_shape[0] * tod_shape[1] + dow_shape[0] * dow_shape[1]
+        per_copy += adaptive_shape[0] * adaptive_shape[1] * adaptive_shape[2]
+        if sharing == "shared":
+            copies = 1
+            tables = [
+                self.shared_state_context.tod_embedding.weight,
+                self.shared_state_context.dow_embedding.weight,
+                self.shared_state_context.adaptive.adaptive_embedding,
+            ]
+        else:
+            copies = STATE_BRANCH_COUNT
+            tables = []
+            for branch in self.branches:
+                tables.extend((
+                    branch.embedding.tod_embedding.weight,
+                    branch.embedding.dow_embedding.weight,
+                    branch.adaptive.adaptive_embedding,
+                ))
+        pointers = [table.data_ptr() for table in tables]
+        if len(pointers) != len(set(pointers)):
+            raise RuntimeError("context tables do not have distinct storage")
+        owned = int(sum(table.numel() for table in tables))
+        if owned != per_copy * copies:
+            raise RuntimeError(f"context parameter count {owned} != {per_copy} x {copies}")
+        return {
+            "sharing": sharing,
+            "copies": copies,
+            "tod_shape": tod_shape,
+            "dow_shape": dow_shape,
+            "adaptive_shape": adaptive_shape,
+            "per_branch_feature_width": per_branch,
+            "concat_feature_width": {
+                "tod": per_branch["tod"] * STATE_BRANCH_COUNT,
+                "dow": per_branch["dow"] * STATE_BRANCH_COUNT,
+                "adaptive": per_branch["adaptive"] * STATE_BRANCH_COUNT,
+                "d_model": per_branch["d_model"] * STATE_BRANCH_COUNT,
+            },
+            "parameters_per_copy": int(per_copy),
+            "parameters_total": owned,
+        }
+
     def embedding_summary(self) -> dict[str, Any]:
         """Fusion mode and the widths actually built (``add`` uses ``d_model`` for every part)."""
         if self.config.backbone_mode == "state_independent":
-            branches = [branch.summary() for branch in self.branches]
+            from MSTT.config import STATE_CHANNELS
+
+            context = self._context_table_summary()
             return {
                 "backbone_mode": "state_independent",
-                "branch_count": len(branches),
-                "shared_parameters": False,
+                "state_context_sharing": context["sharing"],
+                "state_channels": list(STATE_CHANNELS),
+                "branch_count": STATE_BRANCH_COUNT,
+                "parameter_sharing": {
+                    "value_mlp": "independent",
+                    "node_embedding": "independent",
+                    "tod": context["sharing"],
+                    "dow": context["sharing"],
+                    "adaptive": context["sharing"],
+                    "tsf": "independent",
+                },
                 "concatenation": "channel axis after each branch TSF",
                 "output_dim": int(self.config.d_model),
-                "branches": branches,
+                "per_branch_feature_width": context["per_branch_feature_width"],
+                "context_tables": context,
+                "branches": [branch.summary() for branch in self.branches],
             }
         embedding = self.embedding
         return {

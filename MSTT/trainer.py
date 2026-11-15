@@ -159,6 +159,10 @@ def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     Missing values are filled with ``joint_linear`` by ``with_legacy_defaults``
     before this compare. ``fusion_mlp_hidden_dim`` is inactive for flatten/last,
     and ``projection_mlp_hidden_dim`` is inactive unless conservation is projected.
+    ``state_context_sharing`` stays in the comparison. Old checkpoints omit it
+    and are restored as ``independent``. A shared-context run does not resume
+    an independent-context run. On ``backbone_mode=shared`` the field is an
+    unused placeholder and remains ``independent``.
     """
     result = dict(payload)
     if result.get("conservation_mode", "none") != "projected":
@@ -176,9 +180,14 @@ def assert_run_dir_matches(run_dir: Path, config: Mapping[str, Any], task: TaskS
     path = Path(run_dir) / "resolved_config.json"
     if not path.is_file():
         return
-    stored = with_legacy_defaults(json.loads(path.read_text(encoding="utf-8")))
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    stored = with_legacy_defaults(raw)
+    try:
+        stored_identity = model_config_from_saved(raw)
+    except ValueError as exc:
+        raise ReimplementationError(f"{run_dir} resolved_config.json model identity is inconsistent: {exc}") from exc
     current = _effective_model_config(model_config(config, task).to_dict())
-    stored_model = _effective_model_config(stored.get("model_config") or {})
+    stored_model = _effective_model_config(stored_identity)
     diff = {
         key: (stored_model.get(key), value)
         for key, value in current.items()

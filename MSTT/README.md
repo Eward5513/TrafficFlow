@@ -21,10 +21,13 @@ MSTT/
 ├── configs/experiment_A_separate_value_mlp_projected.json
 ├── configs/experiment_shared_tsf_mlp_projected.json
 ├── configs/experiment_state_independent_tsf_mlp_projected.json
+├── configs/experiment_state_independent_full_context_shared_tsf_mlp_projected.json
+├── configs/experiment_state_independent_full_context_independent_tsf_mlp_projected.json
 ├── configs/conservation_best_backbone/
 ├── model/
 │   ├── mstt.py
 │   ├── state_branch.py
+│   ├── state_context.py
 │   ├── embedding.py
 │   ├── auxiliary_gate.py
 │   ├── adaptive_embedding.py
@@ -274,6 +277,8 @@ Two configs separate the backbone change from the head change:
 | `experiment_A_separate_value_mlp_projected.json` | shared 128-d TSF | flatten linear | existing run |
 | `experiment_shared_tsf_mlp_projected.json` | shared 128-d TSF | flatten MLP | 1,505,952 |
 | `experiment_state_independent_tsf_mlp_projected.json` | four 32-d TSFs | flatten MLP | 1,407,648 |
+| `experiment_state_independent_full_context_shared_tsf_mlp_projected.json` | four 92-d TSFs, one shared context | flatten MLP | 2,161,760 |
+| `experiment_state_independent_full_context_independent_tsf_mlp_projected.json` | four 92-d TSFs, four context tables | flatten MLP | 5,408,264 |
 
 A and B use the same fusion MLP and the same projected loss, final MAE plus
 `0.5` times raw MAE. A has four width-32 blocks and 1,407,648 parameters.
@@ -303,7 +308,81 @@ python MSTT/train.py \
 
 The shared-head control uses
 `MSTT/configs/experiment_shared_tsf_mlp_projected.json` and the same task,
-penetration, and dataset id.
+penetration, and dataset id. In that file, `shared` means one TSF. The
+full-context runs below keep four TSFs and share only the context tables.
+
+The 128-d four-branch config stays value 8, road 4, TOD 2, DOW 2, and
+adaptive 16. A full-context run has its own experiment id and checkpoint.
+
+## Full context on four independent TSFs
+
+`state_context_sharing` applies only when `backbone_mode=state_independent`.
+It switches the TOD, DOW, and adaptive tables together. Value MLPs, road
+tables, attention, FFN, and branch RMSNorm stay private either way. The
+default is `independent`, which is what the 128-d run above already does.
+`backbone_mode=shared` accepts only that unused placeholder.
+
+Both new configs use the same widths. Each branch reads value 8, road 4,
+TOD 8, DOW 8, then dropout, then adaptive 64, so the branch is 92-d.
+`num_heads=4` and `attention_head_dim=24` give an attention inner width of
+96, with QKV `92→288` and the output projection `96→92`. `ffn_hidden_dim=176`
+is the width inside each FFN and is not divided by 4. The four 92-d states
+concatenate to 368. The head is RMSNorm, then `4416→128→4`. The conservation
+MLP reads the last hidden step plus the four raw outputs, `372→32→4`.
+
+`shared` keeps one parent table, TOD `[288, 8]`, DOW `[7, 8]`, and adaptive
+`[12, N, 64]`, and every branch reads that full vector. The four branches
+add their gradients into those parameters. `independent` gives each branch
+its own copy of the same shapes. At N=1406 one copy has 1,082,168
+parameters, so the independent full-context model has 3,246,504 more
+parameters than the shared one (5,408,264 versus 2,161,760). Between these
+two models the only change is context sharing, and the parameter counts
+still differ. A comparison with the 128-d four-branch model also changes
+branch width, attention inner width, and head input width.
+
+Loss, selection, and the training schedule are the same projected All2All
+protocol: final four-state MAE plus 0.5 times raw MAE, checkpoint by the
+mean validation inflow MAE over sampling seeds 42–46. The model seed stays
+42.
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_<version>/MSTT/
+  in_all__out_all/<observation_key>/<experiment_id>/seed_42/<run_id>/
+```
+
+For `variable_30min_p10_p20` the observation key is `p10_p20` and the
+physical version recorded on that dataset is `independent_fcd_v1`. The
+experiment ids are `state_independent_full_context_shared_tsf_mlp_projected`
+and `state_independent_full_context_independent_tsf_mlp_projected`. Run one
+task at a time.
+
+```bash
+python MSTT/train.py \
+  --config MSTT/configs/experiment_state_independent_full_context_shared_tsf_mlp_projected.json \
+  --task All2All \
+  --dataset-id variable_30min_p10_p20 \
+  --penetration p10_p20 \
+  --device cuda:0
+```
+
+```bash
+python MSTT/train.py \
+  --config MSTT/configs/experiment_state_independent_full_context_independent_tsf_mlp_projected.json \
+  --task All2All \
+  --dataset-id variable_30min_p10_p20 \
+  --penetration p10_p20 \
+  --device cuda:0
+```
+
+The same command with `--dataset-id variable_1h_p10_p20`,
+`variable_2h_p10_p20`, or `variable_day_p10_p20` reads that frequency. The
+5–15% manifests are `variable_30min_p5_p15`, `variable_1h_p5_p15`,
+`variable_2h_p5_p15`, and `variable_day_p5_p15`, with observation key
+`p5_p15`.
+
+```bash
+python MSTT/tests/test_state_context_sharing.py
+```
 
 ## Historical results
 
