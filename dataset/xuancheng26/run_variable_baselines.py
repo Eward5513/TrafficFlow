@@ -6,10 +6,11 @@ keeps one physical GPU until the process exits. A GPU is free only when
 nvidia-smi lists no compute process on it. Memory is not part of that
 decision. The scheduler asks again every 30 seconds.
 
-``control.json`` is ``{"max_gpus": N}``. A missing file starts at 8. The next
+``control.json`` is ``{"max_gpus": N}``. A missing file starts at 7. The next
 poll reads edits. ``SIGHUP`` wakes the scheduler and reads it immediately. A
-line in ``messages.jsonl``, ``{"max_gpus": N}``, is the same change. The
-first poll at or after 09:00 local time each day writes ``max_gpus`` back to
+line in ``messages.jsonl``, ``{"max_gpus": N}``, is the same change. A new
+control file keeps that starting cap even when the first poll is after 09:00.
+On a later day, the first poll at or after 09:00 writes ``max_gpus`` back to
 4. A later edit still applies until the next morning.
 
 Lowering the cap does not stop a job that is already running. ``0`` pauses
@@ -58,14 +59,14 @@ from data_root import (  # noqa: E402
     xuancheng26_training_results_3s_root,
 )
 
-CAMPAIGN_ID = "variable_p10_p20_train42_eval5"
-EXPERIMENT_ID = "variable_p10_p20_train42_eval5"
-OBSERVATION_KEY = "p10_p20"
+CAMPAIGN_ID = "variable_p5_p15_train42_eval5"
+EXPERIMENT_ID = "variable_p5_p15_train42_eval5"
+OBSERVATION_KEY = "p5_p15"
 PHYSICAL_VERSION = "independent_fcd_v1"
 MODEL_SEED = 42
 EVAL_SEEDS = (42, 43, 44, 45, 46)
 POLL_SECONDS = 30
-DEFAULT_MAX_GPUS = 8
+DEFAULT_MAX_GPUS = 7
 MORNING_HOUR = 9
 MORNING_CAP = 4
 MIN_FREE_RAM_BYTES = 32 * 1024**3
@@ -111,10 +112,10 @@ MODELS = (
     {"name": "stjgcn", "script": "reimplementation/stjgcn/train_r_only_stjgcn.py"},
 )
 DATASETS = (
-    {"dataset_id": "variable_30min_p10_p20", "period_seconds": 1800},
-    {"dataset_id": "variable_1h_p10_p20", "period_seconds": 3600},
-    {"dataset_id": "variable_2h_p10_p20", "period_seconds": 7200},
-    {"dataset_id": "variable_day_p10_p20", "period_seconds": 86400},
+    {"dataset_id": "variable_30min_p5_p15", "period_seconds": 1800},
+    {"dataset_id": "variable_1h_p5_p15", "period_seconds": 3600},
+    {"dataset_id": "variable_2h_p5_p15", "period_seconds": 7200},
+    {"dataset_id": "variable_day_p5_p15", "period_seconds": 86400},
 )
 DEFAULT_CAMPAIGN_ID = CAMPAIGN_ID
 DEFAULT_OBSERVATION_KEY = OBSERVATION_KEY
@@ -726,11 +727,17 @@ def refresh_cap(ops: Path, gpu_count: int, previous: int) -> int:
     state_path = ops / "scheduler_state.json"
     state = read_json(state_path) or {}
     now = local_now()
+    created_now = False
+    initial = DEFAULT_MAX_GPUS if gpu_count <= 0 else min(DEFAULT_MAX_GPUS, gpu_count)
     if not control_path.is_file():
-        initial = DEFAULT_MAX_GPUS if gpu_count <= 0 else min(DEFAULT_MAX_GPUS, gpu_count)
         atomic_write_json(control_path, {"max_gpus": initial})
         log_line(ops, f"CONTROL created {control_path} max_gpus={initial}")
-    if morning_reset_due(now, state.get("morning_reset_date")):
+        created_now = True
+    if created_now and morning_reset_due(now, state.get("morning_reset_date")):
+        state["morning_reset_date"] = now.date().isoformat()
+        atomic_write_json(state_path, state)
+        log_line(ops, f"morning reset already passed; keeping max_gpus={initial} local_time={stamp(now)}")
+    elif morning_reset_due(now, state.get("morning_reset_date")):
         atomic_write_json(control_path, {"max_gpus": MORNING_CAP})
         state["morning_reset_date"] = now.date().isoformat()
         atomic_write_json(state_path, state)
@@ -1192,7 +1199,7 @@ def select_campaign(
     range_config: Path | None = None,
     observation_key: str | None = None,
 ) -> None:
-    """Choose one fluctuation range. The default command stays on 10–20%."""
+    """Choose one fluctuation range. The default command stays on 5–15%."""
     global CAMPAIGN_ID, EXPERIMENT_ID, OBSERVATION_KEY, DATASETS
     if range_config is None and observation_key is None:
         CAMPAIGN_ID = DEFAULT_CAMPAIGN_ID
@@ -1237,7 +1244,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=("run", "status", "plan", "requeue-failed"))
     parser.add_argument("--campaign-id", default=None)
     parser.add_argument("--range-config", type=Path, default=None, help="generator JSON for one penetration range, such as variable_p5_p15.json")
-    parser.add_argument("--observation-key", default=None, help="published range such as p5_p15; default remains p10_p20")
+    parser.add_argument("--observation-key", default=None, help="published range such as p10_p20; default remains p5_p15")
     args = parser.parse_args(argv)
     training_root = xuancheng26_training_3s_root()
     select_campaign(

@@ -266,7 +266,7 @@ _CHOICES = {
     "spatial_direction": ("forward", "backward", "bidirectional"),
     "head_type": ("flatten", "last"),
     "embedding_fusion": ("add", "concat"),
-    "value_embedding_mode": ("joint_linear", "separate_mlp"),
+    "value_embedding_mode": ("joint_linear", "separate_mlp", "state_aux_gate"),
     "loss": ("mae_raw", "huber_raw", "mse_raw"),
     "channel_balance": ("none", "target_std"),
     "selection_metric": ("mean_validation_mae",),
@@ -391,6 +391,11 @@ def validate_config(config: Mapping[str, Any]) -> None:
         value_dim = int(config.get("value_embedding_dim", 0))
         if value_dim < 1:
             raise ValueError("value_embedding_mode=separate_mlp requires a positive value_embedding_dim")
+    elif value_mode == "state_aux_gate":
+        if str(config.get("embedding_fusion", "add")) != "concat":
+            raise ValueError("value_embedding_mode=state_aux_gate requires embedding_fusion=concat")
+        if int(config.get("value_embedding_dim", 0)) != 32:
+            raise ValueError("value_embedding_mode=state_aux_gate requires value_embedding_dim=32")
     from MSTT.model.embedding import resolve_embedding_dims
 
     base_dim, _ = resolve_embedding_dims(
@@ -449,7 +454,15 @@ def validate_conservation_task(config: Mapping[str, Any], task: TaskSpec) -> Non
 
 def validate_value_embedding_task(config: Mapping[str, Any], task: TaskSpec) -> None:
     """Channel count and order are known once the task is. Fusion stays in ``validate_config``."""
-    if str(config.get("value_embedding_mode", "joint_linear")) != "separate_mlp":
+    mode = str(config.get("value_embedding_mode", "joint_linear"))
+    if mode == "state_aux_gate":
+        if task.input_channels != ALL_SP_C_CHANNELS:
+            raise ValueError(
+                "value_embedding_mode=state_aux_gate requires input channels "
+                f"{list(ALL_SP_C_CHANNELS)}, task {task.name} has {list(task.input_channels)}"
+            )
+        return
+    if mode != "separate_mlp":
         return
     allowed = (STATE_CHANNELS, ALL_SP_C_CHANNELS)
     if task.input_channels not in allowed:

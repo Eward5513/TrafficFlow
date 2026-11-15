@@ -51,7 +51,8 @@ def main(argv=None) -> dict:
     config = load_config(None)
     config.update({key: saved[key] for key in config if key in saved})
     # The built model is stored under model_config. A missing field, there or at the
-    # top level, stays joint_linear via with_legacy_defaults.
+    # top level, stays joint_linear via with_legacy_defaults. A recorded
+    # state_aux_gate is restored from that same field.
     raw_model = raw.get("model_config")
     if isinstance(raw_model, dict) and "value_embedding_mode" in raw_model:
         config["value_embedding_mode"] = raw_model["value_embedding_mode"]

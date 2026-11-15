@@ -130,10 +130,11 @@ _CONCAT_WIDTH_KEYS = ("value_embedding_dim", "node_embedding_dim", "tod_embeddin
 def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     """``add`` fusion ignores the concat widths, so they do not distinguish two ``add`` runs.
 
-    ``value_embedding_mode`` stays in the compared dict. ``joint_linear`` and
-    ``separate_mlp`` build different value modules, so a run directory or
-    checkpoint from one cannot be reused for the other. Missing values are
-    filled with ``joint_linear`` by ``with_legacy_defaults`` before this compare.
+    ``value_embedding_mode`` stays in the compared dict. ``joint_linear``,
+    ``separate_mlp``, and ``state_aux_gate`` build different value modules, so
+    a run directory or checkpoint from one cannot be reused for another.
+    Missing values are filled with ``joint_linear`` by ``with_legacy_defaults``
+    before this compare.
     """
     result = dict(payload)
     if result.get("conservation_mode", "none") != "projected":

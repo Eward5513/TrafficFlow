@@ -11,6 +11,14 @@ width 8 and is 48-d. Slice order is the dataset channel axis. The MLPs share
 no parameters. Dropout stays on the finished base embedding; the MLPs
 themselves have none.
 
+``value_embedding_mode="state_aux_gate"`` keeps ``in_channels=6`` and uses
+four of those MLPs on the traffic states (width 8, concatenated to 32). The
+standardized speed and observation-count channels are not extra value
+features. ``AuxiliaryStateGate`` maps them to 32 coefficients,
+``g = 2 * sigmoid(.)``, and the state embedding is multiplied by ``g`` before
+the road, TOD, and DOW parts are concatenated. The gate's last linear layer
+is zero-initialized, so ``g`` starts at 1. Forward does not store the gate.
+
 ``fusion="add"`` (v0.1): every part maps to ``d_model`` and the parts are
 summed. ``fusion="concat"`` (v0.2 default): each part has its own width,
 is broadcast to ``[B, T, N, d_i]``, and the parts are concatenated in the
@@ -26,8 +34,12 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from MSTT.model.auxiliary_gate import AUX_CHANNELS, AuxiliaryStateGate
+
 FUSION_MODES = ("add", "concat")
-VALUE_EMBEDDING_MODES = ("joint_linear", "separate_mlp")
+VALUE_EMBEDDING_MODES = ("joint_linear", "separate_mlp", "state_aux_gate")
+STATE_AUX_BRANCHES = 4
+STATE_AUX_VALUE_DIM = 32
 
 
 def resolve_embedding_dims(d_model, base_dim=None, adaptive_dim=None, *, adaptive=False, fusion="add"):
@@ -77,7 +89,11 @@ class InputEmbedding(nn.Module):
         self.value_embedding_mode = value_embedding_mode
         self.value_branch_dim: int | None = None
         if value_embedding_mode == "separate_mlp":
-            self.value_mlps = self._separate_value_mlps()
+            self.value_mlps = self._separate_value_mlps(self.in_channels)
+        elif value_embedding_mode == "state_aux_gate":
+            self._require_state_aux_gate()
+            self.value_mlps = self._separate_value_mlps(STATE_AUX_BRANCHES)
+            self.auxiliary_gate = AuxiliaryStateGate()
         else:
             self.value_projection = nn.Linear(self.in_channels, self.widths["value"])
         self.node_embedding = nn.Embedding(self.num_nodes, self.widths["node"]) if use_node_embedding else None
@@ -106,6 +122,15 @@ class InputEmbedding(nn.Module):
                 [mlp(x[..., channel:channel + 1]) for channel, mlp in enumerate(self.value_mlps)],
                 dim=-1,
             )
+        elif self.value_embedding_mode == "state_aux_gate":
+            # Gate after the four state MLPs, before node / TOD / DOW. Not stored.
+            states = x[..., :STATE_AUX_BRANCHES]
+            aux = x[..., STATE_AUX_BRANCHES:]
+            embedded = torch.cat(
+                [mlp(states[..., channel:channel + 1]) for channel, mlp in enumerate(self.value_mlps)],
+                dim=-1,
+            )
+            value = embedded * self.auxiliary_gate(aux)
         else:
             raise ValueError(f"unknown value_embedding_mode {self.value_embedding_mode!r}")
         node = tod = dow = None
@@ -132,23 +157,52 @@ class InputEmbedding(nn.Module):
                 parts.append(part.expand(*shape, self.widths[name]))
         return self.dropout(torch.cat(parts, dim=-1))
 
-    def _separate_value_mlps(self) -> nn.ModuleList:
-        channels = int(self.in_channels)
-        if channels < 1:
-            raise ValueError("separate_mlp value embedding requires at least one input channel")
-        if self.fusion != "concat":
-            raise ValueError(f"separate_mlp value embedding requires fusion='concat', got {self.fusion!r}")
-        value_dim = int(self.widths["value"])
-        if value_dim % channels != 0 or value_dim // channels < 1:
+    def _require_state_aux_gate(self) -> None:
+        """Six real inputs, four state branches, and a 32-d value. ``in_channels`` stays 6."""
+        if int(self.in_channels) != STATE_AUX_BRANCHES + AUX_CHANNELS:
             raise ValueError(
-                "separate_mlp value width must be a positive multiple of "
-                f"in_channels={channels}, got {value_dim}"
+                "state_aux_gate requires "
+                f"in_channels={STATE_AUX_BRANCHES + AUX_CHANNELS}, got {self.in_channels}"
             )
-        branch_dim = value_dim // channels
+        if self.fusion != "concat":
+            raise ValueError(f"state_aux_gate value embedding requires fusion='concat', got {self.fusion!r}")
+        value_dim = int(self.widths["value"])
+        if value_dim != STATE_AUX_VALUE_DIM:
+            raise ValueError(f"state_aux_gate requires value_dim={STATE_AUX_VALUE_DIM}, got {value_dim}")
+
+    def _separate_value_mlps(self, branch_count: int) -> nn.ModuleList:
+        count = int(branch_count)
+        if self.value_embedding_mode == "separate_mlp" and count != int(self.in_channels):
+            raise ValueError(
+                "separate_mlp builds one branch per input channel, "
+                f"got branch_count={count} in_channels={self.in_channels}"
+            )
+        if count < 1:
+            if self.value_embedding_mode == "separate_mlp":
+                raise ValueError("separate_mlp value embedding requires at least one input channel")
+            raise ValueError(f"{self.value_embedding_mode} value embedding requires at least one branch")
+        if self.fusion != "concat":
+            if self.value_embedding_mode == "separate_mlp":
+                raise ValueError(f"separate_mlp value embedding requires fusion='concat', got {self.fusion!r}")
+            raise ValueError(
+                f"{self.value_embedding_mode} value embedding requires fusion='concat', got {self.fusion!r}"
+            )
+        value_dim = int(self.widths["value"])
+        if value_dim % count != 0 or value_dim // count < 1:
+            if self.value_embedding_mode == "separate_mlp":
+                raise ValueError(
+                    "separate_mlp value width must be a positive multiple of "
+                    f"in_channels={count}, got {value_dim}"
+                )
+            raise ValueError(
+                f"{self.value_embedding_mode} value width must be a positive multiple of "
+                f"branch_count={count}, got {value_dim}"
+            )
+        branch_dim = value_dim // count
         self.value_branch_dim = branch_dim
         # A new Sequential on every iteration. Reusing one module would tie the channels together.
-        mlps = [_separate_value_mlp(branch_dim) for _ in range(channels)]
-        if len({id(mlp) for mlp in mlps}) != channels:
+        mlps = [_separate_value_mlp(branch_dim) for _ in range(count)]
+        if len({id(mlp) for mlp in mlps}) != count:
             raise RuntimeError("separate value MLPs must be distinct module objects")
         return nn.ModuleList(mlps)
 
@@ -165,6 +219,21 @@ class InputEmbedding(nn.Module):
                 in_features=int(projection.in_features),
                 out_features=int(projection.out_features),
                 bias=projection.bias is not None,
+            )
+            return summary
+        if self.value_embedding_mode == "state_aux_gate":
+            mlps = list(self.value_mlps)
+            branch_widths = [int(mlp[-1].out_features) for mlp in mlps]
+            gate = self.auxiliary_gate
+            summary.update(
+                input_channels=int(self.in_channels),
+                state_branch_count=len(mlps),
+                branch_width=branch_widths[0] if len(set(branch_widths)) == 1 else branch_widths,
+                value_width=int(self.widths["value"]),
+                aux_channels=int(gate.aux_channels),
+                gate_output_dim=int(gate.output_dim),
+                formula=str(gate.formula),
+                init="identity",
             )
             return summary
         mlps = list(self.value_mlps)

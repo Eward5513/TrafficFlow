@@ -23,6 +23,7 @@ MSTT/
 ├── model/
 │   ├── mstt.py
 │   ├── embedding.py
+│   ├── auxiliary_gate.py
 │   ├── adaptive_embedding.py
 │   ├── attention.py
 │   ├── joint_attention.py
@@ -191,6 +192,58 @@ training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
 `in_all_sp_c__out_inflow` and the experiment ids
 `separate_mlp_d144_projected_inflow_only` and `separate_mlp_d144_none` follow
 the same layout. These runs do not resume a four-channel checkpoint.
+
+## Auxiliary gate on the four state embeddings
+
+`value_embedding_mode=state_aux_gate` reads the same six-channel `all_sp_c`
+windows and the existing merged scaler. It does not add a label or a mask.
+The four traffic states each keep an independent
+`Linear(1, 8) → SiLU → Linear(8, 8)` and concatenate to 32. Standardized
+`average_speed_raw` and `speed_observation_count` are not concatenated into
+the backbone and do not enter the head or the conservation network. They
+only produce
+
+```text
+g = 2 * sigmoid(Linear(32, 32)(SiLU(Linear(2, 32)(aux))))
+```
+
+`g` has shape `[B, 12, N, 32]`, one coefficient per state-embedding channel,
+in `(0, 2)`. The two auxiliary channels jointly set all four groups of
+coefficients. Parameters are shared across the batch, time, and roads; each
+`(b, t, n)` is computed on its own. The last linear layer, weight and bias,
+is zero-initialized, so the logits start at 0, `g` starts at 1, and the
+gated embedding equals the four-state embedding. There is no second
+normalization, no auxiliary residual, and no direct auxiliary path to the
+output.
+
+The gated 32-d value is concatenated with road 16, TOD 8, and DOW 8 (base
+64), then the 64-d adaptive table, so `d_model` is 128. The single T→S→FFN
+block, flatten head, and four-state conservation projection stay as they
+are. The gate is not a physical count and is not a projection weight.
+
+The config is `configs/all_sp_c_state_aux_gate_d128_projected_all.json`.
+The experiment id is `state_aux_gate_d128_projected_all`. Training loss is
+still four-state final MAE plus `0.5` times raw MAE. The checkpoint is still
+chosen by the mean validation inflow MAE over seeds 42–46. This run starts
+from scratch. `joint_linear`, the four-channel `separate_mlp`, and the
+six-channel `separate_mlp` configs and result directories are unchanged.
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all_sp_c__out_all/p10_p20/state_aux_gate_d128_projected_all/seed_42/<run_id>/
+```
+
+One frequency:
+
+```bash
+python MSTT/train.py --config MSTT/configs/all_sp_c_state_aux_gate_d128_projected_all.json \
+  --task AllSpC2All --penetration p10_p20 \
+  --dataset-id variable_30min_p10_p20 --gpu <GPU>
+```
+
+The other dataset ids are `variable_1h_p10_p20`, `variable_2h_p10_p20`, and
+`variable_day_p10_p20`. `run_all_sp_c_state_aux_gate.sh` takes a GPU list
+and keeps one dataset on each GPU at a time.
 
 ## Historical results
 

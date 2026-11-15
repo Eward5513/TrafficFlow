@@ -92,6 +92,20 @@ outputs and is allowed for `AllSpC2All`. Selection for these inputs is the
 five-seed mean validation inflow MAE. Do not resume a four-channel checkpoint
 into these runs.
 
+`value_embedding_mode=state_aux_gate` is a separate `AllSpC2All` experiment
+on the same `all_sp_c.npz` windows and merged scaler. Four independent state
+MLPs stay 8-d and concatenate to 32-d. The standardized speed and
+observation-count channels are not value features. They only produce
+`g = 2 * sigmoid(Linear(32, 32)(SiLU(Linear(2, 32)(aux))))`. The last linear
+layer is zero-initialized, so `g = 1` at the start and the gated embedding
+equals the four-state embedding. The product is applied before the road,
+TOD, and DOW concat. The backbone is again 128-d: value 32 + road 16 + TOD 8
++ DOW 8, then adaptive 64. Conservation still corrects the four outputs and
+does not treat `g` as a physical quantity. Config:
+`configs/all_sp_c_state_aux_gate_d128_projected_all.json`. Experiment id
+`state_aux_gate_d128_projected_all`. Do not write it into a `separate_mlp`
+directory or resume an older checkpoint.
+
 `projection_supervision` is `all` or `inflow_only`. Missing or `all` keeps
 original C: four-state final MAE + `projection_raw_loss_weight` * raw MAE +
 `projection_consistency_weight` * pre-projection conservation MAE.

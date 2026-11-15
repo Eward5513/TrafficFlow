@@ -132,7 +132,7 @@ python3 dataset/xuancheng26/model_prep/generate_variable_penetration_datasets.py
 
 `variable_p5_p15.json` 用同一条命令。
 
-断点续跑把 `--stage` 换成 `vehicles`、`flow`、`scaler`、`windows`、`ready` 或 `models`。`--dates` 只处理列出的日期；scaler 仍用完整训练 split 和 sampling seed 42。窗口身份包含当天四个 partial CSV 的 sha256，旧身份缺这个字段时，只在本次日期范围内核对原始窗口，一致就补记身份、不重写 NPZ。只有 29 天都在参数里时才发布全量 ready。只补辅助资源用 `--stage models`。训练入口只改 `--dataset-id` 和输出目录；未传 `--rates` 时，单一观测键从该 dataset 的 manifest 读取。波动训练默认仍是 `p10_p20`；`run_variable_baselines.py plan --observation-key p5_p15` 使用另一套 `operations/variable_p5_p15_train42_eval5/` 状态。
+断点续跑把 `--stage` 换成 `vehicles`、`flow`、`scaler`、`windows`、`ready` 或 `models`。`--dates` 只处理列出的日期；scaler 仍用完整训练 split 和 sampling seed 42。窗口身份包含当天四个 partial CSV 的 sha256，旧身份缺这个字段时，只在本次日期范围内核对原始窗口，一致就补记身份、不重写 NPZ。只有 29 天都在参数里时才发布全量 ready。只补辅助资源用 `--stage models`。训练入口只改 `--dataset-id` 和输出目录；未传 `--rates` 时，单一观测键从该 dataset 的 manifest 读取。波动训练默认是 `p5_p15`，状态目录是 `operations/variable_p5_p15_train42_eval5/`。10%–20% 用 `run_variable_baselines.py plan --observation-key p10_p20`，状态目录仍是 `operations/variable_p10_p20_train42_eval5/`。
 
 `shared/` 有 `split_manifest.json`、`physical_definition.json`、`node_mapping.csv`、`state_normalization.json`、`target_normalization.json`、`state_window_manifest.json`、`validation_summary.json`、`sequence_targets_12step/{train,validation,test}/YYYY_MM_DD.npz` 和 `provenance/`。序列标签的 `full_raw` 是 `(288, 1406, 4)`。
 
@@ -155,7 +155,7 @@ python3 dataset/xuancheng26/model_prep/generate_variable_penetration_datasets.py
 
 ## 宣城训练结果：`xuancheng26/training_results_3s/`（230G）
 
-正式运行都在 `datasets/` 下面，一层一个身份字段。四个 `variable_*_p10_p20` 结构相同，下面把 30 分钟展开；1 小时、2 小时、全天只是段长不同。`p5_p15` 和 `p5_p35` 还只有训练数据，结果树里没有这两个观测键。
+正式运行都在 `datasets/` 下面，一层一个身份字段。四个 `variable_*_p10_p20` 结构相同，下面把 30 分钟展开；1 小时、2 小时、全天只是段长不同。`p5_p15` 的结果写在同样的层级下，观测键是 `p5_p15`，实验号是 `variable_p5_p15_train42_eval5`。`p5_p35` 还只有训练数据，结果树里没有这个观测键。
 
 ```text
 training_results_3s/
@@ -244,7 +244,7 @@ datasets/variable_day_p10_p20/.../seed_42/20261110T210053_dceca753/
 
 共同前缀是 `physical_independent_fcd_v1/MSTT/in_all__out_all/p10_p20/conservation_projected/`。日志是 `reports/mstt_variable_projected_a2a.log` 和 `reports/mstt_variable_projected_a2a_1h_2h_day.log`。
 
-指标摘录在代码树的 [dataset/xuancheng26/TRAINING_RESULTS.md](dataset/xuancheng26/TRAINING_RESULTS.md)，MSTT 在 [MSTT/TRAINING_RESULTS.md](MSTT/TRAINING_RESULTS.md)。基线摘录整理到 2026-11-11 14:11，当时 71 条已经写出五种子测试指标：四个周期的 I2I 都完成了，A2A 完成 23 条，A2I 还没有。上面的 18:18 快照只说明当时的目录，完成数字以摘录和 `campaign_summary.json` 为准。
+指标摘录在代码树的 [dataset/xuancheng26/TRAINING_RESULTS.md](dataset/xuancheng26/TRAINING_RESULTS.md)，MSTT 在 [MSTT/TRAINING_RESULTS.md](MSTT/TRAINING_RESULTS.md)。基线摘录整理到 2026-11-15 14:21。10%–20% 的 144 条都已写入。5%–15% 写入了当时已经完成的 72 条：四个周期的 I2I，30 分钟的全部 A2A，1 小时 A2A 的 10 个模型，以及 2 小时 A2A 的 RF 和 STGCN。正在训练的任务不在摘录里。上面的 18:18 快照只说明当时的目录，完成数字以摘录和 `campaign_summary.json` 为准。
 
 ### 历史固定渗透率：`legacy_unknown` / `physical_legacy_unknown`（190G）
 
