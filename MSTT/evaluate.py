@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from MSTT.config import TASKS, load_config, rate_tag, with_legacy_defaults  # noqa: E402
+from MSTT.config import TASKS, load_config, rate_tag, restore_saved_model_fields, with_legacy_defaults  # noqa: E402
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -33,7 +33,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> dict:
     args = parse_args(argv)
-    from MSTT.trainer import TaskRun, run_directory, assert_conservation_checkpoint
+    from MSTT.trainer import TaskRun, assert_conservation_checkpoint, assert_model_checkpoint_matches, run_directory
+    from reimplementation.common.errors import ReimplementationError
     from reimplementation.common.sampling_evaluation import save_sampling_outputs
     from MSTT.utils.conservation_evaluation import save_mstt_predictions
     from reimplementation.common.utils.atomic_io import atomic_write_json
@@ -50,12 +51,12 @@ def main(argv=None) -> dict:
     saved = with_legacy_defaults(raw)
     config = load_config(None)
     config.update({key: saved[key] for key in config if key in saved})
-    # The built model is stored under model_config. A missing field, there or at the
-    # top level, stays joint_linear via with_legacy_defaults. A recorded
-    # state_aux_gate is restored from that same field.
-    raw_model = raw.get("model_config")
-    if isinstance(raw_model, dict) and "value_embedding_mode" in raw_model:
-        config["value_embedding_mode"] = raw_model["value_embedding_mode"]
+    # Nested model_config is the built model. Every MSTTConfig field is restored
+    # from it. A top-level value that disagrees with that nested field is an error.
+    try:
+        restore_saved_model_fields(config, raw)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if args.device is not None:
         config["device"] = args.device
     from data_root import parse_canonical_run
@@ -72,6 +73,10 @@ def main(argv=None) -> dict:
         raise SystemExit("checkpoint task/penetration does not match the run directory")
     if checkpoint.get("graph_sha256") != run.graph_info["graph_sha256"]:
         raise SystemExit("checkpoint graph SHA256 differs from the current r_graph.npz")
+    try:
+        assert_model_checkpoint_matches(checkpoint, run.model_config.to_dict())
+    except (ReimplementationError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
     model = run.build_model()
     model.load_state_dict(checkpoint["model_state_dict"])
     report = {"run_dir": run_dir.as_posix(), "checkpoint_epoch": int(checkpoint["epoch"]), "splits": {}}

@@ -92,6 +92,21 @@ outputs and is allowed for `AllSpC2All`. Selection for these inputs is the
 five-seed mean validation inflow MAE. Do not resume a four-channel checkpoint
 into these runs.
 
+`backbone_mode=state_independent` is an All2All experiment on the four-state
+`all.npz` windows. Four `StateTSFBranch` modules each encode one
+state channel with their own value MLP, node/TOD/DOW tables, adaptive table,
+and one T→S→FFN. The totals in the config are split by 4: value 8, node 4,
+TOD 2, DOW 2, base 16, adaptive 16, branch width 32. The four outputs are
+concatenated to `d_model` and then read by `head_type=flatten_mlp`
+(`1536→128→4` at the 128-d setting). `ffn_hidden_dim` stays the width of
+each FFN, 176 in the experiment JSON. Conservation still projects the four
+outputs. Configs:
+`configs/experiment_state_independent_tsf_mlp_projected.json` and the shared
+control `configs/experiment_shared_tsf_mlp_projected.json`. The frozen
+default stays `backbone_mode=shared` and `head_type=flatten`. Do not resume
+one backbone into the other. `state_aux_gate` cannot be combined with
+`state_independent`.
+
 `value_embedding_mode=state_aux_gate` is a separate `AllSpC2All` experiment
 on the same `all_sp_c.npz` windows and merged scaler. Four independent state
 MLPs stay 8-d and concatenate to 32-d. The standardized speed and

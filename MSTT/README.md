@@ -19,9 +19,12 @@ MSTT/
 ├── run_experiments.py
 ├── configs/default.json
 ├── configs/experiment_A_separate_value_mlp_projected.json
+├── configs/experiment_shared_tsf_mlp_projected.json
+├── configs/experiment_state_independent_tsf_mlp_projected.json
 ├── configs/conservation_best_backbone/
 ├── model/
 │   ├── mstt.py
+│   ├── state_branch.py
 │   ├── embedding.py
 │   ├── auxiliary_gate.py
 │   ├── adaptive_embedding.py
@@ -243,7 +246,64 @@ python MSTT/train.py --config MSTT/configs/all_sp_c_state_aux_gate_d128_projecte
 
 The other dataset ids are `variable_1h_p10_p20`, `variable_2h_p10_p20`, and
 `variable_day_p10_p20`. `run_all_sp_c_state_aux_gate.sh` takes a GPU list
-and keeps one dataset on each GPU at a time.
+and keeps one dataset on each GPU at a time. Its PID file only stops a
+second copy of that same chain. It does not see other jobs on the GPU, and
+each launch overwrites `gpu<N>.log`.
+
+## Independent state TSFs
+
+`backbone_mode=state_independent` keeps the four-state `all` windows and
+`separate_mlp`. Inflow, outflow, accumulation_start, and accumulation_end
+each have their own value MLP, road/TOD/DOW tables, adaptive table, and one
+T→S→FFN block. Nothing is mixed across states until those four 32-d
+encodings are concatenated to 128. `head_type=flatten_mlp` then applies
+RMSNorm, flattens all 12 steps, and maps `1536 → 128 → 4` with SiLU. The
+existing conservation projection reads that 128-d hidden state.
+
+Widths on each branch are value 8, road 4, TOD 2, DOW 2, adaptive 16, and a
+32-d block with 4 heads (`head_dim=8`). `ffn_hidden_dim=176` is the width
+inside each FFN. `d_model=128` is the total after concatenation. The same
+fields can describe another total width when every total is divisible by 4
+and the branch head size stays valid. The default config stays the shared
+backbone with `head_type=flatten`.
+
+Two configs separate the backbone change from the head change:
+
+| Config | Backbone | Head | Parameters at N=1406 |
+|---|---|---|---:|
+| `experiment_A_separate_value_mlp_projected.json` | shared 128-d TSF | flatten linear | existing run |
+| `experiment_shared_tsf_mlp_projected.json` | shared 128-d TSF | flatten MLP | 1,505,952 |
+| `experiment_state_independent_tsf_mlp_projected.json` | four 32-d TSFs | flatten MLP | 1,407,648 |
+
+A and B use the same fusion MLP and the same projected loss, final MAE plus
+`0.5` times raw MAE. A has four width-32 blocks and 1,407,648 parameters.
+B has one width-128 block and 1,505,952 parameters.
+Checkpoint selection remains the mean validation inflow MAE over sampling
+seeds 42–46. Those seeds resample the observed vehicles. The model seed
+stays 42.
+
+Results use the canonical layout, with `p10_p20` and `all.npz`:
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all__out_all/p10_p20/<experiment_id>/seed_42/<run_id>/
+```
+
+`<dataset_id>` is `variable_30min_p10_p20`, `variable_1h_p10_p20`,
+`variable_2h_p10_p20`, or `variable_day_p10_p20`. `<experiment_id>` is
+`state_independent_tsf_mlp_projected` or `shared_tsf_mlp_projected`.
+Run one task at a time, and only on a GPU whose compute-process list is empty.
+
+```bash
+python MSTT/train.py \
+  --config MSTT/configs/experiment_state_independent_tsf_mlp_projected.json \
+  --task All2All --penetration p10_p20 \
+  --dataset-id variable_30min_p10_p20 --device cuda:0
+```
+
+The shared-head control uses
+`MSTT/configs/experiment_shared_tsf_mlp_projected.json` and the same task,
+penetration, and dataset id.
 
 ## Historical results
 
@@ -251,7 +311,9 @@ Completed ablations, All2I, All2All, and conservation runs now live under
 `training_results_3s/datasets/legacy_unknown/physical_legacy_unknown/MSTT/`.
 Finished `p10_p20` runs, including four-channel `separate_value_mlp_projected`
 and six-channel `separate_mlp_d144_projected_all`, live under
-`training_results_3s/datasets/variable_<period>_p10_p20/`. The config and
+`training_results_3s/datasets/variable_<period>_p10_p20/`. The same
+four-channel `separate_value_mlp_projected` run on `p5_p15` is under
+`training_results_3s/datasets/variable_<period>_p5_p15/`. The config and
 metrics for each completed run are in
 [TRAINING_RESULTS.md](TRAINING_RESULTS.md). This tree no longer launches the
 deleted ablation scripts.

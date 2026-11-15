@@ -35,6 +35,9 @@ from MSTT.config import (
     with_legacy_defaults,
     validate_conservation_task,
     validate_value_embedding_task,
+    validate_backbone_task,
+    model_values_equal,
+    model_config_from_saved,
     conservation_settings,
     conservation_output_root,
 )
@@ -103,6 +106,19 @@ def is_smoke(config: Mapping[str, Any]) -> bool:
     return config.get("max_train_batches") is not None or config.get("max_eval_batches") is not None
 
 
+def model_reports(model: MSTT) -> dict[str, Any]:
+    """Summaries written into the resolved config. Independent runs record channel order."""
+    architecture = model.architecture_summary()
+    if model.config.backbone_mode == "state_independent":
+        architecture = dict(architecture)
+        architecture["state_channels"] = list(STATE_CHANNELS)
+    return {
+        "embedding": model.embedding_summary(),
+        "spatial": model.spatial_summary(),
+        "architecture": architecture,
+    }
+
+
 def run_is_complete(run_dir: Path) -> bool:
     meta = Path(run_dir) / "run_metadata.json"
     if not meta.is_file():
@@ -114,13 +130,20 @@ def run_is_complete(run_dir: Path) -> bool:
 
 def model_config(config: Mapping[str, Any], task: TaskSpec) -> MSTTConfig:
     validate_conservation_task(config, task)
+    validate_backbone_task(config, task)
     validate_value_embedding_task(config, task)
+    d_model = int(config["d_model"])
+    ffn_width = d_model
+    if str(config.get("backbone_mode", "shared")) == "state_independent":
+        if d_model % 4 != 0:
+            raise ValueError(f"state_independent d_model={d_model} must be divisible by 4")
+        ffn_width = d_model // 4
     return MSTTConfig.from_mapping(
         config,
         num_nodes=int(config["num_nodes"]),
         in_channels=task.in_channels,
         out_channels=task.out_channels,
-        ffn_hidden_dim=resolve_ffn_hidden_dim(int(config["d_model"]), config.get("ffn_hidden_dim")),
+        ffn_hidden_dim=resolve_ffn_hidden_dim(ffn_width, config.get("ffn_hidden_dim")),
     )
 
 
@@ -134,7 +157,8 @@ def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     ``separate_mlp``, and ``state_aux_gate`` build different value modules, so
     a run directory or checkpoint from one cannot be reused for another.
     Missing values are filled with ``joint_linear`` by ``with_legacy_defaults``
-    before this compare.
+    before this compare. ``fusion_mlp_hidden_dim`` is inactive for flatten/last,
+    and ``projection_mlp_hidden_dim`` is inactive unless conservation is projected.
     """
     result = dict(payload)
     if result.get("conservation_mode", "none") != "projected":
@@ -142,6 +166,8 @@ def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     if result.get("embedding_fusion") == "add":
         for key in _CONCAT_WIDTH_KEYS:
             result.pop(key, None)
+    if str(result.get("head_type", "flatten")) != "flatten_mlp":
+        result.pop("fusion_mlp_hidden_dim", None)
     return result
 
 
@@ -153,7 +179,11 @@ def assert_run_dir_matches(run_dir: Path, config: Mapping[str, Any], task: TaskS
     stored = with_legacy_defaults(json.loads(path.read_text(encoding="utf-8")))
     current = _effective_model_config(model_config(config, task).to_dict())
     stored_model = _effective_model_config(stored.get("model_config") or {})
-    diff = {key: (stored_model.get(key), value) for key, value in current.items() if stored_model.get(key) != value}
+    diff = {
+        key: (stored_model.get(key), value)
+        for key, value in current.items()
+        if key not in stored_model or not model_values_equal(stored_model.get(key), value)
+    }
     if int(stored.get("batch_size", -1)) != int(config["batch_size"]):
         diff["batch_size"] = (stored.get("batch_size"), int(config["batch_size"]))
     if config.get("conservation_mode", "none") != "none":
@@ -247,6 +277,32 @@ def assert_conservation_checkpoint(payload, config, *, normalization_sha256=None
         )
 
 
+def checkpoint_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Model identity stored on a checkpoint, with legacy fields filled in."""
+    config = payload.get("config") if isinstance(payload.get("config"), Mapping) else None
+    if not isinstance(config, Mapping):
+        raise ReimplementationError(
+            "checkpoint has no config to determine model identity; refusing to assume current defaults"
+        )
+    try:
+        return model_config_from_saved(config)
+    except ValueError as exc:
+        raise ReimplementationError(str(exc)) from exc
+
+
+def assert_model_checkpoint_matches(payload: Mapping[str, Any], requested_model_config: Mapping[str, Any]) -> None:
+    """Reject a checkpoint whose built model differs, before any weight load."""
+    stored = _effective_model_config(checkpoint_model_config(payload))
+    requested = _effective_model_config(dict(requested_model_config))
+    diff = {}
+    for key in sorted(set(stored) | set(requested)):
+        if key not in stored or key not in requested or not model_values_equal(stored.get(key), requested.get(key)):
+            diff[key] = (stored.get(key, "<missing>"), requested.get(key, "<missing>"))
+    if diff:
+        detail = ", ".join(f"{key}: stored={pair[0]!r} requested={pair[1]!r}" for key, pair in diff.items())
+        raise ReimplementationError(f"checkpoint model_config does not match the requested model ({detail})")
+
+
 def checkpoint_value_embedding_mode(payload: Mapping[str, Any]) -> str:
     """Old checkpoints omit the field and used the joint linear value projection."""
     config = payload.get("config") if isinstance(payload.get("config"), Mapping) else {}
@@ -269,6 +325,7 @@ class TaskRun:
         config = configure_sampling(config)
         validate_config(config)
         validate_conservation_task(config, task_spec(task))
+        validate_backbone_task(config, task_spec(task))
         validate_value_embedding_task(config, task_spec(task))
         self.config = dict(config)
         self.config["output_root"] = Path(output_root).as_posix()
@@ -505,6 +562,7 @@ def train_task(
 ) -> dict[str, Any]:
     validate_config(config)
     validate_conservation_task(config, task_spec(task))
+    validate_backbone_task(config, task_spec(task))
     validate_value_embedding_task(config, task_spec(task))
     output_root = conservation_output_root(config, output_root)
     planned_dir = run_directory(output_root, rate, task_spec(task).name, int(config["seed"]), config)
@@ -543,9 +601,7 @@ def train_task(
         "n_his": run.n_his,
         "output_steps": 1,
         "model_config": run.model_config.to_dict(),
-        "embedding": model.embedding_summary(),
-        "spatial": model.spatial_summary(),
-        "architecture": model.architecture_summary(),
+        **model_reports(model),
         "smoke": smoke,
     }
     optimizer = build_optimizer(model, cfg)
@@ -574,6 +630,7 @@ def train_task(
         )
         if payload.get("task") != run.task.name:
             raise ReimplementationError(f"checkpoint task {payload.get('task')} != {run.task.name}")
+        assert_model_checkpoint_matches(payload, run.model_config.to_dict())
         model.load_state_dict(payload["model_state_dict"])
         optimizer.load_state_dict(payload["optimizer_state_dict"])
         if scheduler is not None and payload.get("scheduler_state_dict"):
@@ -760,9 +817,7 @@ def train_task(
                     "val_inflow_mae" if selects_inflow_mae(run.task)
                     else ("val_mae" if cfg.get("conservation_mode", "none") != "none" else cfg["selection_metric"])
                 ),
-                "embedding": model.embedding_summary(),
-                "architecture": model.architecture_summary(),
-                "spatial": model.spatial_summary(),
+                **model_reports(model),
             },
         )
         metadata["total_epochs_executed"] = len(history)

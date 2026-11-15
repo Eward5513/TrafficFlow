@@ -145,6 +145,8 @@ MODEL_DEFAULTS: dict[str, Any] = {
     "head_type": "flatten",
     "conservation_mode": "none",
     "projection_mlp_hidden_dim": 32,
+    "backbone_mode": "shared",
+    "fusion_mlp_hidden_dim": 128,
 }
 
 # Meaning of keys that older run directories never stored: v0.1 predates
@@ -166,6 +168,8 @@ LEGACY_DEFAULTS: dict[str, Any] = {
     "embedding_fusion": "add", "use_adaptive_embedding": False,
     "value_embedding_mode": "joint_linear",
     "conservation_mode": "none", "projection_mlp_hidden_dim": 32,
+    "backbone_mode": "shared",
+    "fusion_mlp_hidden_dim": 128,
 }
 
 TRAIN_DEFAULTS: dict[str, Any] = {
@@ -264,7 +268,8 @@ _CHOICES = {
     "projection_supervision": ("all", "inflow_only"),
     "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
-    "head_type": ("flatten", "last"),
+    "head_type": ("flatten", "last", "flatten_mlp"),
+    "backbone_mode": ("shared", "state_independent"),
     "embedding_fusion": ("add", "concat"),
     "value_embedding_mode": ("joint_linear", "separate_mlp", "state_aux_gate"),
     "loss": ("mae_raw", "huber_raw", "mse_raw"),
@@ -343,6 +348,8 @@ def validate_config(config: Mapping[str, Any]) -> None:
             raise ValueError(f"{key} must be finite and non-negative")
     if int(config.get("projection_mlp_hidden_dim", 32)) < 1:
         raise ValueError("projection_mlp_hidden_dim must be positive")
+    if int(config.get("fusion_mlp_hidden_dim", MODEL_DEFAULTS["fusion_mlp_hidden_dim"])) < 1:
+        raise ValueError("fusion_mlp_hidden_dim must be positive")
     if config.get("conservation_mode", "none") != "none":
         if config["loss"] != "mae_raw" or config["channel_balance"] != "none":
             raise ValueError("soft/projected requires unbalanced raw-scale MAE (mae_raw, channel_balance=none)")
@@ -365,21 +372,27 @@ def validate_config(config: Mapping[str, Any]) -> None:
             )
     if str(config["target_mode"]) != "last-observed-step":
         raise ValueError("MSTT reconstructs the last observed slot; target_mode must be last-observed-step")
-    if int(config["d_model"]) % int(config["num_heads"]) != 0:
-        raise ValueError("d_model must be divisible by num_heads")
-    if bool(config["use_rope"]) and (int(config["d_model"]) // int(config["num_heads"])) % 2 != 0:
-        raise ValueError("RoPE needs an even head dimension")
-    for key in ("temporal_num_heads", "spatial_num_heads"):
-        heads = attention_head_count(config, key)
-        if heads < 1 or int(config["d_model"]) % heads != 0:
-            raise ValueError(f"{key}={heads} must be a positive divisor of d_model={config['d_model']}")
-    temporal_heads = attention_head_count(config, "temporal_num_heads")
-    head_dim = config.get("attention_head_dim")
-    if head_dim is not None and int(head_dim) < 1:
-        raise ValueError("attention_head_dim must be positive")
-    resolved_head_dim = int(config["d_model"]) // temporal_heads if head_dim is None else int(head_dim)
-    if bool(config["use_rope"]) and resolved_head_dim % 2 != 0:
-        raise ValueError("RoPE needs an even temporal head dimension")
+    backbone = str(config.get("backbone_mode", "shared"))
+    if backbone == "state_independent":
+        from MSTT.model.mstt import validate_independent_backbone
+
+        validate_independent_backbone(config)
+    else:
+        if int(config["d_model"]) % int(config["num_heads"]) != 0:
+            raise ValueError("d_model must be divisible by num_heads")
+        if bool(config["use_rope"]) and (int(config["d_model"]) // int(config["num_heads"])) % 2 != 0:
+            raise ValueError("RoPE needs an even head dimension")
+        for key in ("temporal_num_heads", "spatial_num_heads"):
+            heads = attention_head_count(config, key)
+            if heads < 1 or int(config["d_model"]) % heads != 0:
+                raise ValueError(f"{key}={heads} must be a positive divisor of d_model={config['d_model']}")
+        temporal_heads = attention_head_count(config, "temporal_num_heads")
+        head_dim = config.get("attention_head_dim")
+        if head_dim is not None and int(head_dim) < 1:
+            raise ValueError("attention_head_dim must be positive")
+        resolved_head_dim = int(config["d_model"]) // temporal_heads if head_dim is None else int(head_dim)
+        if bool(config["use_rope"]) and resolved_head_dim % 2 != 0:
+            raise ValueError("RoPE needs an even temporal head dimension")
     if int(config["input_window"]) < 1 or int(config["num_layers"]) < 1:
         raise ValueError("input_window and num_layers must be positive")
     if str(config["spatial_attention"]) == "global" and bool(config["use_edge_type_bias"]):
@@ -477,6 +490,101 @@ def validate_value_embedding_task(config: Mapping[str, Any], task: TaskSpec) -> 
             "value_embedding_mode=separate_mlp requires value_embedding_dim to be a positive "
             f"multiple of the {channels} input channels, got {value_dim}"
         )
+
+
+def validate_backbone_task(config: Mapping[str, Any], task: TaskSpec) -> None:
+    """Task constraints for ``state_independent``. Shared runs are unchanged."""
+    mode = str(config.get("backbone_mode", "shared"))
+    if mode == "shared":
+        return
+    if mode != "state_independent":
+        raise ValueError(f"unknown backbone_mode {mode!r}")
+    value_mode = str(config.get("value_embedding_mode", "joint_linear"))
+    if value_mode == "state_aux_gate":
+        raise ValueError("backbone_mode=state_independent cannot use value_embedding_mode=state_aux_gate")
+    if value_mode != "separate_mlp":
+        raise ValueError(
+            "backbone_mode=state_independent requires value_embedding_mode='separate_mlp', "
+            f"got {value_mode!r}"
+        )
+    if task.input_channels != STATE_CHANNELS or task.output_channels != STATE_CHANNELS:
+        raise ValueError(
+            "backbone_mode=state_independent requires input and output channels "
+            f"{list(STATE_CHANNELS)} in that order, got task {task.name} "
+            f"in={list(task.input_channels)} out={list(task.output_channels)}"
+        )
+    from MSTT.model.mstt import validate_independent_backbone
+
+    validate_independent_backbone(config)
+
+
+def model_values_equal(left: Any, right: Any) -> bool:
+    """Equal for checkpoint identity, including ``176`` and ``176.0``."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return float(left) == float(right)
+    return left == right
+
+
+def model_config_from_saved(saved: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild the model identity stored in a resolved config.
+
+    Nested ``model_config`` is the built model. A top-level field fills a key
+    the nested config omitted. Keys missing from both take ``LEGACY_DEFAULTS``.
+    An explicit disagreement raises. Current defaults are not used to invent a
+    value the checkpoint never recorded.
+    """
+    from MSTT.model.mstt import MSTTConfig
+
+    names = set(MSTTConfig.__dataclass_fields__)
+    raw_model = saved.get("model_config")
+    if isinstance(raw_model, Mapping):
+        conflicts = []
+        for key in sorted(names):
+            if key not in raw_model or key not in saved:
+                continue
+            if saved[key] is None or raw_model[key] is None:
+                continue
+            if not model_values_equal(saved[key], raw_model[key]):
+                conflicts.append(f"{key}: top-level={saved[key]!r} model_config={raw_model[key]!r}")
+        if conflicts:
+            raise ValueError("saved model_config conflicts with top-level fields: " + "; ".join(conflicts))
+        model = {key: raw_model[key] for key in names if key in raw_model}
+        for key in names:
+            if key not in model and key in saved and saved[key] is not None:
+                model[key] = saved[key]
+    else:
+        model = {key: saved[key] for key in names if key in saved and saved[key] is not None}
+        if "in_channels" not in model and saved.get("input_channels") is not None:
+            model["in_channels"] = saved["input_channels"]
+        if "out_channels" not in model and saved.get("output_channels") is not None:
+            model["out_channels"] = saved["output_channels"]
+        if "input_window" not in model and saved.get("n_his") is not None:
+            model["input_window"] = saved["n_his"]
+    for key, value in LEGACY_DEFAULTS.items():
+        if key in names:
+            model.setdefault(key, value)
+    if model.get("ffn_hidden_dim") is None and model.get("d_model") is not None:
+        width = int(model["d_model"])
+        if str(model.get("backbone_mode", "shared")) == "state_independent":
+            if width % 4 != 0:
+                raise ValueError(f"state_independent d_model={width} is not divisible by 4")
+            width //= 4
+        model["ffn_hidden_dim"] = resolve_ffn_hidden_dim(width, None)
+    missing = [key for key in sorted(names) if key not in model]
+    if missing:
+        raise ValueError(
+            "saved model identity is incomplete; missing "
+            f"{missing}. Refusing to fill them from the current defaults."
+        )
+    return model
+
+
+def restore_saved_model_fields(config: dict[str, Any], raw_resolved: Mapping[str, Any]) -> None:
+    """Copy the built model fields onto a flat config before evaluation rebuilds it."""
+    for key, value in model_config_from_saved(raw_resolved).items():
+        config[key] = value
 
 
 def conservation_settings(config: Mapping[str, Any]) -> dict[str, Any]:

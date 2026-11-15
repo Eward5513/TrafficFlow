@@ -6,21 +6,32 @@ The model reads no files or tasks; graph and optional target scaler are injected
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Any, Mapping
 
 import torch
 from torch import nn
 
 from MSTT.model.adaptive_embedding import AdaptiveEmbedding
-from MSTT.model.attention import TemporalSelfAttention, build_spatial_attention
 from MSTT.model.embedding import InputEmbedding, resolve_embedding_dims
 from MSTT.model.ffn import SwiGLU
 from MSTT.model.graph import SpatialGraph
 from MSTT.model.head import PredictionHead
 from MSTT.model.joint_attention import JointSTAttention
 from MSTT.model.conservation import ConservationProjection
-from MSTT.model.transformer_block import JointSTBlock, MSTTBlock
+from MSTT.model.state_branch import StateTSFBranch
+from MSTT.model.transformer_block import JointSTBlock, build_factorized_block
+
+STATE_BRANCH_COUNT = 4
+_DIVISIBLE_WIDTHS = (
+    "d_model",
+    "base_embedding_dim",
+    "adaptive_embedding_dim",
+    "value_embedding_dim",
+    "node_embedding_dim",
+    "tod_embedding_dim",
+    "dow_embedding_dim",
+)
 
 
 @dataclass
@@ -72,6 +83,8 @@ class MSTTConfig:
     head_type: str = "flatten"
     conservation_mode: str = "none"
     projection_mlp_hidden_dim: int = 32
+    backbone_mode: str = "shared"
+    fusion_mlp_hidden_dim: int = 128
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any], **overrides: Any) -> "MSTTConfig":
@@ -82,6 +95,104 @@ class MSTTConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _cfg_get(config: MSTTConfig | Mapping[str, Any], key: str, default: Any = None) -> Any:
+    if isinstance(config, Mapping):
+        return config[key] if key in config else default
+    return getattr(config, key, default)
+
+
+def validate_independent_backbone(config: MSTTConfig | Mapping[str, Any]) -> None:
+    """Widths and structure for four independent encoders.
+
+    ``d_model`` and the embedding widths are totals. Each branch uses one
+    quarter. ``ffn_hidden_dim`` and ``attention_head_dim`` are not quartered:
+    the FFN width is the width inside one branch, and a set head dimension is
+    the per-head size.
+    """
+    mode = str(_cfg_get(config, "value_embedding_mode", "joint_linear"))
+    if mode == "state_aux_gate":
+        raise ValueError("backbone_mode=state_independent cannot use value_embedding_mode=state_aux_gate")
+    if mode != "separate_mlp":
+        raise ValueError(f"backbone_mode=state_independent requires value_embedding_mode='separate_mlp', got {mode!r}")
+    requirements = {
+        "embedding_fusion": "concat",
+        "adaptive_embedding_fusion": "concat",
+        "use_adaptive_embedding": True,
+        "attention_layout": "factorized_ts",
+        "attention_order": "TS",
+        "ffn_placement": "after_spatial",
+        "num_layers": 1,
+        "use_node_embedding": True,
+        "use_tod": True,
+        "use_dow": True,
+    }
+    for key, expected in requirements.items():
+        actual = _cfg_get(config, key, None)
+        if actual != expected:
+            raise ValueError(f"backbone_mode=state_independent requires {key}={expected!r}, got {actual!r}")
+    for key in ("in_channels", "out_channels"):
+        actual = _cfg_get(config, key, None)
+        if actual is not None and int(actual) != STATE_BRANCH_COUNT:
+            raise ValueError(f"backbone_mode=state_independent requires {key}={STATE_BRANCH_COUNT}, got {actual}")
+    totals: dict[str, int] = {}
+    for key in _DIVISIBLE_WIDTHS:
+        actual = _cfg_get(config, key, None)
+        if actual is None:
+            raise ValueError(f"backbone_mode=state_independent requires {key} to be set")
+        value = int(actual)
+        if value < 1 or value % STATE_BRANCH_COUNT != 0:
+            raise ValueError(
+                f"backbone_mode=state_independent requires {key} to be a positive multiple of "
+                f"{STATE_BRANCH_COUNT}, got {value}"
+            )
+        totals[key] = value
+    branch = {key: value // STATE_BRANCH_COUNT for key, value in totals.items()}
+    base_sum = branch["value_embedding_dim"] + branch["node_embedding_dim"] + branch["tod_embedding_dim"] + branch["dow_embedding_dim"]
+    if base_sum != branch["base_embedding_dim"]:
+        raise ValueError(
+            "state_independent branch widths must satisfy "
+            f"value+node+tod+dow={base_sum} == base={branch['base_embedding_dim']}"
+        )
+    if branch["base_embedding_dim"] + branch["adaptive_embedding_dim"] != branch["d_model"]:
+        raise ValueError(
+            "state_independent branch widths must satisfy "
+            f"base+adaptive={branch['base_embedding_dim'] + branch['adaptive_embedding_dim']} "
+            f"== branch d_model={branch['d_model']}"
+        )
+    ffn = _cfg_get(config, "ffn_hidden_dim", None)
+    if ffn is not None and int(ffn) < 1:
+        raise ValueError(f"ffn_hidden_dim must be positive, got {ffn}")
+    branch_d = branch["d_model"]
+    head_dim_override = _cfg_get(config, "attention_head_dim", None)
+    use_rope = bool(_cfg_get(config, "use_rope", False))
+    for label, key in (("temporal", "temporal_num_heads"), ("spatial", "spatial_num_heads")):
+        override = _cfg_get(config, key, None)
+        heads = int(_cfg_get(config, "num_heads")) if override is None else int(override)
+        if heads < 1:
+            raise ValueError(f"{key} must be a positive head count, got {heads}")
+        if head_dim_override is None:
+            if branch_d % heads != 0:
+                raise ValueError(
+                    f"state_independent branch d_model={branch_d} must be divisible by {label} heads={heads}"
+                )
+            head_dim = branch_d // heads
+        else:
+            head_dim = int(head_dim_override)
+            if head_dim < 1:
+                raise ValueError(f"attention_head_dim must be positive, got {head_dim}")
+        if use_rope and head_dim % 2 != 0:
+            raise ValueError(
+                f"RoPE needs an even {label} head_dim on each state branch, got {head_dim} "
+                f"(branch d_model={branch_d}, heads={heads})"
+            )
+
+
+def _assert_distinct_parameters(modules) -> None:
+    pointers = [param.data_ptr() for module in modules for param in module.parameters()]
+    if len(pointers) != len(set(pointers)):
+        raise RuntimeError("state branches must not share parameter storage")
 
 
 class MSTT(nn.Module):
@@ -120,93 +231,85 @@ class MSTT(nn.Module):
                 raise ValueError("joint_st requires a centered odd temporal window")
         else:
             raise ValueError(f"unknown attention_layout {layout!r}")
-        temporal_heads = config.num_heads if config.temporal_num_heads is None else int(config.temporal_num_heads)
-        spatial_heads = config.num_heads if config.spatial_num_heads is None else int(config.spatial_num_heads)
-        self.embedding = InputEmbedding(
-            in_channels=config.in_channels,
-            d_model=base_dim,
-            num_nodes=config.num_nodes,
-            steps_per_day=config.steps_per_day,
-            use_node_embedding=config.use_node_embedding,
-            use_tod=config.use_tod,
-            use_dow=config.use_dow,
-            dropout=config.embedding_dropout,
-            fusion=config.embedding_fusion,
-            value_embedding_mode=config.value_embedding_mode,
-            value_dim=config.value_embedding_dim,
-            node_dim=config.node_embedding_dim,
-            tod_dim=config.tod_embedding_dim,
-            dow_dim=config.dow_embedding_dim,
-        )
-        if layout == "factorized_ts":
-            block = MSTTBlock(
-                config.d_model,
-                temporal=TemporalSelfAttention(
-                    config.d_model,
-                    temporal_heads,
-                    attention_dropout=config.attention_dropout,
-                    use_qk_norm=config.use_qk_norm,
-                    use_rope=config.use_rope,
-                    rope_base=config.rope_base,
-                    use_gated_attention=config.use_gated_attention,
-                    norm_eps=config.norm_eps,
-                    head_dim=config.attention_head_dim,
-                ),
-                spatial=build_spatial_attention(
-                    config.spatial_attention,
-                    d_model=config.d_model,
-                    num_heads=spatial_heads,
-                    graph=graph,
-                    attention_dropout=config.attention_dropout,
-                    use_qk_norm=config.use_qk_norm,
-                    use_gated_attention=config.use_gated_attention,
-                    use_edge_type_bias=config.use_edge_type_bias,
-                    chunk_size=config.spatial_chunk_size,
-                    use_checkpoint=config.spatial_checkpoint,
-                    norm_eps=config.norm_eps,
-                    head_dim=config.attention_head_dim,
-                ),
-                ffn=SwiGLU(config.d_model, config.ffn_hidden_dim),
-                dropout=config.dropout,
-                norm_eps=config.norm_eps,
+        mode = str(config.backbone_mode)
+        if mode not in ("shared", "state_independent"):
+            raise ValueError(f"unknown backbone_mode {mode!r}")
+        if mode == "state_independent":
+            validate_independent_backbone(config)
+            branch_cfg = replace(
+                config,
+                in_channels=1,
+                d_model=config.d_model // STATE_BRANCH_COUNT,
+                base_embedding_dim=int(config.base_embedding_dim) // STATE_BRANCH_COUNT,
+                adaptive_embedding_dim=int(config.adaptive_embedding_dim) // STATE_BRANCH_COUNT,
+                value_embedding_dim=config.value_embedding_dim // STATE_BRANCH_COUNT,
+                node_embedding_dim=config.node_embedding_dim // STATE_BRANCH_COUNT,
+                tod_embedding_dim=config.tod_embedding_dim // STATE_BRANCH_COUNT,
+                dow_embedding_dim=config.dow_embedding_dim // STATE_BRANCH_COUNT,
             )
+            self.branches = nn.ModuleList(
+                StateTSFBranch(branch_cfg, graph) for _ in range(STATE_BRANCH_COUNT)
+            )
+            _assert_distinct_parameters(list(self.branches))
         else:
-            block = JointSTBlock(
-                config.d_model,
-                joint=JointSTAttention(
-                    config.d_model,
-                    temporal_heads,
-                    window=int(config.joint_temporal_window),
-                    alignment=str(config.joint_temporal_alignment),
-                    query_chunk=int(config.joint_query_chunk),
-                    use_checkpoint=bool(config.joint_checkpoint),
-                    attention_dropout=config.attention_dropout,
-                    use_qk_norm=config.use_qk_norm,
-                    use_rope=config.use_rope,
-                    rope_base=config.rope_base,
-                    use_gated_attention=config.use_gated_attention,
-                    norm_eps=config.norm_eps,
-                    head_dim=config.attention_head_dim,
-                ),
-                ffn=SwiGLU(config.d_model, config.ffn_hidden_dim),
-                dropout=config.dropout,
-                norm_eps=config.norm_eps,
+            temporal_heads = config.num_heads if config.temporal_num_heads is None else int(config.temporal_num_heads)
+            self.embedding = InputEmbedding(
+                in_channels=config.in_channels,
+                d_model=base_dim,
+                num_nodes=config.num_nodes,
+                steps_per_day=config.steps_per_day,
+                use_node_embedding=config.use_node_embedding,
+                use_tod=config.use_tod,
+                use_dow=config.use_dow,
+                dropout=config.embedding_dropout,
+                fusion=config.embedding_fusion,
+                value_embedding_mode=config.value_embedding_mode,
+                value_dim=config.value_embedding_dim,
+                node_dim=config.node_embedding_dim,
+                tod_dim=config.tod_embedding_dim,
+                dow_dim=config.dow_embedding_dim,
             )
-        self.blocks = nn.ModuleList([block])
+            if layout == "factorized_ts":
+                block = build_factorized_block(config, graph)
+            else:
+                block = JointSTBlock(
+                    config.d_model,
+                    joint=JointSTAttention(
+                        config.d_model,
+                        temporal_heads,
+                        window=int(config.joint_temporal_window),
+                        alignment=str(config.joint_temporal_alignment),
+                        query_chunk=int(config.joint_query_chunk),
+                        use_checkpoint=bool(config.joint_checkpoint),
+                        attention_dropout=config.attention_dropout,
+                        use_qk_norm=config.use_qk_norm,
+                        use_rope=config.use_rope,
+                        rope_base=config.rope_base,
+                        use_gated_attention=config.use_gated_attention,
+                        norm_eps=config.norm_eps,
+                        head_dim=config.attention_head_dim,
+                    ),
+                    ffn=SwiGLU(config.d_model, config.ffn_hidden_dim),
+                    dropout=config.dropout,
+                    norm_eps=config.norm_eps,
+                )
+            self.blocks = nn.ModuleList([block])
         self.head = PredictionHead(
             config.d_model,
             config.input_window,
             config.out_channels,
             head_type=config.head_type,
             norm_eps=config.norm_eps,
+            fusion_mlp_hidden_dim=config.fusion_mlp_hidden_dim,
         )
-        # Built last so the other modules draw the same initial weights with the switch on or off.
-        self.adaptive = (
-            AdaptiveEmbedding(input_window=config.input_window, num_nodes=config.num_nodes,
-                              d_model=adaptive_dim, fusion=config.adaptive_embedding_fusion)
-            if config.use_adaptive_embedding
-            else None
-        )
+        if mode == "shared":
+            # After the head so a shared run keeps embedding → block → head → adaptive.
+            self.adaptive = (
+                AdaptiveEmbedding(input_window=config.input_window, num_nodes=config.num_nodes,
+                                  d_model=adaptive_dim, fusion=config.adaptive_embedding_fusion)
+                if config.use_adaptive_embedding
+                else None
+            )
         self.projection = None
         if config.conservation_mode == "projected":
             if target_mean is None or target_std is None:
@@ -237,6 +340,19 @@ class MSTT(nn.Module):
             raise ValueError(f"x must be [B, T, N, C_in], got {tuple(x.shape)}")
         if int(x.shape[1]) != self.config.input_window:
             raise ValueError(f"x has T={x.shape[1]}, model input_window={self.config.input_window}")
+        if self.config.backbone_mode == "state_independent":
+            if int(x.shape[-1]) != STATE_BRANCH_COUNT:
+                raise ValueError("state_independent expects four state channels")
+            hidden_parts = [
+                branch(x[..., channel:channel + 1], time_of_day, day_of_week)
+                for channel, branch in enumerate(self.branches)
+            ]
+            hidden = torch.cat(hidden_parts, dim=-1)
+            if int(hidden.shape[-1]) != int(self.config.d_model):
+                raise RuntimeError(
+                    f"concatenated state branches have width {hidden.shape[-1]}, expected {self.config.d_model}"
+                )
+            return hidden
         hidden = self.embedding(x, time_of_day, day_of_week)
         if self.adaptive is not None:
             hidden = self.adaptive(hidden)
@@ -251,17 +367,32 @@ class MSTT(nn.Module):
         ffns = [module for module in self.modules() if isinstance(module, SwiGLU)]
         layout = str(self.config.attention_layout)
         summary = {
+            "backbone_mode": self.config.backbone_mode,
             "embedding": self.embedding_summary(),
+            "head": self.head.describe(),
             "attention_layout": layout,
             "d_model": self.head.norm.normalized_shape[0],
             "temporal_causal_mask": False,
             "independent_ffn_count": len(ffns),
-            "ffn_hidden_dims": [ffn.w_gate.out_features for ffn in ffns],
+            "ffn_hidden_dims": [int(ffn.w_gate.out_features) for ffn in ffns],
             "total_parameters": self.parameter_count(),
         }
+        if self.config.backbone_mode == "state_independent":
+            branches = [branch.summary() for branch in self.branches]
+            summary.update(
+                branch_count=len(self.branches),
+                branch_d_model=int(self.config.d_model) // STATE_BRANCH_COUNT,
+                joint_attention_count=0,
+                temporal_attention_count=len(self.branches),
+                spatial_attention_count=len(self.branches),
+                per_branch=branches,
+                block_order=["T", "S", "FFN"],
+            )
+            return summary
         if layout == "joint_st":
             joint = self.blocks[0].joint
             summary.update(
+                branch_count=1,
                 joint_attention_count=1,
                 temporal_attention_count=0,
                 spatial_attention_count=0,
@@ -276,6 +407,7 @@ class MSTT(nn.Module):
             )
             return summary
         summary.update(
+            branch_count=1,
             joint_attention_count=0,
             temporal_attention_count=1,
             spatial_attention_count=1,
@@ -290,10 +422,12 @@ class MSTT(nn.Module):
 
     def spatial_summary(self) -> dict[str, Any]:
         """Which attention mixes roads, and what restricts its keys."""
+        branch_count = STATE_BRANCH_COUNT if self.config.backbone_mode == "state_independent" else 1
         if str(self.config.attention_layout) == "joint_st":
             joint = self.blocks[0].joint
             return {
                 "type": "joint_st",
+                "branch_count": branch_count,
                 "graph_mask": False,
                 "keys_per_query": "N times the valid centered window",
                 "time_window": int(joint.window),
@@ -308,8 +442,9 @@ class MSTT(nn.Module):
             }
         name = self.config.spatial_attention
         if name == "global":
-            return {
+            summary = {
                 "type": "global",
+                "branch_count": branch_count,
                 "keys_per_query": int(self.config.num_nodes),
                 "graph_mask": False,
                 "edge_type_bias": "not_applicable",
@@ -317,20 +452,38 @@ class MSTT(nn.Module):
                 "chunk_size": self.config.spatial_chunk_size,
                 "checkpoint": bool(self.config.spatial_checkpoint),
             }
-        return {
-            "type": name,
-            "graph_mask": True,
-            "graph_edges": self.graph_edges,
-            "edge_type_bias": bool(self.config.use_edge_type_bias),
-            "spatial_direction": self.graph_direction,
-            "chunk_size": self.config.spatial_chunk_size,
-            "checkpoint": bool(self.config.spatial_checkpoint),
-        }
+        else:
+            summary = {
+                "type": name,
+                "branch_count": branch_count,
+                "graph_mask": True,
+                "graph_edges": self.graph_edges,
+                "edge_type_bias": bool(self.config.use_edge_type_bias),
+                "spatial_direction": self.graph_direction,
+                "chunk_size": self.config.spatial_chunk_size,
+                "checkpoint": bool(self.config.spatial_checkpoint),
+            }
+        if branch_count > 1:
+            summary["independent_copies"] = (
+                f"{branch_count} independent {name} spatial attentions, one per state channel"
+            )
+        return summary
 
     def embedding_summary(self) -> dict[str, Any]:
         """Fusion mode and the widths actually built (``add`` uses ``d_model`` for every part)."""
+        if self.config.backbone_mode == "state_independent":
+            branches = [branch.summary() for branch in self.branches]
+            return {
+                "backbone_mode": "state_independent",
+                "branch_count": len(branches),
+                "shared_parameters": False,
+                "concatenation": "channel axis after each branch TSF",
+                "output_dim": int(self.config.d_model),
+                "branches": branches,
+            }
         embedding = self.embedding
         return {
+            "backbone_mode": "shared",
             "fusion": embedding.fusion,
             "widths": dict(embedding.widths),
             "value_embedding": embedding.value_embedding_summary(),
