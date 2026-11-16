@@ -86,6 +86,7 @@ class MSTTConfig:
     projection_mlp_hidden_dim: int = 32
     backbone_mode: str = "shared"
     state_context_sharing: str = "independent"
+    state_node_sharing: str = "independent"
     fusion_mlp_hidden_dim: int = 128
 
     @classmethod
@@ -191,6 +192,26 @@ def validate_independent_backbone(config: MSTTConfig | Mapping[str, Any]) -> Non
             )
 
 
+def validate_state_node_sharing(config: MSTTConfig | Mapping[str, Any]) -> None:
+    """Assign the road table. Missing values stay one private table per branch.
+
+    ``shared`` is one parent ``[N, node_dim]`` read in full by every branch.
+    It is only valid when four TSFs already share the TOD/DOW/adaptive tables.
+    """
+    sharing = str(_cfg_get(config, "state_node_sharing", "independent"))
+    if sharing not in ("independent", "shared"):
+        raise ValueError(f"state_node_sharing must be 'independent' or 'shared', got {sharing!r}")
+    if sharing != "shared":
+        return
+    backbone = str(_cfg_get(config, "backbone_mode", "shared"))
+    context = str(_cfg_get(config, "state_context_sharing", "independent"))
+    if backbone != "state_independent" or context != "shared":
+        raise ValueError(
+            "state_node_sharing='shared' requires backbone_mode='state_independent' "
+            "and state_context_sharing='shared'"
+        )
+
+
 def validate_state_context_sharing(config: MSTTConfig | Mapping[str, Any]) -> None:
     """Assign TOD, DOW, and adaptive tables. It does not change widths.
 
@@ -266,6 +287,7 @@ class MSTT(nn.Module):
         if mode not in ("shared", "state_independent"):
             raise ValueError(f"unknown backbone_mode {mode!r}")
         validate_state_context_sharing(config)
+        validate_state_node_sharing(config)
         if mode == "state_independent":
             validate_independent_backbone(config)
             branch_cfg = replace(
@@ -280,8 +302,14 @@ class MSTT(nn.Module):
                 dow_embedding_dim=config.dow_embedding_dim // STATE_BRANCH_COUNT,
             )
             external_context = config.state_context_sharing == "shared"
+            external_node = config.state_node_sharing == "shared"
             self.branches = nn.ModuleList(
-                StateTSFBranch(branch_cfg, graph, external_context=external_context)
+                StateTSFBranch(
+                    branch_cfg,
+                    graph,
+                    external_context=external_context,
+                    external_node=external_node,
+                )
                 for _ in range(STATE_BRANCH_COUNT)
             )
             _assert_distinct_parameters(list(self.branches))
@@ -293,6 +321,7 @@ class MSTT(nn.Module):
                     input_window=int(config.input_window),
                     num_nodes=int(config.num_nodes),
                     adaptive_dim=int(config.adaptive_embedding_dim) // STATE_BRANCH_COUNT,
+                    node_dim=(int(config.node_embedding_dim) // STATE_BRANCH_COUNT) if external_node else None,
                 )
                 _assert_parameters_disjoint(self.shared_state_context, self.branches)
         else:
@@ -442,8 +471,10 @@ class MSTT(nn.Module):
                 branch_count=len(self.branches),
                 branch_d_model=int(self.config.d_model) // STATE_BRANCH_COUNT,
                 state_context_sharing=embedding["state_context_sharing"],
+                state_node_sharing=embedding["state_node_sharing"],
                 state_channels=list(embedding["state_channels"]),
                 context_tables=embedding["context_tables"],
+                node_tables=embedding["node_tables"],
                 joint_attention_count=0,
                 temporal_attention_count=len(self.branches),
                 spatial_attention_count=len(self.branches),
@@ -594,20 +625,68 @@ class MSTT(nn.Module):
             "parameters_total": owned,
         }
 
+    def _node_table_summary(self) -> dict[str, Any]:
+        """Owned road tables. A shared table is counted once and read at full width."""
+        sharing = str(self.config.state_node_sharing)
+        width = int(self.branches[0].embedding.widths["node"])
+        shape = [int(self.config.num_nodes), width]
+        per_copy = shape[0] * shape[1]
+        if any(int(branch.embedding.widths["node"]) != width for branch in self.branches):
+            raise RuntimeError("node widths differ across state branches")
+        if sharing == "shared":
+            table = self.shared_state_context.node_embedding
+            if table is None:
+                raise RuntimeError("shared node mode has no parent node table")
+            if any(branch.embedding.node_embedding is not None for branch in self.branches):
+                raise RuntimeError("shared node mode allocated a private node table")
+            if not all(branch.embedding.external_node_embedding for branch in self.branches):
+                raise RuntimeError("shared node mode left a branch without an external node")
+            tables = [table.weight]
+            copies = 1
+            source = "shared_parameter"
+        else:
+            tables = []
+            for branch in self.branches:
+                if branch.embedding.external_node_embedding or branch.embedding.node_embedding is None:
+                    raise RuntimeError("independent node mode is missing a private node table")
+                tables.append(branch.embedding.node_embedding.weight)
+            copies = STATE_BRANCH_COUNT
+            source = "parameter"
+        pointers = [item.data_ptr() for item in tables]
+        if len(pointers) != len(set(pointers)):
+            raise RuntimeError("node tables do not have distinct storage")
+        owned = int(sum(item.numel() for item in tables))
+        if owned != per_copy * copies:
+            raise RuntimeError(f"node parameter count {owned} != {per_copy} x {copies}")
+        if any(tuple(item.shape) != tuple(shape) for item in tables):
+            raise RuntimeError(f"node table shape is not {shape}")
+        return {
+            "enabled": True,
+            "source": source,
+            "shared": sharing == "shared",
+            "sharing": sharing,
+            "copies": copies,
+            "shape": shape,
+            "parameters_per_copy": int(per_copy),
+            "parameters_total": owned,
+        }
+
     def embedding_summary(self) -> dict[str, Any]:
         """Fusion mode and the widths actually built (``add`` uses ``d_model`` for every part)."""
         if self.config.backbone_mode == "state_independent":
             from MSTT.config import STATE_CHANNELS
 
             context = self._context_table_summary()
+            node = self._node_table_summary()
             return {
                 "backbone_mode": "state_independent",
                 "state_context_sharing": context["sharing"],
+                "state_node_sharing": node["sharing"],
                 "state_channels": list(STATE_CHANNELS),
                 "branch_count": STATE_BRANCH_COUNT,
                 "parameter_sharing": {
                     "value_mlp": "independent",
-                    "node_embedding": "independent",
+                    "node_embedding": node["sharing"],
                     "tod": context["sharing"],
                     "dow": context["sharing"],
                     "adaptive": context["sharing"],
@@ -617,6 +696,7 @@ class MSTT(nn.Module):
                 "output_dim": int(self.config.d_model),
                 "per_branch_feature_width": context["per_branch_feature_width"],
                 "context_tables": context,
+                "node_tables": node,
                 "branches": [branch.summary() for branch in self.branches],
             }
         embedding = self.embedding

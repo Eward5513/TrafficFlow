@@ -98,33 +98,51 @@ channel with their own value MLP, road table, and one T→S→FFN. Config
 widths are totals and are split by 4. `ffn_hidden_dim` and
 `attention_head_dim` are not split.
 
-`state_context_sharing` controls only the TOD, DOW, and adaptive tables:
+`state_context_sharing` controls the TOD, DOW, and adaptive tables.
+`state_node_sharing` controls the road table. A missing `state_node_sharing`
+stays `independent`, so older checkpoints keep one private road table per
+branch. `shared` is legal only for `backbone_mode=state_independent` with
+`state_context_sharing=shared`.
 
 - `independent` (default), including
   `configs/experiment_state_independent_tsf_mlp_projected.json`: each branch
   owns its tables. The 128-d run is value 8, road 4, TOD 2, DOW 2, adaptive
   16, branch width 32, concatenated to 128, head `1536→128→4`.
-- `independent` with a full context vector,
-  `configs/experiment_state_independent_full_context_independent_tsf_mlp_projected.json`:
-  each branch owns TOD 8, DOW 8, and adaptive 64. The branch is 92-d
-  (`attention_head_dim=24`, inner width 96, FFN 176). Four branches
-  concatenate to 368. The head is `4416→128→4`. The projection MLP reads 372.
-  At N=1406 this model has 5,408,264 parameters.
-- `shared`,
-  `configs/experiment_state_independent_full_context_shared_tsf_mlp_projected.json`:
-  the same 4×92 branches, but one parent TOD `[288, 8]`, DOW `[7, 8]`, and
-  adaptive `[12, N, 64]` is read in full by every branch. Gradients sum into
-  that one copy. At N=1406 the model has 2,161,760 parameters, exactly
-  3,246,504 fewer than the four-copy model. The backbone mode remains
-  `state_independent`.
+- Historical full context, road width 4. These ids and parameter counts stay
+  the record for that structure:
+  `configs/experiment_state_independent_full_context_independent_tsf_mlp_projected.json`
+  gives each branch TOD 8, DOW 8, adaptive 64, and a private road table of
+  width 4. The branch is 92-d (`attention_head_dim=24`, inner width 96, FFN
+  176). Four branches concatenate to 368. The head is `4416→128→4`. The
+  projection MLP reads 372. At N=1406 this model has 5,408,264 parameters.
+  `configs/experiment_state_independent_full_context_shared_tsf_mlp_projected.json`
+  uses the same 4×92 branches, but one parent TOD `[288, 8]`, DOW `[7, 8]`,
+  and adaptive `[12, N, 64]` is read in full by every branch. Each branch
+  still owns a road table `[N, 4]`. At N=1406 the model has 2,161,760
+  parameters, exactly 3,246,504 fewer than the four-copy context model.
+- Node-16 full context. Value MLPs and the four T→S→FFN blocks stay private.
+  Config totals are still divided by 4, so `node_embedding_dim=64` is 16 per
+  branch. Each branch is value 8 + road 16 + TOD 8 + DOW 8 + adaptive 64 =
+  104. `attention_head_dim` stays 24 and `ffn_hidden_dim` stays 176. Four
+  branches concatenate to 416. The head is `4992→128→4`. The projection MLP
+  reads 420.
+  `configs/experiment_state_independent_full_context_shared_node16_tsf_mlp_projected.json`
+  has one parent road table `[N, 16]`, TOD `[288, 8]`, DOW `[7, 8]`, and
+  adaptive `[12, N, 64]`. Every branch reads each table in full, and dropout
+  stays inside the branch.
+  `configs/experiment_state_independent_full_context_independent_node16_tsf_mlp_projected.json`
+  gives each branch its own copy of those four tables. At N=1406 the
+  shared model has 2,299,424 parameters and the independent model has
+  5,613,416, a gap of `3 × (1406×16 + 288×8 + 7×8 + 12×1406×64) = 3,313,992`.
 
 `configs/experiment_shared_tsf_mlp_projected.json` is the one-TSF control.
-`backbone_mode=shared` accepts only `state_context_sharing=independent` as an
-unused placeholder. The frozen default stays `backbone_mode=shared` and
-`head_type=flatten`. Do not resume one of these structures into another.
+`backbone_mode=shared` accepts only `state_context_sharing=independent` and
+`state_node_sharing=independent` as unused placeholders. The frozen default
+stays `backbone_mode=shared` and `head_type=flatten`. Do not resume one of
+these structures into another.
 `state_aux_gate` cannot be combined with `state_independent`.
-`python MSTT/tests/test_state_context_sharing.py` checks the two full-context
-models on CPU.
+`python MSTT/tests/test_state_context_sharing.py` checks the historical
+full-context models and the node-16 pair on CPU.
 
 `value_embedding_mode=state_aux_gate` is a separate `AllSpC2All` experiment
 on the same `all_sp_c.npz` windows and merged scaler. Four independent state
@@ -156,5 +174,5 @@ Results: `training_results_3s/MSTT/C_inflow_aux/`.
 - `MSTT/model/` must not read files or know task names. Pass the graph in.
 - Default loss for the frozen backbone is raw-scale MAE. Do not change another
   model's loss to match MSTT.
-- Smoke runs (`--max-train-batches` / `--max-eval-batches`) go under `MSTT/_smoke/`.
+- Smoke runs (`--max-train-batches` / `--max-eval-batches`) keep the `_smoke` segment that `train.py` appends. For a projected run that segment sits under `MSTT/v0.2_concat_A2A_projected/_smoke/datasets/...`. The canonical builder would otherwise drop it and write the smoke into the official experiment directory.
 - Nothing under `CODE_ROOT`.

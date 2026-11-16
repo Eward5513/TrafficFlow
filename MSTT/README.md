@@ -23,6 +23,8 @@ MSTT/
 ├── configs/experiment_state_independent_tsf_mlp_projected.json
 ├── configs/experiment_state_independent_full_context_shared_tsf_mlp_projected.json
 ├── configs/experiment_state_independent_full_context_independent_tsf_mlp_projected.json
+├── configs/experiment_state_independent_full_context_shared_node16_tsf_mlp_projected.json
+├── configs/experiment_state_independent_full_context_independent_node16_tsf_mlp_projected.json
 ├── configs/conservation_best_backbone/
 ├── model/
 │   ├── mstt.py
@@ -277,8 +279,10 @@ Two configs separate the backbone change from the head change:
 | `experiment_A_separate_value_mlp_projected.json` | shared 128-d TSF | flatten linear | existing run |
 | `experiment_shared_tsf_mlp_projected.json` | shared 128-d TSF | flatten MLP | 1,505,952 |
 | `experiment_state_independent_tsf_mlp_projected.json` | four 32-d TSFs | flatten MLP | 1,407,648 |
-| `experiment_state_independent_full_context_shared_tsf_mlp_projected.json` | four 92-d TSFs, one shared context | flatten MLP | 2,161,760 |
-| `experiment_state_independent_full_context_independent_tsf_mlp_projected.json` | four 92-d TSFs, four context tables | flatten MLP | 5,408,264 |
+| `experiment_state_independent_full_context_shared_tsf_mlp_projected.json` | four 92-d TSFs, shared TOD/DOW/adaptive, private road 4 | flatten MLP | 2,161,760 |
+| `experiment_state_independent_full_context_independent_tsf_mlp_projected.json` | four 92-d TSFs, four context tables, private road 4 | flatten MLP | 5,408,264 |
+| `experiment_state_independent_full_context_shared_node16_tsf_mlp_projected.json` | four 104-d TSFs, one shared road-16 context | flatten MLP | 2,299,424 |
+| `experiment_state_independent_full_context_independent_node16_tsf_mlp_projected.json` | four 104-d TSFs, four road-16 context copies | flatten MLP | 5,613,416 |
 
 A and B use the same fusion MLP and the same projected loss, final MAE plus
 `0.5` times raw MAE. A has four width-32 blocks and 1,407,648 parameters.
@@ -379,6 +383,49 @@ The same command with `--dataset-id variable_1h_p10_p20`,
 5–15% manifests are `variable_30min_p5_p15`, `variable_1h_p5_p15`,
 `variable_2h_p5_p15`, and `variable_day_p5_p15`, with observation key
 `p5_p15`.
+
+The two configs above are the historical road-width-4 full-context models.
+Their parameter counts, 2,161,760 and 5,408,264, belong to that structure.
+`state_node_sharing` is absent there and therefore stays `independent`: each
+branch keeps a private `[N, 4]` road table.
+
+## Full 16-d road table
+
+`state_node_sharing=shared` is allowed only beside
+`state_context_sharing=shared`. The new pair keeps four private value MLPs
+and four private T→S→FFN blocks. Totals are still split by 4:
+
+| Part | Per branch | Shared copies | Independent copies |
+|---|---:|---:|---:|
+| Value MLP | 8 | 4 | 4 |
+| Road | 16 | 1 `[N, 16]` | 4 `[N, 16]` |
+| TOD | 8 | 1 `[288, 8]` | 4 `[288, 8]` |
+| DOW | 8 | 1 `[7, 8]` | 4 `[7, 8]` |
+| Adaptive | 64 | 1 `[12, N, 64]` | 4 `[12, N, 64]` |
+| TSF | 104 | 4 | 4 |
+
+`node_embedding_dim=64` is the total road width, not one `[N, 64]` table.
+Base width is 40 and the branch is 104. Attention stays at
+`attention_head_dim=24` (inner width 96, QKV `104→288`, output `96→104`)
+and `ffn_hidden_dim=176`. The concatenated hidden state is 416. The head is
+RMSNorm then `4992→128→4`. The projection MLP reads `420→32→4`. At N=1406 the shared model has 2,299,424 parameters and the independent
+model has 5,613,416. The difference is 3,313,992.
+
+```bash
+python MSTT/train.py \
+  --config MSTT/configs/experiment_state_independent_full_context_shared_node16_tsf_mlp_projected.json \
+  --task All2All \
+  --dataset-id variable_30min_p5_p15 \
+  --penetration p5_p15 \
+  --device cuda:0
+```
+
+The independent node-16 config is
+`MSTT/configs/experiment_state_independent_full_context_independent_node16_tsf_mlp_projected.json`
+with experiment id
+`state_independent_full_context_independent_node16_tsf_mlp_projected`.
+Results use the same canonical directory with those experiment ids and
+`p5_p15`. Do not resume a road-width-4 checkpoint into either run.
 
 ```bash
 python MSTT/tests/test_state_context_sharing.py

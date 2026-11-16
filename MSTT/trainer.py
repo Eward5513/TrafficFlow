@@ -92,7 +92,7 @@ def run_directory(output_root: Path, rate: str, task: str, seed: int, config: Ma
         run_id = new_run_id("MSTT", str(cfg.get("dataset_id") or "fixed_uniform"))
         if isinstance(config, dict):
             config["run_id"] = run_id
-    return sampling_run_results_dir(
+    result = sampling_run_results_dir(
         output_root, spec.input_type, spec.target_type, rate_tag(rate), seed,
         physical_version=cfg.get("physical_definition_version"),
         dataset_id=str(cfg.get("dataset_id") or "") or None,
@@ -100,6 +100,16 @@ def run_directory(output_root: Path, rate: str, task: str, seed: int, config: Ma
         experiment_id=experiment,
         run_id=str(run_id),
     )
+    root = Path(output_root)
+    if "_smoke" not in root.parts:
+        return result
+    # The canonical builder drops a trailing ``_smoke`` segment. Keep the
+    # smoke run under that root so it cannot share an official experiment directory.
+    parts = root.parts
+    if "training_results_3s" not in parts:
+        return result
+    base = Path(*parts[: parts.index("training_results_3s") + 1])
+    return root / result.relative_to(base)
 
 
 def is_smoke(config: Mapping[str, Any]) -> bool:
@@ -162,7 +172,9 @@ def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     ``state_context_sharing`` stays in the comparison. Old checkpoints omit it
     and are restored as ``independent``. A shared-context run does not resume
     an independent-context run. On ``backbone_mode=shared`` the field is an
-    unused placeholder and remains ``independent``.
+    unused placeholder and remains ``independent``. ``state_node_sharing`` is
+    compared the same way. Old checkpoints omit it and keep a private road
+    table on each branch.
     """
     result = dict(payload)
     if result.get("conservation_mode", "none") != "projected":
@@ -877,6 +889,8 @@ SUMMARY_FIELDS = [
     "test_inference_sec",
     "peak_gpu_memory_allocated_mb",
     "run_dir",
+    "experiment_id",
+    "dataset_id",
 ]
 
 
@@ -906,7 +920,25 @@ def summary_from_disk(run_dir: Path) -> dict[str, Any]:
         "test_inference_sec": meta.get("test_inference_sec"),
         "peak_gpu_memory_allocated_mb": meta.get("peak_gpu_memory_allocated_mb"),
         "run_dir": run_dir.as_posix(),
+        "experiment_id": "",
+        "dataset_id": "",
     }
+    resolved_path = run_dir / "resolved_config.json"
+    if resolved_path.is_file():
+        resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
+        row["experiment_id"] = str(resolved.get("experiment_id") or "")
+        row["dataset_id"] = str(resolved.get("dataset_id") or "")
+    if not row["experiment_id"] or not row["dataset_id"]:
+        parts = run_dir.parts
+        if not row["dataset_id"] and "datasets" in parts:
+            index = parts.index("datasets")
+            if index + 1 < len(parts):
+                row["dataset_id"] = parts[index + 1]
+        if not row["experiment_id"]:
+            for index, part in enumerate(parts):
+                if part.startswith("seed_") and index > 0:
+                    row["experiment_id"] = parts[index - 1]
+                    break
     row.update(flat_core(val, [], "val"))
     if test is not None:
         row.update(flat_core(test, channels, "test"))
@@ -919,8 +951,21 @@ def summary_from_disk(run_dir: Path) -> dict[str, Any]:
     return row
 
 
+def _summary_identity(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Separate experiments and datasets that share a task, rate, and seed.
+
+    Rows written before those fields existed keep the historical three-part key.
+    """
+    experiment = str(row.get("experiment_id") or "")
+    dataset = str(row.get("dataset_id") or "")
+    base = (row["task"], row["rate"], int(row["seed"]))
+    if experiment or dataset:
+        return (*base, experiment, dataset)
+    return base
+
+
 def merge_summary(output_root: Path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Upsert rows keyed by (task, rate, seed) under a file lock; parallel runs keep each other's rows."""
+    """Upsert rows under a file lock. Parallel runs keep each other's rows."""
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     with (output_root / ".summary.lock").open("a", encoding="utf-8") as handle:
@@ -928,9 +973,9 @@ def merge_summary(output_root: Path, rows: list[dict[str, Any]]) -> list[dict[st
         try:
             path = output_root / "overall_summary.json"
             existing = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
-            keyed = {(row["task"], row["rate"], int(row["seed"])): row for row in existing}
+            keyed = {_summary_identity(row): row for row in existing}
             for row in rows:
-                keyed[(row["task"], row["rate"], int(row["seed"]))] = row
+                keyed[_summary_identity(row)] = row
             from MSTT.config import TASKS, summary_rate_sort_key
 
             order = {name: index for index, name in enumerate(TASKS)}

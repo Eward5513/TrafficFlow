@@ -299,6 +299,8 @@ checkpoint 按一次验证 MAE 选取。这一组跑满 100 个 epoch。
 
 ### 四路全上下文共享 TSF，5%–15%
 
+本节是道路嵌入合计 16、每路 4 维的历史结果。每路道路宽度为 16 的新实验使用 `state_independent_full_context_shared_node16_tsf_mlp_projected` 和 `state_independent_full_context_independent_node16_tsf_mlp_projected`，不改写下面的数字。
+
 四条分支仍各自有 value MLP、道路表和一条 T→S→FFN。TOD、DOW 和自适应表是四路共用的一套，宽度是 TOD 8、DOW 8、自适应 64。每路是 value 8、道路 4、TOD 8、DOW 8，dropout 后接自适应 64，分支 92 维，拼接后 368。注意力 4 头，`head_dim` 24，内部宽度 96，FFN 隐层 176。预测头是 `4416 → 128 → 4`。守恒 MLP 的输入是 372 维。参数量是 2,161,760。损失、选取和训练长度与上一节相同。实验号是 `state_independent_full_context_shared_tsf_mlp_projected`。四个周期都跑满 100 个 epoch。
 
 比较时看测试 inflow MAE。30 分钟是 **2.602 ± 0.006**，1 小时是 **2.685 ± 0.007**，2 小时是 **2.543 ± 0.011**，全天是 **2.710 ± 0.004**。同一周期的四路 32 维独立 TSF 分别是 2.703、2.706、2.632、2.752，共享 TSF 分别是 2.529、2.581、2.507、2.620。2 小时这一档最低。
