@@ -390,9 +390,11 @@ Completed ablations, All2I, All2All, and conservation runs now live under
 `training_results_3s/datasets/legacy_unknown/physical_legacy_unknown/MSTT/`.
 Finished `p10_p20` runs, including four-channel `separate_value_mlp_projected`
 and six-channel `separate_mlp_d144_projected_all`, live under
-`training_results_3s/datasets/variable_<period>_p10_p20/`. The same
-four-channel `separate_value_mlp_projected` run on `p5_p15` is under
-`training_results_3s/datasets/variable_<period>_p5_p15/`. The config and
+`training_results_3s/datasets/variable_<period>_p10_p20/`. On `p5_p15`, the
+finished runs under `training_results_3s/datasets/variable_<period>_p5_p15/`
+are `separate_value_mlp_projected`, `shared_tsf_mlp_projected`,
+`state_independent_tsf_mlp_projected`, and
+`state_independent_full_context_shared_tsf_mlp_projected`. The config and
 metrics for each completed run are in
 [TRAINING_RESULTS.md](TRAINING_RESULTS.md). This tree no longer launches the
 deleted ablation scripts.
