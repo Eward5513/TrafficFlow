@@ -14,13 +14,14 @@ from torch import nn
 
 from MSTT.model.adaptive_embedding import AdaptiveEmbedding
 from MSTT.model.embedding import InputEmbedding, resolve_embedding_dims
-from MSTT.model.ffn import SwiGLU
 from MSTT.model.graph import SpatialGraph
+from MSTT.model.ffn import SwiGLU
 from MSTT.model.head import PredictionHead
 from MSTT.model.joint_attention import JointSTAttention
 from MSTT.model.conservation import ConservationProjection
 from MSTT.model.state_branch import StateTSFBranch
 from MSTT.model.state_context import SharedStateContextEmbedding
+from MSTT.model.state_fusion_head import StateTokenTransformerHead
 from MSTT.model.transformer_block import JointSTBlock, build_factorized_block
 
 STATE_BRANCH_COUNT = 4
@@ -88,6 +89,11 @@ class MSTTConfig:
     state_context_sharing: str = "independent"
     state_node_sharing: str = "independent"
     fusion_mlp_hidden_dim: int = 128
+    fusion_token_dim: int = 128
+    fusion_num_heads: int = 4
+    fusion_ffn_hidden_dim: int = 176
+    fusion_chunk_size: int | None = None
+    fusion_checkpoint: bool = False
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any], **overrides: Any) -> "MSTTConfig":
@@ -192,6 +198,50 @@ def validate_independent_backbone(config: MSTTConfig | Mapping[str, Any]) -> Non
             )
 
 
+def validate_state_token_transformer(config: MSTTConfig | Mapping[str, Any]) -> None:
+    """The 48-token fusion head is only the four-state Node16-style TSF stack.
+
+    ``fusion_token_dim`` is the fusion width. It does not replace backbone
+    ``d_model``. QK-Norm stays on and this head does not use RoPE; the TSF
+    blocks keep their own RoPE setting.
+    """
+    head = str(_cfg_get(config, "head_type", "flatten"))
+    if head != "state_token_transformer":
+        return
+    backbone = str(_cfg_get(config, "backbone_mode", "shared"))
+    if backbone != "state_independent":
+        raise ValueError("head_type='state_token_transformer' requires backbone_mode='state_independent'")
+    mode = str(_cfg_get(config, "value_embedding_mode", "joint_linear"))
+    if mode != "separate_mlp":
+        raise ValueError(
+            "head_type='state_token_transformer' requires value_embedding_mode='separate_mlp', "
+            f"got {mode!r}"
+        )
+    window = _cfg_get(config, "input_window", None)
+    if window is not None and int(window) != 12:
+        raise ValueError("head_type='state_token_transformer' requires input_window=12")
+    for key in ("in_channels", "out_channels"):
+        actual = _cfg_get(config, key, None)
+        if actual is not None and int(actual) != STATE_BRANCH_COUNT:
+            raise ValueError(
+                f"head_type='state_token_transformer' requires {key}={STATE_BRANCH_COUNT}, got {actual}"
+            )
+    token_dim = int(_cfg_get(config, "fusion_token_dim", 0) or 0)
+    heads = int(_cfg_get(config, "fusion_num_heads", 0) or 0)
+    ffn = int(_cfg_get(config, "fusion_ffn_hidden_dim", 0) or 0)
+    if token_dim < 1 or heads < 1 or token_dim % heads != 0:
+        raise ValueError(
+            f"fusion_token_dim={token_dim} must be a positive multiple of fusion_num_heads={heads}"
+        )
+    if ffn < 1:
+        raise ValueError(f"fusion_ffn_hidden_dim must be positive, got {ffn}")
+    if not bool(_cfg_get(config, "use_qk_norm", False)):
+        raise ValueError("head_type='state_token_transformer' keeps fusion QK-Norm on")
+    chunk = _cfg_get(config, "fusion_chunk_size", None)
+    if chunk is not None and int(chunk) < 1:
+        raise ValueError("fusion_chunk_size must be a positive integer or null")
+
+
 def validate_state_node_sharing(config: MSTTConfig | Mapping[str, Any]) -> None:
     """Assign the road table. Missing values stay one private table per branch.
 
@@ -288,6 +338,7 @@ class MSTT(nn.Module):
             raise ValueError(f"unknown backbone_mode {mode!r}")
         validate_state_context_sharing(config)
         validate_state_node_sharing(config)
+        validate_state_token_transformer(config)
         if mode == "state_independent":
             validate_independent_backbone(config)
             branch_cfg = replace(
@@ -367,14 +418,32 @@ class MSTT(nn.Module):
                     norm_eps=config.norm_eps,
                 )
             self.blocks = nn.ModuleList([block])
-        self.head = PredictionHead(
-            config.d_model,
-            config.input_window,
-            config.out_channels,
-            head_type=config.head_type,
-            norm_eps=config.norm_eps,
-            fusion_mlp_hidden_dim=config.fusion_mlp_hidden_dim,
-        )
+        if config.head_type == "state_token_transformer":
+            self.head = StateTokenTransformerHead(
+                config.d_model // STATE_BRANCH_COUNT,
+                config.input_window,
+                config.out_channels,
+                token_dim=int(config.fusion_token_dim),
+                num_heads=int(config.fusion_num_heads),
+                ffn_hidden_dim=int(config.fusion_ffn_hidden_dim),
+                dropout=float(config.dropout),
+                attention_dropout=float(config.attention_dropout),
+                use_qk_norm=bool(config.use_qk_norm),
+                norm_eps=float(config.norm_eps),
+                chunk_size=None if config.fusion_chunk_size is None else int(config.fusion_chunk_size),
+                use_checkpoint=bool(config.fusion_checkpoint),
+            )
+        elif config.head_type in ("flatten", "last", "flatten_mlp"):
+            self.head = PredictionHead(
+                config.d_model,
+                config.input_window,
+                config.out_channels,
+                head_type=config.head_type,
+                norm_eps=config.norm_eps,
+                fusion_mlp_hidden_dim=config.fusion_mlp_hidden_dim,
+            )
+        else:
+            raise ValueError(f"unknown head_type {config.head_type!r}")
         if mode == "shared":
             # After the head so a shared run keeps embedding → block → head → adaptive.
             self.adaptive = (
@@ -444,19 +513,37 @@ class MSTT(nn.Module):
         return int(sum(param.numel() for param in self.parameters() if param.requires_grad))
 
     def architecture_summary(self) -> dict[str, Any]:
-        ffns = [module for module in self.modules() if isinstance(module, SwiGLU)]
+        fusion_ids = set()
+        if isinstance(self.head, StateTokenTransformerHead):
+            fusion_ids = {id(module) for module in self.head.modules() if isinstance(module, SwiGLU)}
+        backbone_ffns = [
+            module for module in self.modules() if isinstance(module, SwiGLU) and id(module) not in fusion_ids
+        ]
+        fusion_ffns = [module for module in self.modules() if isinstance(module, SwiGLU) and id(module) in fusion_ids]
         layout = str(self.config.attention_layout)
         summary = {
             "backbone_mode": self.config.backbone_mode,
             "embedding": self.embedding_summary(),
             "head": self.head.describe(),
             "attention_layout": layout,
-            "d_model": self.head.norm.normalized_shape[0],
+            "d_model": int(self.config.d_model),
             "temporal_causal_mask": False,
-            "independent_ffn_count": len(ffns),
-            "ffn_hidden_dims": [int(ffn.w_gate.out_features) for ffn in ffns],
+            "independent_ffn_count": len(backbone_ffns),
+            "backbone_ffn_count": len(backbone_ffns),
+            "fusion_ffn_count": len(fusion_ffns),
+            "ffn_hidden_dims": [int(ffn.w_gate.out_features) for ffn in backbone_ffns],
+            "fusion_ffn_hidden_dims": [int(ffn.w_gate.out_features) for ffn in fusion_ffns],
             "total_parameters": self.parameter_count(),
         }
+        if isinstance(self.head, StateTokenTransformerHead):
+            summary.update(
+                branch_d_model=int(self.config.d_model) // STATE_BRANCH_COUNT,
+                fusion_token_dim=int(self.head.token_dim),
+                fusion_tokens=int(self.head.num_tokens),
+                fusion_num_heads=int(self.head.num_heads),
+                fusion_head_dim=int(self.head.head_dim),
+                projection_condition_dim=int(self.config.d_model),
+            )
         if self.projection is not None:
             first, last = self.projection.mlp[0], self.projection.mlp[-1]
             summary["projection_mlp"] = {

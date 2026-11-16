@@ -150,6 +150,12 @@ MODEL_DEFAULTS: dict[str, Any] = {
     # A missing road-table switch keeps one private node embedding on each branch.
     "state_node_sharing": "independent",
     "fusion_mlp_hidden_dim": 128,
+    # Inactive unless head_type is state_token_transformer.
+    "fusion_token_dim": 128,
+    "fusion_num_heads": 4,
+    "fusion_ffn_hidden_dim": 176,
+    "fusion_chunk_size": None,
+    "fusion_checkpoint": False,
 }
 
 # Meaning of keys that older run directories never stored: v0.1 predates
@@ -177,6 +183,12 @@ LEGACY_DEFAULTS: dict[str, Any] = {
     # Runs saved before this field keep a private road table on each branch.
     "state_node_sharing": "independent",
     "fusion_mlp_hidden_dim": 128,
+    # Runs saved before the 48-token head did not use these. Old heads ignore them.
+    "fusion_token_dim": 128,
+    "fusion_num_heads": 4,
+    "fusion_ffn_hidden_dim": 176,
+    "fusion_chunk_size": None,
+    "fusion_checkpoint": False,
 }
 
 TRAIN_DEFAULTS: dict[str, Any] = {
@@ -264,7 +276,8 @@ def _parse_optional_int(text: str) -> int | None:
 
 _OPTIONAL_INT_KEYS = {"ffn_hidden_dim", "max_train_batches", "max_eval_batches", "early_stop_patience",
                       "base_embedding_dim", "adaptive_embedding_dim",
-                      "temporal_num_heads", "spatial_num_heads", "attention_head_dim"}
+                      "temporal_num_heads", "spatial_num_heads", "attention_head_dim",
+                      "fusion_chunk_size"}
 _CHOICES = {
     "attention_order": ("TS",),
     "attention_layout": ("factorized_ts", "joint_st"),
@@ -275,7 +288,7 @@ _CHOICES = {
     "projection_supervision": ("all", "inflow_only"),
     "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
-    "head_type": ("flatten", "last", "flatten_mlp"),
+    "head_type": ("flatten", "last", "flatten_mlp", "state_token_transformer"),
     "backbone_mode": ("shared", "state_independent"),
     "state_context_sharing": ("independent", "shared"),
     "state_node_sharing": ("independent", "shared"),
@@ -386,10 +399,12 @@ def validate_config(config: Mapping[str, Any]) -> None:
         validate_independent_backbone,
         validate_state_context_sharing,
         validate_state_node_sharing,
+        validate_state_token_transformer,
     )
 
     validate_state_context_sharing(config)
     validate_state_node_sharing(config)
+    validate_state_token_transformer(config)
     if backbone == "state_independent":
         validate_independent_backbone(config)
     else:

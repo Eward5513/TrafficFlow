@@ -45,13 +45,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true", help="retrain even if the run is complete")
     parser.add_argument("--resume", type=Path, default=None, help="explicit checkpoint to resume from")
     parser.add_argument("--gpu", type=int, default=None, help="shortcut for --device cuda:<gpu>")
+    parser.add_argument("--run-id", dest="run_id", default=None, help="reuse one persisted run id")
     add_config_arguments(parser)
     return parser
 
 
+def apply_explicit_run_id(config: dict, args: argparse.Namespace) -> dict:
+    """Keep a scheduler-assigned run id after sampling configuration creates one."""
+    run_id = getattr(args, "run_id", None)
+    if run_id is None:
+        return config
+    text = str(run_id).strip()
+    if not text or "/" in text or "\\" in text:
+        raise SystemExit(f"error: invalid run id {run_id!r}")
+    config["run_id"] = text
+    return config
+
+
 def main(argv: list[str] | None = None) -> dict:
     args = build_parser().parse_args(argv)
-    config = overlay_args(load_config(args.config), args)
+    config = apply_explicit_run_id(overlay_args(load_config(args.config), args), args)
     if args.gpu is not None:
         config["device"] = f"cuda:{args.gpu}"
     validate_config(config)

@@ -158,6 +158,13 @@ def model_config(config: Mapping[str, Any], task: TaskSpec) -> MSTTConfig:
 
 
 _CONCAT_WIDTH_KEYS = ("value_embedding_dim", "node_embedding_dim", "tod_embedding_dim", "dow_embedding_dim")
+_FUSION_IDENTITY_KEYS = (
+    "fusion_token_dim",
+    "fusion_num_heads",
+    "fusion_ffn_hidden_dim",
+    "fusion_chunk_size",
+    "fusion_checkpoint",
+)
 
 
 def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -167,8 +174,12 @@ def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     ``separate_mlp``, and ``state_aux_gate`` build different value modules, so
     a run directory or checkpoint from one cannot be reused for another.
     Missing values are filled with ``joint_linear`` by ``with_legacy_defaults``
-    before this compare. ``fusion_mlp_hidden_dim`` is inactive for flatten/last,
-    and ``projection_mlp_hidden_dim`` is inactive unless conservation is projected.
+    before this compare. ``fusion_mlp_hidden_dim`` is inactive for flatten/last
+    and for ``state_token_transformer``. The fusion token width, head count,
+    FFN width, chunk size, and activation checkpoint are compared only for
+    ``state_token_transformer``. Older heads ignore those fields, including
+    when a checkpoint predates them and legacy defaults fill them in.
+    ``projection_mlp_hidden_dim`` is inactive unless conservation is projected.
     ``state_context_sharing`` stays in the comparison. Old checkpoints omit it
     and are restored as ``independent``. A shared-context run does not resume
     an independent-context run. On ``backbone_mode=shared`` the field is an
@@ -182,8 +193,12 @@ def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     if result.get("embedding_fusion") == "add":
         for key in _CONCAT_WIDTH_KEYS:
             result.pop(key, None)
-    if str(result.get("head_type", "flatten")) != "flatten_mlp":
+    head = str(result.get("head_type", "flatten"))
+    if head != "flatten_mlp":
         result.pop("fusion_mlp_hidden_dim", None)
+    if head != "state_token_transformer":
+        for key in _FUSION_IDENTITY_KEYS:
+            result.pop(key, None)
     return result
 
 

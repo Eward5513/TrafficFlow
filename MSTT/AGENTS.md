@@ -135,6 +135,30 @@ branch. `shared` is legal only for `backbone_mode=state_independent` with
   shared model has 2,299,424 parameters and the independent model has
   5,613,416, a gap of `3 × (1406×16 + 288×8 + 7×8 + 12×1406×64) = 3,313,992`.
 
+`head_type=state_token_transformer` keeps that shared Node16 D backbone and
+replaces only the prediction head. This is the selected implementation, not a
+measured result. Four private value MLPs and four private TSF blocks stay in
+place. TSF attention remains `attention_head_dim=24` and `ffn_hidden_dim=176`.
+The concatenated backbone hidden state stays `[B, 12, N, 416]`. Each branch is
+projected by its own `Linear(104, 128)`. A learned state id `[4, 128]` and a
+learned time id `[12, 128]` are added, both initialized with truncated normal
+standard deviation 0.02. The 48 tokens are state-major,
+`token_index = state_index * 12 + time_index`, so the last step of each state
+is token 11, 23, 35, or 47. One pre-norm Transformer layer attends inside
+those 48 tokens: 4 heads, head dim 32, QK-Norm on, RoPE off, SwiGLU hidden
+176, dropout 0.1. The TSF blocks keep their own RoPE. Four independent
+`Linear(128, 1)` read the last token of each state. Conservation still calls
+`projection(backbone_hidden, raw_pred)`; the condition is the 416-d backbone
+step, and the MLP remains `420→32→4`. `fusion_chunk_size=1024` and
+`fusion_checkpoint=true` only split that per-road attention for memory. At
+N=1406 the model has 1,849,280 parameters. Config:
+`configs/experiment_state_independent_full_context_shared_node16_tsf_token_transformer_projected.json`.
+Experiment id
+`state_independent_full_context_shared_node16_tsf_token_transformer_projected`.
+Do not load it from a `flatten_mlp` checkpoint, and do not set backbone
+`d_model` to 128. The queued runs read `all.npz` for `variable_30min_p5_p15`,
+`variable_1h_p5_p15`, `variable_2h_p5_p15`, and `variable_day_p5_p15`.
+
 `configs/experiment_shared_tsf_mlp_projected.json` is the one-TSF control.
 `backbone_mode=shared` accepts only `state_context_sharing=independent` and
 `state_node_sharing=independent` as unused placeholders. The frozen default
@@ -143,6 +167,8 @@ these structures into another.
 `state_aux_gate` cannot be combined with `state_independent`.
 `python MSTT/tests/test_state_context_sharing.py` checks the historical
 full-context models and the node-16 pair on CPU.
+`python MSTT/tests/test_state_token_transformer.py` checks the 48-token head
+and the auxiliary-gate initialization on CPU.
 
 `value_embedding_mode=state_aux_gate` is a separate `AllSpC2All` experiment
 on the same `all_sp_c.npz` windows and merged scaler. Four independent state

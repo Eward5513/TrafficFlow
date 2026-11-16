@@ -427,8 +427,43 @@ with experiment id
 Results use the same canonical directory with those experiment ids and
 `p5_p15`. Do not resume a road-width-4 checkpoint into either run.
 
+## 48-token state fusion
+
+`state_token_transformer` starts from the shared Node16 D backbone above and
+changes the prediction head. It is an implementation choice for one group of
+runs. The four TSF blocks still emit 104 dimensions each and still use
+`attention_head_dim=24`. The fusion layer is separate: each branch is mapped
+by its own `Linear(104, 128)`, then one 48-token Transformer mixes the four
+states and twelve history steps of a single road. Token order is state-major.
+The last token of each state, indexes 11, 23, 35, and 47, has its own
+`Linear(128, 1)`. Fusion attention uses 4 heads of 32 with QK-Norm and without
+RoPE. The TSF RoPE is unchanged. Conservation still conditions on the 416-d
+backbone hidden state, so the projection MLP stays `420→32→4`. At N=1406 this
+configuration has 1,849,280 parameters.
+
+```bash
+python MSTT/train.py \
+  --config MSTT/configs/experiment_state_independent_full_context_shared_node16_tsf_token_transformer_projected.json \
+  --task All2All \
+  --dataset-id variable_30min_p5_p15 \
+  --penetration p5_p15 \
+  --device cuda:0 \
+  --experiment-id state_independent_full_context_shared_node16_tsf_token_transformer_projected
+```
+
+The same command with `variable_1h_p5_p15`, `variable_2h_p5_p15`, or
+`variable_day_p5_p15` reads that frequency. All four use observation key
+`p5_p15` and input `all.npz`. Do not resume the Node16 `flatten_mlp`
+checkpoint into this head.
+
+The auxiliary-gate configuration is unchanged. Its four queued runs use
+`all_sp_c.npz` and `all_sp_c_state_aux_gate_d128_projected_all.json` on
+`variable_30min_p10_p20`, `variable_1h_p10_p20`, `variable_2h_p10_p20`, and
+`variable_day_p10_p20`, with observation key `p10_p20` and task `AllSpC2All`.
+
 ```bash
 python MSTT/tests/test_state_context_sharing.py
+python MSTT/tests/test_state_token_transformer.py
 ```
 
 ## Historical results
