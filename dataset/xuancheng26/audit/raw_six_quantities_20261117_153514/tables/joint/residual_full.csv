@@ -1,0 +1,2 @@
+n,missing,n_zero,zero_fraction,n_positive,positive_fraction,n_negative,min,max,mean,std,iqr,sum,cv,p99_over_p50,p1,p5,p10,p25,p50,p75,p90,p95,p99,p99_9,negative_fraction,abs_p50,abs_p95,abs_max
+11742912,0,11742898,0.999999,7,5.96104e-07,7,-1,1,0,0.00109188,0,0,NA,NA,0,0,0,0,0,0,0,0,0,0,5.96104e-07,0,0,1

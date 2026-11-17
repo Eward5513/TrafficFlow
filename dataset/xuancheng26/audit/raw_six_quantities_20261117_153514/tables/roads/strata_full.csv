@@ -1,0 +1,10 @@
+axis,band,rule,n_roads,I_mean,I_p50,Ae_mean,C_mean,V_p50
+length,short,"tertiles of road length, q33=107.250 m, q66=249.853 m",469,5.03929,0,0.212498,62.9325,36.199
+length,medium,"tertiles of road length, q33=107.250 m, q66=249.853 m",468,12.8766,5,1.31874,393.764,34.3382
+length,long,"tertiles of road length, q33=107.250 m, q66=249.853 m",469,14.9789,7,2.68779,801.085,36.1835
+lanes,1,exact num_lanes,606,1.55694,0,0.154616,46.1463,NA
+lanes,2,exact num_lanes,326,10.7334,6,1.19247,356.582,NA
+lanes,3,exact num_lanes,332,21.3869,17,2.50695,746.614,NA
+lanes,4,exact num_lanes,126,26.5761,22,4.37241,1302.63,NA
+lanes,5,exact num_lanes,15,30.7597,24,6.41273,1908.97,NA
+lanes,6,exact num_lanes,1,61.7748,64,15.5399,4653.49,NA

@@ -1,0 +1,2 @@
+snapshot_weighted_kmh,cell_equal_kmh,vehicle_weighted_kmh,mean_abs_V_minus_Vveh,c300_corr,c300_n,c300_minus_stock_p50,cell_over_limit,snapshot_over_limit,snapshot_stop_fraction,within_std_p50,within_std_p90,within_width_p50,C_over_U_p50,C_over_U_p90,single_vehicle_gt_half_C
+27.5832,34.5003,37.3581,2.95032,0.935575,11742912,0,0.02598,0.104673,0.296473,10,24.5,24,23.8824,59.1897,0.181575

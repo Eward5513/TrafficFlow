@@ -106,17 +106,20 @@ seed_42/
 
 单通道 `inflow.npz` 的 `x` 是 `(277, 12, 1406, 1)`。`all.npz` 最后一维是 4。
 
-四个 `variable_*_p10_p20` 数据集另外有 `model_prepared/traffic_observations/p10_p20/YYYY_MM_DD.npz`，以及同级窗口 `window_data/p10_p20/{train,validation,test}/YYYY_MM_DD/all_sp_c.npz`。`all_sp_c.npz` 的 `x` 和 `x_raw` 是 `(277, 12, 1406, 6)`。固定档和其它观测区间没有这两份文件。
+已发布 `all_sp_c` 的可变数据集，在自己的观测键下另有 `model_prepared/traffic_observations/<observation_key>/YYYY_MM_DD.npz`，以及同级窗口 `window_data/<observation_key>/{train,validation,test}/YYYY_MM_DD/all_sp_c.npz`。`p10_p20` 四个频率已经有这两份文件。`p5_p15` 四个频率用同一布局，键名是 `p5_p15`，不写成 `p05_p15`，也不引用 `p10_p20` 的车辆名单或 scaler。`all_sp_c.npz` 的 `x` 和 `x_raw` 是 `(277, 12, 1406, 6)`。固定档和尚未跑过这个生成器的观测区间没有这两份文件。
 
-`all_sp_c` 只作为 MSTT 输入，不是预测目标。通道顺序是 `inflow, outflow, accumulation_start, accumulation_end, average_speed_raw, speed_observation_count`。前四路直接沿用原来的 `all.npz`，不重新计算。后两路来自当天 `traffic_observations/p10_p20/YYYY_MM_DD.npz`：`average_speed_raw` 是该道路、该 300 秒窗里所有有效 1 秒 FCD 快照速度的均值，单位 km/h，不按限速截断，空窗为 0；`speed_observation_count` 是这些快照的条数，同一辆车出现 30 次计 30，停车速度 0 也计入，不除以 300，也不去重成车辆数。`C=0` 时 `V=0`。日级 `count` 存整数，拼进窗口时转成 float32。
+`all_sp_c` 只作为 MSTT 输入，不是预测目标。通道顺序是 `inflow, outflow, accumulation_start, accumulation_end, average_speed_raw, speed_observation_count`。前四路直接沿用原来的 `all.npz`，不重新计算。后两路来自当天 `traffic_observations/<observation_key>/YYYY_MM_DD.npz`：`average_speed_raw` 是该道路、该 300 秒窗里所有有效 1 秒 FCD 快照速度的均值，单位 km/h，不按限速截断，空窗为 0；`speed_observation_count` 是这些快照的条数，同一辆车出现 30 次计 30，停车速度 0 也计入，不除以 300，也不去重成车辆数。`C=0` 时 `V=0`。日级 `count` 存整数，拼进窗口时转成 float32。
 
-每个 dataset 自己的 `all_sp_c_normalization.json` 放在 `datasets/<dataset_id>/`。它只拟合这两个新通道，用 sampling seed 42 的 20 个训练日、每天原始 288 个格子，空窗的 0 参加，不按滑动窗口重复加权。五个采样种子和三个 split 共用这份冻结结果。前四通道仍读原来的 `state_normalization.json`。`all_sp_c_ready.json` 只记录这批新文件，不改四状态 dataset 的 ready 状态。标签仍由 `target_type` 读取 `all.npz` 或 `inflow.npz`。
+每个 dataset 自己的 `all_sp_c_normalization.json` 放在 `datasets/<dataset_id>/`。它只拟合这两个新通道，用该 dataset 的 sampling seed 42、20 个训练日、每天原始 288 个格子，空窗的 0 参加，不按滑动窗口重复加权，也不把不同频率或不同渗透率区间混在一起拟合。五个采样种子和三个 split 共用这份冻结结果。前四通道仍读原来的 `state_normalization.json`。`all_sp_c_ready.json` 只记录这批新文件，不改四状态 dataset 的 ready 状态。标签仍由 `target_type` 读取 `all.npz` 或 `inflow.npz`。
 
-生成入口：
+生成入口默认仍是四个 `p10_p20` dataset。`--dataset-ids` 按 manifest 里唯一的观测键处理一个或多个 dataset，可以混合区间；重复 id 会去掉并保持第一次出现的顺序。
 
 ```bash
 cd /home/tzhang174/TrafficFlow
 python3 dataset/xuancheng26/model_prep/prepare_all_sp_c.py --workers 29
+python3 dataset/xuancheng26/model_prep/prepare_all_sp_c.py --workers 29 \
+  --dataset-ids variable_30min_p5_p15 variable_1h_p5_p15 \
+  variable_2h_p5_p15 variable_day_p5_p15
 ```
 
 可变渗透率按配置里的 `p_min`、`p_max` 生成，观测键由 `data_root.observation_key` 决定。0.10–0.20 是 `p10_p20`，0.05–0.15 是 `p5_p15`，0.05–0.35 是 `p5_p35`（5% 写成 `p5`，不是 `p05`）。固定渗透率文件仍用原来的 `p05`。每种频率一套 dataset，段长分别是 1800、3600、7200、86400 秒，种子都是 42–46。`p5_p15` 和 `p5_p35` 各四套的 `dataset_status` 和 13 个基线辅助资源都是 ready。静态图、训练全日统计和 RF 道路属性继续共用，不按采样种子复制。RF 速度在各自的 `model_prepared/RF/<observation_key>/`。

@@ -1,0 +1,9 @@
+stamp=20261117_153514
+2026-11-17T15:35:14+08:00
+128
+               total        used        free      shared  buff/cache   available
+Mem:            1511         274          89          93        1148        1136
+Swap:              7           7           0
+Filesystem                    Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-lv--0  3.3T  2.9T  275G  92% /
+/dev/md122p1                   14T   12T 1007G  93% /data5

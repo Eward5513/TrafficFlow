@@ -253,7 +253,13 @@ The other dataset ids are `variable_1h_p10_p20`, `variable_2h_p10_p20`, and
 `variable_day_p10_p20`. `run_all_sp_c_state_aux_gate.sh` takes a GPU list
 and keeps one dataset on each GPU at a time. Its PID file only stops a
 second copy of that same chain. It does not see other jobs on the GPU, and
-each launch overwrites `gpu<N>.log`.
+each launch overwrites `gpu<N>.log`. That shell script stays on `p10_p20`.
+
+The same JSON config and experiment id also apply to `p5_p15`. Pass
+`--dataset-id variable_<period>_p5_p15` and `--penetration p5_p15`. The
+result directory then uses that dataset id and the `p5_p15` observation key,
+so it does not overwrite a `p10_p20` run. Each frequency keeps its own
+`all_sp_c_normalization.json`. Do not load a `p10_p20` checkpoint into it.
 
 ## Independent state TSFs
 

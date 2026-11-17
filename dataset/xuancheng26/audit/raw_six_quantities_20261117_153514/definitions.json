@@ -1,0 +1,91 @@
+{
+  "physical_definition": {
+    "physical_definition_version": "independent_fcd_v1",
+    "sampling_algorithm_version": "xuancheng26_variable_penetration_v1",
+    "fixed_sampling_algorithm_version": "xuancheng26_3s_multi_seed_v2",
+    "bin": {
+      "seconds": 300,
+      "count": 288,
+      "interval": "[300k, 300(k+1))",
+      "day_seconds": 86400
+    },
+    "simulation_clock": {
+      "begin": 0,
+      "end": 86400,
+      "step_length_seconds": 1,
+      "fcd_period_seconds": 1,
+      "expected_samples": "integer seconds 0,1,...,86399; a missing second is an error and is not forward-filled",
+      "q0_minus": "Zero. SUMO begins at t=0 with an empty network and no preloaded vehicles. The FCD sample at t=0.00 is the state after departures at time 0, so it is not Q(0-).",
+      "q_day_end": "Q(86400-) is the occupancy at t=86399. No t=86400 snapshot is invented, copied, or filled from the flow balance."
+    },
+    "inflow": "Direct count of a vehicle entering a real edge in the 5-minute bin. Includes a departure or other first observation on that edge, a move from another real edge, and a return after the vehicle was observed off the edge. This is a source-inclusive entry count, not a pure upstream cordon count.",
+    "outflow": "Direct count of a vehicle leaving a real edge: move to another real edge, observation on an internal lane, observation on an unknown lane, or a tripinfo arrival. Unfinished trips are not given an arrival.",
+    "accumulation_start": "Q(300k-): real-edge occupancy at t=300k-1 for k>0, and 0 at k=0.",
+    "accumulation_end": "Q(300(k+1)-): real-edge occupancy at t=300(k+1)-1.",
+    "occupancy": "A vehicle counts on the real edge of its lane at that exact sample. Internal lanes and unknown lanes are not kept on the previous external edge.",
+    "event_classes": [
+      "departure_entry",
+      "first_seen_entry",
+      "transition_exit",
+      "transition_entry",
+      "reentry_entry",
+      "reentry_same_edge",
+      "internal_exit",
+      "unknown_exit",
+      "arrival_exit"
+    ],
+    "arrival_rule": "impute_final_exits adds an outflow only when tripinfo has a finite arrival at or after depart. A missing arrival stays unresolved.",
+    "residual": "accumulation_end - accumulation_start - inflow + outflow. Diagnostic only.",
+    "partial_rule": "The same events and snapshots, restricted to a fixed vehicle list. Never full * p.",
+    "legacy": "accumulate_states in generate_r_level_full_flow.py is the retired cumsum stock. New reads and writes do not call it."
+  },
+  "speed": {
+    "field": "average_speed_raw",
+    "unit": "km/h",
+    "source_unit": "m/s",
+    "conversion": "multiply by 3.6 once",
+    "empty": "C=0 stored as V=0 and means no valid snapshot",
+    "stopped": "C>0 and V=0 means every valid snapshot speed is zero",
+    "filters": "drop negative, non-finite, internal lane, unknown lane; keep speeds above the limit and above 40 m/s",
+    "not": "not the RF capped or limit-filled average_speed"
+  },
+  "count": {
+    "field": "speed_observation_count",
+    "unit": "fcd_snapshot",
+    "not": "not unique vehicles, not a cumulative daily count, and not divided by 300"
+  },
+  "bins": {
+    "count": [
+      "0",
+      "1",
+      "2",
+      "3-5",
+      "6-10",
+      "11-20",
+      "21-50",
+      "51-100",
+      "101-300",
+      "301-1000",
+      ">1000"
+    ],
+    "speed_when_observed": [
+      "C=0 separately",
+      "0",
+      "(0,5]",
+      "(5,15]",
+      "(15,30]",
+      "(30,50]",
+      "(50,80]",
+      ">80"
+    ]
+  },
+  "derived": {
+    "U": "unique vehicles with at least one valid speed snapshot in the road-bin",
+    "C_over_U": "mean snapshots per such vehicle, only when U>0",
+    "Vveh": "mean over vehicles of each vehicle's mean snapshot speed; diagnostic weighting",
+    "residual": "A_end - A_start - I + O",
+    "I_per_lane": "inflow / num_lanes",
+    "A_per_lane_km": "accumulation / (num_lanes * length_km)"
+  },
+  "cache_key": "a5eb60206d91bbd3ebafbbc322d52dd94abdfcc220dbb11fbf9352bc7420e711"
+}

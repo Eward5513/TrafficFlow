@@ -1,0 +1,197 @@
+2026-11-17T16:33:14+08:00 aggregate self-check PASS
+2026-11-17T16:33:14+08:00 loading full cubes
+2026-11-17T16:33:14+08:00 analyzing full population
+2026-11-17T16:36:15+08:00 partial groups
+2026-11-17T16:36:15+08:00 group 1 fixed_uniform p05 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T16:37:01+08:00 group 2 fixed_uniform p05 seed 43
+2026-11-17T16:37:47+08:00 group 3 fixed_uniform p05 seed 44
+2026-11-17T16:38:32+08:00 group 4 fixed_uniform p05 seed 45
+2026-11-17T16:39:19+08:00 group 5 fixed_uniform p05 seed 46
+2026-11-17T16:40:07+08:00 group 6 fixed_uniform p10 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T16:40:56+08:00 group 7 fixed_uniform p10 seed 43
+2026-11-17T16:41:43+08:00 group 8 fixed_uniform p10 seed 44
+2026-11-17T16:42:33+08:00 group 9 fixed_uniform p10 seed 45
+2026-11-17T16:43:21+08:00 group 10 fixed_uniform p10 seed 46
+2026-11-17T16:44:08+08:00 group 11 fixed_uniform p20 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T16:45:00+08:00 group 12 fixed_uniform p20 seed 43
+2026-11-17T16:45:50+08:00 group 13 fixed_uniform p20 seed 44
+2026-11-17T16:46:38+08:00 group 14 fixed_uniform p20 seed 45
+2026-11-17T16:47:28+08:00 group 15 fixed_uniform p20 seed 46
+2026-11-17T16:48:16+08:00 group 16 fixed_uniform p30 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T16:49:06+08:00 group 17 fixed_uniform p30 seed 43
+2026-11-17T16:49:54+08:00 group 18 fixed_uniform p30 seed 44
+2026-11-17T16:50:43+08:00 group 19 fixed_uniform p30 seed 45
+2026-11-17T16:51:31+08:00 group 20 fixed_uniform p30 seed 46
+2026-11-17T16:52:20+08:00 group 21 fixed_uniform p40 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T16:53:08+08:00 group 22 fixed_uniform p40 seed 43
+2026-11-17T16:53:58+08:00 group 23 fixed_uniform p40 seed 44
+2026-11-17T16:54:48+08:00 group 24 fixed_uniform p40 seed 45
+2026-11-17T16:55:38+08:00 group 25 fixed_uniform p40 seed 46
+2026-11-17T16:56:27+08:00 group 26 fixed_uniform p50 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T16:57:15+08:00 group 27 fixed_uniform p50 seed 43
+2026-11-17T16:58:03+08:00 group 28 fixed_uniform p50 seed 44
+2026-11-17T16:58:49+08:00 group 29 fixed_uniform p50 seed 45
+2026-11-17T16:59:37+08:00 group 30 fixed_uniform p50 seed 46
+2026-11-17T17:00:22+08:00 group 31 fixed_uniform p70 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:01:08+08:00 group 32 fixed_uniform p70 seed 43
+2026-11-17T17:01:55+08:00 group 33 fixed_uniform p70 seed 44
+2026-11-17T17:02:38+08:00 group 34 fixed_uniform p70 seed 45
+2026-11-17T17:03:22+08:00 group 35 fixed_uniform p70 seed 46
+2026-11-17T17:04:04+08:00 group 36 variable_30min_p5_p15 p5_p15 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:04:43+08:00 group 37 variable_30min_p5_p15 p5_p15 seed 43
+2026-11-17T17:05:22+08:00 group 38 variable_30min_p5_p15 p5_p15 seed 44
+2026-11-17T17:06:01+08:00 group 39 variable_30min_p5_p15 p5_p15 seed 45
+2026-11-17T17:06:42+08:00 group 40 variable_30min_p5_p15 p5_p15 seed 46
+2026-11-17T17:07:20+08:00 group 41 variable_30min_p10_p20 p10_p20 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:07:57+08:00 group 42 variable_30min_p10_p20 p10_p20 seed 43
+2026-11-17T17:08:33+08:00 group 43 variable_30min_p10_p20 p10_p20 seed 44
+2026-11-17T17:09:10+08:00 group 44 variable_30min_p10_p20 p10_p20 seed 45
+2026-11-17T17:09:47+08:00 group 45 variable_30min_p10_p20 p10_p20 seed 46
+2026-11-17T17:10:24+08:00 group 46 variable_1h_p5_p15 p5_p15 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:10:59+08:00 group 47 variable_1h_p5_p15 p5_p15 seed 43
+2026-11-17T17:11:34+08:00 group 48 variable_1h_p5_p15 p5_p15 seed 44
+2026-11-17T17:12:10+08:00 group 49 variable_1h_p5_p15 p5_p15 seed 45
+2026-11-17T17:12:45+08:00 group 50 variable_1h_p5_p15 p5_p15 seed 46
+2026-11-17T17:13:20+08:00 group 51 variable_1h_p10_p20 p10_p20 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:13:57+08:00 group 52 variable_1h_p10_p20 p10_p20 seed 43
+2026-11-17T17:14:33+08:00 group 53 variable_1h_p10_p20 p10_p20 seed 44
+2026-11-17T17:15:09+08:00 group 54 variable_1h_p10_p20 p10_p20 seed 45
+2026-11-17T17:15:45+08:00 group 55 variable_1h_p10_p20 p10_p20 seed 46
+2026-11-17T17:16:22+08:00 group 56 variable_2h_p5_p15 p5_p15 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:16:58+08:00 group 57 variable_2h_p5_p15 p5_p15 seed 43
+2026-11-17T17:17:33+08:00 group 58 variable_2h_p5_p15 p5_p15 seed 44
+2026-11-17T17:18:08+08:00 group 59 variable_2h_p5_p15 p5_p15 seed 45
+2026-11-17T17:18:43+08:00 group 60 variable_2h_p5_p15 p5_p15 seed 46
+2026-11-17T17:19:19+08:00 group 61 variable_2h_p10_p20 p10_p20 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:19:56+08:00 group 62 variable_2h_p10_p20 p10_p20 seed 43
+2026-11-17T17:20:33+08:00 group 63 variable_2h_p10_p20 p10_p20 seed 44
+2026-11-17T17:21:09+08:00 group 64 variable_2h_p10_p20 p10_p20 seed 45
+2026-11-17T17:21:46+08:00 group 65 variable_2h_p10_p20 p10_p20 seed 46
+2026-11-17T17:22:22+08:00 group 66 variable_day_p5_p15 p5_p15 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:22:58+08:00 group 67 variable_day_p5_p15 p5_p15 seed 43
+2026-11-17T17:23:33+08:00 group 68 variable_day_p5_p15 p5_p15 seed 44
+2026-11-17T17:24:09+08:00 group 69 variable_day_p5_p15 p5_p15 seed 45
+2026-11-17T17:24:44+08:00 group 70 variable_day_p5_p15 p5_p15 seed 46
+2026-11-17T17:25:20+08:00 group 71 variable_day_p10_p20 p10_p20 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:25:57+08:00 group 72 variable_day_p10_p20 p10_p20 seed 43
+2026-11-17T17:26:33+08:00 group 73 variable_day_p10_p20 p10_p20 seed 44
+2026-11-17T17:27:10+08:00 group 74 variable_day_p10_p20 p10_p20 seed 45
+2026-11-17T17:27:46+08:00 group 75 variable_day_p10_p20 p10_p20 seed 46
+2026-11-17T17:28:23+08:00 group 76 variable_30min_p5_p35 p5_p35 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:29:00+08:00 group 77 variable_30min_p5_p35 p5_p35 seed 43
+2026-11-17T17:29:36+08:00 group 78 variable_30min_p5_p35 p5_p35 seed 44
+2026-11-17T17:30:13+08:00 group 79 variable_30min_p5_p35 p5_p35 seed 45
+2026-11-17T17:30:50+08:00 group 80 variable_30min_p5_p35 p5_p35 seed 46
+2026-11-17T17:31:26+08:00 group 81 variable_1h_p5_p35 p5_p35 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:32:03+08:00 group 82 variable_1h_p5_p35 p5_p35 seed 43
+2026-11-17T17:32:40+08:00 group 83 variable_1h_p5_p35 p5_p35 seed 44
+2026-11-17T17:33:17+08:00 group 84 variable_1h_p5_p35 p5_p35 seed 45
+2026-11-17T17:33:53+08:00 group 85 variable_1h_p5_p35 p5_p35 seed 46
+2026-11-17T17:34:29+08:00 group 86 variable_2h_p5_p35 p5_p35 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:35:06+08:00 group 87 variable_2h_p5_p35 p5_p35 seed 43
+2026-11-17T17:35:42+08:00 group 88 variable_2h_p5_p35 p5_p35 seed 44
+2026-11-17T17:36:18+08:00 group 89 variable_2h_p5_p35 p5_p35 seed 45
+2026-11-17T17:36:54+08:00 group 90 variable_2h_p5_p35 p5_p35 seed 46
+2026-11-17T17:37:30+08:00 group 91 variable_day_p5_p35 p5_p35 seed 42
+/tmp/xuancheng26_raw_audit_20261117/audit_aggregate.py:1744: RuntimeWarning: All-NaN slice encountered
+  "V_p50_valid": float(np.nanmedian(np.where(local["C"][:, :, index] > 0, local["V"][:, :, index], np.nan))),
+2026-11-17T17:38:07+08:00 group 92 variable_day_p5_p35 p5_p35 seed 43
+2026-11-17T17:38:43+08:00 group 93 variable_day_p5_p35 p5_p35 seed 44
+2026-11-17T17:39:20+08:00 group 94 variable_day_p5_p35 p5_p35 seed 45
+2026-11-17T17:39:55+08:00 group 95 variable_day_p5_p35 p5_p35 seed 46
+2026-11-17T17:40:32+08:00 seed cell dispersion
+2026-11-17T17:40:32+08:00 dispersion fixed_uniform p05 I
+2026-11-17T17:40:33+08:00 dispersion fixed_uniform p05 C
+2026-11-17T17:40:35+08:00 dispersion fixed_uniform p05 V
+2026-11-17T17:40:36+08:00 dispersion fixed_uniform p10 I
+2026-11-17T17:40:38+08:00 dispersion fixed_uniform p10 C
+2026-11-17T17:40:39+08:00 dispersion fixed_uniform p10 V
+2026-11-17T17:40:41+08:00 dispersion fixed_uniform p20 I
+2026-11-17T17:40:42+08:00 dispersion fixed_uniform p20 C
+2026-11-17T17:40:44+08:00 dispersion fixed_uniform p20 V
+2026-11-17T17:40:46+08:00 dispersion fixed_uniform p30 I
+2026-11-17T17:40:47+08:00 dispersion fixed_uniform p30 C
+2026-11-17T17:40:48+08:00 dispersion fixed_uniform p30 V
+2026-11-17T17:40:50+08:00 dispersion fixed_uniform p40 I
+2026-11-17T17:40:52+08:00 dispersion fixed_uniform p40 C
+2026-11-17T17:40:53+08:00 dispersion fixed_uniform p40 V
+2026-11-17T17:40:55+08:00 dispersion fixed_uniform p50 I
+2026-11-17T17:40:56+08:00 dispersion fixed_uniform p50 C
+2026-11-17T17:40:58+08:00 dispersion fixed_uniform p50 V
+2026-11-17T17:40:59+08:00 dispersion fixed_uniform p70 I
+2026-11-17T17:41:01+08:00 dispersion fixed_uniform p70 C
+2026-11-17T17:41:02+08:00 dispersion fixed_uniform p70 V
+2026-11-17T17:41:04+08:00 dispersion variable_30min_p5_p15 p5_p15 I
+2026-11-17T17:41:05+08:00 dispersion variable_30min_p5_p15 p5_p15 C
+2026-11-17T17:41:07+08:00 dispersion variable_30min_p5_p15 p5_p15 V
+2026-11-17T17:41:08+08:00 dispersion variable_30min_p10_p20 p10_p20 I
+2026-11-17T17:41:10+08:00 dispersion variable_30min_p10_p20 p10_p20 C
+2026-11-17T17:41:11+08:00 dispersion variable_30min_p10_p20 p10_p20 V
+2026-11-17T17:41:13+08:00 dispersion variable_1h_p5_p15 p5_p15 I
+2026-11-17T17:41:14+08:00 dispersion variable_1h_p5_p15 p5_p15 C
+2026-11-17T17:41:16+08:00 dispersion variable_1h_p5_p15 p5_p15 V
+2026-11-17T17:41:18+08:00 dispersion variable_1h_p10_p20 p10_p20 I
+2026-11-17T17:41:19+08:00 dispersion variable_1h_p10_p20 p10_p20 C
+2026-11-17T17:41:20+08:00 dispersion variable_1h_p10_p20 p10_p20 V
+2026-11-17T17:41:22+08:00 dispersion variable_2h_p5_p15 p5_p15 I
+2026-11-17T17:41:23+08:00 dispersion variable_2h_p5_p15 p5_p15 C
+2026-11-17T17:41:25+08:00 dispersion variable_2h_p5_p15 p5_p15 V
+2026-11-17T17:41:27+08:00 dispersion variable_2h_p10_p20 p10_p20 I
+2026-11-17T17:41:28+08:00 dispersion variable_2h_p10_p20 p10_p20 C
+2026-11-17T17:41:29+08:00 dispersion variable_2h_p10_p20 p10_p20 V
+2026-11-17T17:41:31+08:00 dispersion variable_day_p5_p15 p5_p15 I
+2026-11-17T17:41:32+08:00 dispersion variable_day_p5_p15 p5_p15 C
+2026-11-17T17:41:34+08:00 dispersion variable_day_p5_p15 p5_p15 V
+2026-11-17T17:41:36+08:00 dispersion variable_day_p10_p20 p10_p20 I
+2026-11-17T17:41:37+08:00 dispersion variable_day_p10_p20 p10_p20 C
+2026-11-17T17:41:38+08:00 dispersion variable_day_p10_p20 p10_p20 V
+2026-11-17T17:41:40+08:00 dispersion variable_30min_p5_p35 p5_p35 I
+2026-11-17T17:41:42+08:00 dispersion variable_30min_p5_p35 p5_p35 C
+2026-11-17T17:41:43+08:00 dispersion variable_30min_p5_p35 p5_p35 V
+2026-11-17T17:41:45+08:00 dispersion variable_1h_p5_p35 p5_p35 I
+2026-11-17T17:41:46+08:00 dispersion variable_1h_p5_p35 p5_p35 C
+2026-11-17T17:41:47+08:00 dispersion variable_1h_p5_p35 p5_p35 V
+2026-11-17T17:41:49+08:00 dispersion variable_2h_p5_p35 p5_p35 I
+2026-11-17T17:41:51+08:00 dispersion variable_2h_p5_p35 p5_p35 C
+2026-11-17T17:41:52+08:00 dispersion variable_2h_p5_p35 p5_p35 V
+2026-11-17T17:41:54+08:00 dispersion variable_day_p5_p35 p5_p35 I
+2026-11-17T17:41:55+08:00 dispersion variable_day_p5_p35 p5_p35 C
+2026-11-17T17:41:57+08:00 dispersion variable_day_p5_p35 p5_p35 V
+2026-11-17T17:41:59+08:00 figure font=Noto Sans CJK SC
+2026-11-17T17:42:03+08:00 aggregate done files=72 bytes=5047201 max=tables/sampling/schedule_realized.csv

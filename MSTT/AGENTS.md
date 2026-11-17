@@ -182,7 +182,12 @@ TOD, and DOW concat. The backbone is again 128-d: value 32 + road 16 + TOD 8
 does not treat `g` as a physical quantity. Config:
 `configs/all_sp_c_state_aux_gate_d128_projected_all.json`. Experiment id
 `state_aux_gate_d128_projected_all`. Do not write it into a `separate_mlp`
-directory or resume an older checkpoint.
+directory or resume an older checkpoint. The same config is used for another
+published range by passing that dataset id and its own observation key.
+`p5_p15` reads `datasets/variable_<period>_p5_p15/.../window_data/p5_p15/.../all_sp_c.npz`
+and that dataset's `all_sp_c_normalization.json`. It does not reuse the
+`p10_p20` scaler, vehicle lists, or checkpoints. `run_all_sp_c_state_aux_gate.sh`
+still launches only the four `p10_p20` datasets.
 
 `projection_supervision` is `all` or `inflow_only`. Missing or `all` keeps
 original C: four-state final MAE + `projection_raw_loss_weight` * raw MAE +
