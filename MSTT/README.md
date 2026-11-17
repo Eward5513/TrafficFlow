@@ -261,6 +261,63 @@ result directory then uses that dataset id and the `p5_p15` observation key,
 so it does not overwrite a `p10_p20` run. Each frequency keeps its own
 `all_sp_c_normalization.json`. Do not load a `p10_p20` checkpoint into it.
 
+The four `p5_p15` frequencies finished on 2026-11-17. Each ran 100 epochs
+with no early stop. The checkpoint is the epoch with the smallest mean
+validation inflow MAE over seeds 42–46. The test metric is projected inflow
+MAE on those same seeds. The standard deviation is the sample standard
+deviation (`ddof=1`) across the five observation samples. The baseline is
+`separate_value_mlp_projected` on the same frequencies.
+
+| frequency | baseline | aux gate | delta |
+| --- | ---: | ---: | ---: |
+| 30 min | 2.527 ± 0.004 | 2.472 ± 0.010 | -0.055 |
+| 1 h | 2.540 ± 0.014 | 2.508 ± 0.011 | -0.032 |
+| 2 h | 2.494 ± 0.005 | 2.456 ± 0.002 | -0.038 |
+| day | 2.505 ± 0.008 | 2.545 ± 0.010 | +0.040 |
+
+The equal-weight mean of the four frequencies is 2.495 for the gate and
+2.517 for the baseline, a difference of -0.021. Best epochs are 75, 74, 74,
+and 53. Run ids are `20261117T144759_1e0955e2`,
+`20261117T144759_4361df93`, `20261117T144759_12c97223`, and
+`20261117T144759_c9a19f09`. Per-state metrics are in
+[TRAINING_RESULTS.md](TRAINING_RESULTS.md).
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all_sp_c__out_all/p5_p15/state_aux_gate_d128_projected_all/seed_42/<run_id>/
+```
+
+## No conservation projection
+
+`separate_value_mlp_no_conservation` keeps the four-channel
+`separate_mlp` backbone of `separate_value_mlp_projected` and sets
+`conservation_mode=none`. The head output is the prediction. The run starts
+from scratch on `all.npz` for the four `p5_p15` frequencies, uses 100 epochs
+with no early stop, and selects the checkpoint by the mean validation inflow
+MAE over seeds 42–46. At N=1406 the network has 1,310,460 parameters.
+Experiment id `separate_value_mlp_no_conservation`.
+
+The comparison below is test inflow MAE. The projected column is
+`separate_value_mlp_projected` on the same frequencies. The conservation
+column is the conservation MAE of the unprojected prediction.
+
+| frequency | projected | no projection | delta | conservation MAE |
+| --- | ---: | ---: | ---: | ---: |
+| 30 min | 2.527 ± 0.004 | 2.564 ± 0.004 | +0.037 | 0.048 |
+| 1 h | 2.540 ± 0.014 | 2.601 ± 0.011 | +0.061 | 0.050 |
+| 2 h | 2.494 ± 0.005 | 2.534 ± 0.006 | +0.039 | 0.073 |
+| day | 2.505 ± 0.008 | 2.499 ± 0.011 | -0.006 | 0.077 |
+
+The equal-weight mean is 2.549 without projection and 2.517 after projection,
+a difference of +0.033. Best epochs are 79, 78, 66, and 41. Run ids are
+`20261117T162427_a874f7d7`, `20261117T162427_48a72854`,
+`20261117T162427_bda49c12`, and `20261117T162427_fe1929a9`.
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all__out_all/p5_p15/separate_value_mlp_no_conservation/seed_42/<run_id>/
+```
+
 ## Independent state TSFs
 
 `backbone_mode=state_independent` keeps the four-state `all` windows and
@@ -463,10 +520,12 @@ The same command with `variable_1h_p5_p15`, `variable_2h_p5_p15`, or
 `p5_p15` and input `all.npz`, and all four have finished. Do not resume the
 Node16 `flatten_mlp` checkpoint into this head.
 
-The auxiliary-gate configuration is unchanged. Its four finished runs use
-`all_sp_c.npz` and `all_sp_c_state_aux_gate_d128_projected_all.json` on
-`variable_30min_p10_p20`, `variable_1h_p10_p20`, `variable_2h_p10_p20`, and
-`variable_day_p10_p20`, with observation key `p10_p20` and task `AllSpC2All`.
+The auxiliary-gate configuration is unchanged. Its finished runs use
+`all_sp_c.npz` and `all_sp_c_state_aux_gate_d128_projected_all.json`.
+The `p10_p20` runs cover `variable_30min_p10_p20`, `variable_1h_p10_p20`,
+`variable_2h_p10_p20`, and `variable_day_p10_p20`. The `p5_p15` runs cover
+`variable_30min_p5_p15`, `variable_1h_p5_p15`, `variable_2h_p5_p15`, and
+`variable_day_p5_p15`. Task is `AllSpC2All`.
 
 ```bash
 python MSTT/tests/test_state_context_sharing.py
@@ -482,12 +541,14 @@ six-channel `separate_mlp_d144_projected_all`, and
 `state_aux_gate_d128_projected_all`, live under
 `training_results_3s/datasets/variable_<period>_p10_p20/`. On `p5_p15`, the
 finished runs under `training_results_3s/datasets/variable_<period>_p5_p15/`
-are `separate_value_mlp_projected`, `shared_tsf_mlp_projected`,
+are `separate_value_mlp_projected`, `separate_value_mlp_no_conservation`,
+`shared_tsf_mlp_projected`,
 `state_independent_tsf_mlp_projected`,
 `state_independent_full_context_shared_tsf_mlp_projected`,
 `state_independent_full_context_shared_node16_tsf_mlp_projected`,
-`state_independent_full_context_independent_node16_tsf_mlp_projected`, and
-`state_independent_full_context_shared_node16_tsf_token_transformer_projected`.
+`state_independent_full_context_independent_node16_tsf_mlp_projected`,
+`state_independent_full_context_shared_node16_tsf_token_transformer_projected`,
+and `state_aux_gate_d128_projected_all`.
 The config and metrics for each completed run are in
 [TRAINING_RESULTS.md](TRAINING_RESULTS.md). This tree no longer launches the
 deleted ablation scripts.
