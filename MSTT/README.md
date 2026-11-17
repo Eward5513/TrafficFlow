@@ -425,7 +425,8 @@ The independent node-16 config is
 with experiment id
 `state_independent_full_context_independent_node16_tsf_mlp_projected`.
 Results use the same canonical directory with those experiment ids and
-`p5_p15`. Do not resume a road-width-4 checkpoint into either run.
+`p5_p15`. The four `p5_p15` frequencies of both node-16 configs have finished.
+Do not resume a road-width-4 checkpoint into either run.
 
 ## 48-token state fusion
 
@@ -453,10 +454,10 @@ python MSTT/train.py \
 
 The same command with `variable_1h_p5_p15`, `variable_2h_p5_p15`, or
 `variable_day_p5_p15` reads that frequency. All four use observation key
-`p5_p15` and input `all.npz`. Do not resume the Node16 `flatten_mlp`
-checkpoint into this head.
+`p5_p15` and input `all.npz`, and all four have finished. Do not resume the
+Node16 `flatten_mlp` checkpoint into this head.
 
-The auxiliary-gate configuration is unchanged. Its four queued runs use
+The auxiliary-gate configuration is unchanged. Its four finished runs use
 `all_sp_c.npz` and `all_sp_c_state_aux_gate_d128_projected_all.json` on
 `variable_30min_p10_p20`, `variable_1h_p10_p20`, `variable_2h_p10_p20`, and
 `variable_day_p10_p20`, with observation key `p10_p20` and task `AllSpC2All`.
@@ -470,14 +471,17 @@ python MSTT/tests/test_state_token_transformer.py
 
 Completed ablations, All2I, All2All, and conservation runs now live under
 `training_results_3s/datasets/legacy_unknown/physical_legacy_unknown/MSTT/`.
-Finished `p10_p20` runs, including four-channel `separate_value_mlp_projected`
-and six-channel `separate_mlp_d144_projected_all`, live under
+Finished `p10_p20` runs, including four-channel `separate_value_mlp_projected`,
+six-channel `separate_mlp_d144_projected_all`, and
+`state_aux_gate_d128_projected_all`, live under
 `training_results_3s/datasets/variable_<period>_p10_p20/`. On `p5_p15`, the
 finished runs under `training_results_3s/datasets/variable_<period>_p5_p15/`
 are `separate_value_mlp_projected`, `shared_tsf_mlp_projected`,
 `state_independent_tsf_mlp_projected`,
-`state_independent_full_context_shared_tsf_mlp_projected`, and
-`state_independent_full_context_shared_node16_tsf_mlp_projected`. The config and
-metrics for each completed run are in
+`state_independent_full_context_shared_tsf_mlp_projected`,
+`state_independent_full_context_shared_node16_tsf_mlp_projected`,
+`state_independent_full_context_independent_node16_tsf_mlp_projected`, and
+`state_independent_full_context_shared_node16_tsf_token_transformer_projected`.
+The config and metrics for each completed run are in
 [TRAINING_RESULTS.md](TRAINING_RESULTS.md). This tree no longer launches the
 deleted ablation scripts.

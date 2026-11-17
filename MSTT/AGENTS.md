@@ -136,8 +136,8 @@ branch. `shared` is legal only for `backbone_mode=state_independent` with
   5,613,416, a gap of `3 × (1406×16 + 288×8 + 7×8 + 12×1406×64) = 3,313,992`.
 
 `head_type=state_token_transformer` keeps that shared Node16 D backbone and
-replaces only the prediction head. This is the selected implementation, not a
-measured result. Four private value MLPs and four private TSF blocks stay in
+replaces only the prediction head. The four finished `p5_p15` runs are in
+`TRAINING_RESULTS.md`. Four private value MLPs and four private TSF blocks stay in
 place. TSF attention remains `attention_head_dim=24` and `ffn_hidden_dim=176`.
 The concatenated backbone hidden state stays `[B, 12, N, 416]`. Each branch is
 projected by its own `Linear(104, 128)`. A learned state id `[4, 128]` and a
@@ -156,7 +156,7 @@ N=1406 the model has 1,849,280 parameters. Config:
 Experiment id
 `state_independent_full_context_shared_node16_tsf_token_transformer_projected`.
 Do not load it from a `flatten_mlp` checkpoint, and do not set backbone
-`d_model` to 128. The queued runs read `all.npz` for `variable_30min_p5_p15`,
+`d_model` to 128. The finished runs read `all.npz` for `variable_30min_p5_p15`,
 `variable_1h_p5_p15`, `variable_2h_p5_p15`, and `variable_day_p5_p15`.
 
 `configs/experiment_shared_tsf_mlp_projected.json` is the one-TSF control.
