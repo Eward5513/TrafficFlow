@@ -156,6 +156,7 @@ MODEL_DEFAULTS: dict[str, Any] = {
     "fusion_ffn_hidden_dim": 176,
     "fusion_chunk_size": None,
     "fusion_checkpoint": False,
+    "temporal_aux_enabled": False,
 }
 
 # Meaning of keys that older run directories never stored: v0.1 predates
@@ -189,6 +190,8 @@ LEGACY_DEFAULTS: dict[str, Any] = {
     "fusion_ffn_hidden_dim": 176,
     "fusion_chunk_size": None,
     "fusion_checkpoint": False,
+    # Checkpoints written before the temporal auxiliary head did not have one.
+    "temporal_aux_enabled": False,
 }
 
 TRAIN_DEFAULTS: dict[str, Any] = {
@@ -197,6 +200,9 @@ TRAIN_DEFAULTS: dict[str, Any] = {
     "projection_consistency_weight": 0.0,
     # "all" is original C. "inflow_only" supervises projected inflow plus the raw residual.
     "projection_supervision": "all",
+    # Inactive unless temporal_aux_enabled. The first experiment uses the first 11 steps at weight 0.5.
+    "temporal_aux_weight": 0.5,
+    "temporal_aux_scope": "history_except_last",
     "seed": 42,
     "device": "auto",
     "batch_size": 16,
@@ -286,6 +292,7 @@ _CHOICES = {
     "ffn_placement": ("after_spatial",),
     "conservation_mode": ("none", "soft", "projected"),
     "projection_supervision": ("all", "inflow_only"),
+    "temporal_aux_scope": ("history_except_last",),
     "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
     "head_type": ("flatten", "last", "flatten_mlp", "state_token_transformer"),
@@ -392,6 +399,14 @@ def validate_config(config: Mapping[str, Any]) -> None:
             raise ValueError(
                 "projection_supervision=inflow_only does not add raw MAE; set projection_raw_loss_weight to 0"
             )
+    aux_weight = float(config.get("temporal_aux_weight", TRAIN_DEFAULTS["temporal_aux_weight"]))
+    if not math.isfinite(aux_weight) or aux_weight < 0:
+        raise ValueError("temporal_aux_weight must be finite and non-negative")
+    aux_scope = str(config.get("temporal_aux_scope", TRAIN_DEFAULTS["temporal_aux_scope"]))
+    if aux_scope not in _CHOICES["temporal_aux_scope"]:
+        raise ValueError(f"temporal_aux_scope={aux_scope!r} not in {_CHOICES['temporal_aux_scope']}")
+    if bool(config.get("temporal_aux_enabled", False)) and int(config["input_window"]) != 12:
+        raise ValueError("temporal_aux_enabled requires input_window=12")
     if str(config["target_mode"]) != "last-observed-step":
         raise ValueError("MSTT reconstructs the last observed slot; target_mode must be last-observed-step")
     backbone = str(config.get("backbone_mode", "shared"))
@@ -478,6 +493,19 @@ def with_legacy_defaults(saved: Mapping[str, Any]) -> dict[str, Any]:
 
 
 _CONSERVATION_TASKS = frozenset({"All2All", "AllSpC2All"})
+
+
+def validate_temporal_aux_task(config: Mapping[str, Any], task: TaskSpec) -> None:
+    """The auxiliary head supervises four states. It stays off unless the config asks for it."""
+    if not bool(config.get("temporal_aux_enabled", False)):
+        return
+    if task.output_channels != STATE_CHANNELS:
+        raise ValueError(
+            "temporal_aux_enabled requires output channels "
+            f"{list(STATE_CHANNELS)} in that order, got task {task.name} {list(task.output_channels)}"
+        )
+    if int(config.get("input_window", 0)) != 12:
+        raise ValueError("temporal_aux_enabled requires input_window=12")
 
 
 def validate_conservation_task(config: Mapping[str, Any], task: TaskSpec) -> None:
@@ -629,6 +657,16 @@ def conservation_settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "conservation_mode", "conservation_lambda", "projection_raw_loss_weight",
         "projection_consistency_weight", "projection_supervision", "projection_mlp_hidden_dim",
     )}
+
+
+def temporal_aux_settings(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Auxiliary-loss identity. A checkpoint that predates the switch is recorded as off."""
+    defaults = default_config()
+    return {
+        "temporal_aux_enabled": bool(config.get("temporal_aux_enabled", defaults["temporal_aux_enabled"])),
+        "temporal_aux_weight": float(config.get("temporal_aux_weight", defaults["temporal_aux_weight"])),
+        "temporal_aux_scope": str(config.get("temporal_aux_scope", defaults["temporal_aux_scope"])),
+    }
 
 
 def conservation_output_root(config: Mapping[str, Any], root: Path, *, explicit: bool = False) -> Path:

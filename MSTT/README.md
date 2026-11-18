@@ -318,6 +318,69 @@ training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
   in_all__out_all/p5_p15/separate_value_mlp_no_conservation/seed_42/<run_id>/
 ```
 
+## Temporal auxiliary loss on the first 11 steps
+
+`temporal_aux_enabled` adds one `Linear(d_model, 4)` on the encoder hidden
+state. The same hidden state still feeds the flatten head and the conservation
+projection. The auxiliary head is not fused back into the last-step prediction.
+It is created after the existing modules, so a disabled model keeps the old
+parameter set and the same initialization stream. An old checkpoint that omits
+the switch loads with it off.
+
+The training loss adds `temporal_aux_weight` times the raw-scale MAE of
+auxiliary steps 0..10. Step 11 is still produced and is not in that term.
+The last-step loss, the projection, and checkpoint selection stay on the
+original last-step inflow MAE over seeds 42–46. Only the training split reads
+`y_seq_raw` from `shared/sequence_targets_12step/train/<date>.npz`, sliced as
+`full_raw[window_start_slot:window_start_slot+12]`. Validation and test stay
+on the last step.
+
+`configs/experiment_temporal_aux_history11_projected.json` is the four-channel
+`separate_mlp` projected backbone with weight 0.5 and scope
+`history_except_last`. Experiment id
+`separate_value_mlp_temporal_aux11_l05_projected`. At N=1406 this adds 516
+parameters, 1,315,364 in total. The four `p5_p15` frequencies are
+
+```text
+variable_30min_p5_p15
+variable_1h_p5_p15
+variable_2h_p5_p15
+variable_day_p5_p15
+```
+
+```bash
+python MSTT/train.py \
+  --config MSTT/configs/experiment_temporal_aux_history11_projected.json \
+  --task All2All --penetration p5_p15 \
+  --dataset-id variable_30min_p5_p15 --device cuda:0
+```
+
+The four `p5_p15` frequencies finished on 2026-11-18. Each ran 100 epochs
+with no early stop. The checkpoint is the epoch with the smallest mean
+validation inflow MAE over seeds 42–46. The test metric is projected inflow
+MAE on those same seeds. The standard deviation is the sample standard
+deviation (`ddof=1`) across the five observation samples. The baseline is
+`separate_value_mlp_projected` on the same frequencies.
+
+| frequency | projected | temporal aux | delta |
+| --- | ---: | ---: | ---: |
+| 30 min | 2.527 ± 0.004 | 2.536 ± 0.006 | +0.009 |
+| 1 h | 2.540 ± 0.014 | 2.574 ± 0.010 | +0.034 |
+| 2 h | 2.494 ± 0.005 | 2.450 ± 0.006 | -0.044 |
+| day | 2.505 ± 0.008 | 2.454 ± 0.008 | -0.051 |
+
+The equal-weight mean of the four frequencies is 2.504 for the auxiliary loss
+and 2.517 for the projected baseline, a difference of -0.013. Best epochs are
+72, 79, 60, and 68. Run ids are `20261117T233333_ca05b470`,
+`20261117T233335_5fd11716`, `20261117T233335_60ce6880`, and
+`20261117T233335_ccca1e69`. Per-state metrics are in
+[TRAINING_RESULTS.md](TRAINING_RESULTS.md).
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all__out_all/p5_p15/separate_value_mlp_temporal_aux11_l05_projected/seed_42/<run_id>/
+```
+
 ## Independent state TSFs
 
 `backbone_mode=state_independent` keeps the four-state `all` windows and
@@ -542,6 +605,7 @@ six-channel `separate_mlp_d144_projected_all`, and
 `training_results_3s/datasets/variable_<period>_p10_p20/`. On `p5_p15`, the
 finished runs under `training_results_3s/datasets/variable_<period>_p5_p15/`
 are `separate_value_mlp_projected`, `separate_value_mlp_no_conservation`,
+`separate_value_mlp_temporal_aux11_l05_projected`,
 `shared_tsf_mlp_projected`,
 `state_independent_tsf_mlp_projected`,
 `state_independent_full_context_shared_tsf_mlp_projected`,

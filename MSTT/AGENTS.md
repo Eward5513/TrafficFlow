@@ -189,6 +189,19 @@ and that dataset's `all_sp_c_normalization.json`. It does not reuse the
 `p10_p20` scaler, vehicle lists, or checkpoints. `run_all_sp_c_state_aux_gate.sh`
 still launches only the four `p10_p20` datasets.
 
+`temporal_aux_enabled` defaults to false and adds no parameters. When true, one
+shared `Linear(d_model, 4)` reads the encoder hidden state after the existing
+modules are constructed. Training adds `temporal_aux_weight` times the
+raw-scale MAE of steps 0..10 (`temporal_aux_scope=history_except_last`). The
+12th auxiliary step is not in that loss and is not fused into the last-step
+head. The training split also returns `y_seq_raw [12, N, 4]` from
+`shared/sequence_targets_12step`. Validation, test, and checkpoint selection
+stay on the last-step inflow MAE. A checkpoint that omits the switch loads as
+disabled. Changing the weight or scope does not resume an older auxiliary run.
+The p5_p15 config is
+`configs/experiment_temporal_aux_history11_projected.json`, experiment id
+`separate_value_mlp_temporal_aux11_l05_projected`, weight 0.5.
+
 `projection_supervision` is `all` or `inflow_only`. Missing or `all` keeps
 original C: four-state final MAE + `projection_raw_loss_weight` * raw MAE +
 `projection_consistency_weight` * pre-projection conservation MAE.

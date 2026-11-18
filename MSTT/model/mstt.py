@@ -94,6 +94,8 @@ class MSTTConfig:
     fusion_ffn_hidden_dim: int = 176
     fusion_chunk_size: int | None = None
     fusion_checkpoint: bool = False
+    # Off by default so an older checkpoint has no extra parameters and consumes no extra RNG.
+    temporal_aux_enabled: bool = False
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any], **overrides: Any) -> "MSTTConfig":
@@ -459,6 +461,12 @@ class MSTT(nn.Module):
             self.projection = ConservationProjection(
                 config.d_model, config.projection_mlp_hidden_dim, target_mean, target_std,
             )
+        # After every existing module, so the same seed keeps the main-path initialization.
+        self.temporal_aux_head = None
+        if bool(config.temporal_aux_enabled):
+            if int(config.out_channels) != 4 or int(config.input_window) != 12:
+                raise ValueError("temporal_aux_enabled requires 12 input steps and 4 output states")
+            self.temporal_aux_head = nn.Linear(int(config.d_model), 4)
 
     def forward(
         self,
@@ -473,9 +481,14 @@ class MSTT(nn.Module):
     def forward_with_aux(self, x, time_of_day=None, day_of_week=None) -> dict[str, torch.Tensor]:
         hidden = self._encode(x, time_of_day, day_of_week)
         raw = self.head(hidden)
+        temporal_aux = None if self.temporal_aux_head is None else self.temporal_aux_head(hidden)
         if self.projection is None:
-            return {"raw_pred": raw, "final_pred": raw}
-        return self.projection(hidden, raw)
+            outputs = {"raw_pred": raw, "final_pred": raw}
+        else:
+            outputs = self.projection(hidden, raw)
+        if temporal_aux is not None:
+            outputs["temporal_aux_pred"] = temporal_aux
+        return outputs
 
     def _encode(self, x, time_of_day=None, day_of_week=None) -> torch.Tensor:
         if x.ndim != 4:
@@ -550,6 +563,18 @@ class MSTT(nn.Module):
                 "input_dim": int(first.in_features),
                 "hidden_dim": int(first.out_features),
                 "output_dim": int(last.out_features),
+            }
+        if self.temporal_aux_head is None:
+            summary["temporal_aux_head"] = {"enabled": False}
+        else:
+            layer = self.temporal_aux_head
+            summary["temporal_aux_head"] = {
+                "enabled": True,
+                "in_features": int(layer.in_features),
+                "out_features": int(layer.out_features),
+                "shared_across_time_and_roads": True,
+                "parameters": int(layer.weight.numel() + layer.bias.numel()),
+                "supervised_steps": "0..10",
             }
         if self.config.backbone_mode == "state_independent":
             branches = [branch.summary() for branch in self.branches]

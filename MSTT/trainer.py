@@ -40,6 +40,8 @@ from MSTT.config import (
     model_config_from_saved,
     conservation_settings,
     conservation_output_root,
+    temporal_aux_settings,
+    validate_temporal_aux_task,
 )
 from MSTT.data.dataset import (
     build_loader,
@@ -52,7 +54,7 @@ from MSTT.data.dataset import (
 from MSTT.data.graph import load_r_graph
 from MSTT.model import MSTT, MSTTConfig
 from MSTT.utils.device import resolve_device
-from MSTT.utils.losses import RawScaleLoss, conservation_objective, objective_description
+from MSTT.utils.losses import RawScaleLoss, conservation_objective, objective_description, temporal_aux_terms
 from MSTT.utils.conservation_evaluation import collect_conservation_predictions, save_mstt_predictions
 from MSTT.utils.metrics import CORE, flat_core, raw_metrics
 from reimplementation.common.data.r_only_npz_dataset import SPLITS
@@ -75,7 +77,9 @@ def selects_inflow_mae(task: TaskSpec) -> bool:
     return task.input_type in {"all", "all_sp_c"} and "inflow" in task.output_channels
 
 
-BATCH_KEYS = ("x", "y", "y_raw", "day_index", "window_start_slot", "target_slot", "sample_index")
+BATCH_KEYS = (
+    "x", "y", "y_raw", "y_seq_raw", "day_index", "window_start_slot", "target_slot", "sample_index",
+)
 REQUIRED_OUTPUTS = ("best_checkpoint.pt", "last_checkpoint.pt", "training_history.json", "validation_sampling_metrics.json", "test_sampling_metrics.json")
 
 
@@ -142,6 +146,7 @@ def model_config(config: Mapping[str, Any], task: TaskSpec) -> MSTTConfig:
     validate_conservation_task(config, task)
     validate_backbone_task(config, task)
     validate_value_embedding_task(config, task)
+    validate_temporal_aux_task(config, task)
     d_model = int(config["d_model"])
     ffn_width = d_model
     if str(config.get("backbone_mode", "shared")) == "state_independent":
@@ -226,6 +231,10 @@ def assert_run_dir_matches(run_dir: Path, config: Mapping[str, Any], task: TaskS
         for key, value in conservation_settings(config).items():
             if conservation_settings(stored)[key] != value:
                 diff[key] = (conservation_settings(stored)[key], value)
+    for key, value in temporal_aux_settings(config).items():
+        stored_value = temporal_aux_settings(stored)[key]
+        if stored_value != value:
+            diff[key] = (stored_value, value)
     if diff:
         raise ReimplementationError(
             f"{run_dir} holds a run with a different config (stored, requested): {diff}; "
@@ -283,7 +292,14 @@ def predict_with_aux(model, batch, *, amp, device):
     tod, dow = time_features(batch, model.config.input_window, steps_per_day=model.config.steps_per_day)
     with autocast_context(device, amp):
         outputs = model.forward_with_aux(batch["x"], tod, dow)
-    return {key: value.float().unsqueeze(1) for key, value in outputs.items()}
+    packed = {}
+    for key, value in outputs.items():
+        value = value.float()
+        # The 12-step auxiliary head is already [B, 12, N, 4]. Every older field gains the step axis.
+        if key != "temporal_aux_pred":
+            value = value.unsqueeze(1)
+        packed[key] = value
+    return packed
 
 
 def assert_conservation_checkpoint(payload, config, *, normalization_sha256=None):
@@ -310,6 +326,47 @@ def assert_conservation_checkpoint(payload, config, *, normalization_sha256=None
     if saved_value_mode != requested_value_mode:
         raise ReimplementationError(
             f"checkpoint value_embedding_mode={saved_value_mode} != requested {requested_value_mode}"
+        )
+
+
+def _audit_identity(audit: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(audit, Mapping):
+        return {}
+    keys = (
+        "full_raw_content_sha256",
+        "file_content_sha256",
+        "physical_definition_version",
+        "node_order_sha256",
+        "target_mean",
+        "target_std",
+        "slice",
+        "train_days",
+    )
+    return {key: audit.get(key) for key in keys}
+
+
+def assert_temporal_aux_checkpoint(payload: Mapping[str, Any], config: Mapping[str, Any], audit: Mapping[str, Any] | None) -> None:
+    """Refuse a resume whose auxiliary weight, scope, or sequence labels differ."""
+    saved_config = payload.get("config") if isinstance(payload.get("config"), Mapping) else {}
+    saved = temporal_aux_settings(saved_config)
+    requested = temporal_aux_settings(config)
+    if saved != requested:
+        raise ReimplementationError(
+            f"checkpoint temporal aux settings {saved} != requested {requested}"
+        )
+    if not requested["temporal_aux_enabled"]:
+        return
+    saved_audit = payload.get("temporal_aux_label_audit")
+    if not isinstance(saved_audit, Mapping):
+        saved_audit = saved_config.get("temporal_aux_label_audit") if isinstance(saved_config, Mapping) else None
+    if not isinstance(saved_audit, Mapping):
+        raise ReimplementationError("temporal aux checkpoint has no sequence-label audit")
+    current = _audit_identity(audit)
+    previous = _audit_identity(saved_audit)
+    if current != previous:
+        raise ReimplementationError(
+            "temporal aux sequence labels differ from the checkpoint audit; "
+            f"stored={previous} requested={current}"
         )
 
 
@@ -363,6 +420,7 @@ class TaskRun:
         validate_conservation_task(config, task_spec(task))
         validate_backbone_task(config, task_spec(task))
         validate_value_embedding_task(config, task_spec(task))
+        validate_temporal_aux_task(config, task_spec(task))
         self.config = dict(config)
         self.config["output_root"] = Path(output_root).as_posix()
         self.task = task_spec(task)
@@ -396,6 +454,13 @@ class TaskRun:
             sample_counts=self.package["sample_counts"],
             splits=tuple(splits),
         )
+        self.temporal_aux_audit = None
+        if bool(config.get("temporal_aux_enabled", False)):
+            from MSTT.data.temporal_aux import attach_temporal_history_labels
+
+            wrapped, audit = attach_temporal_history_labels(self.datasets["train"])
+            self.datasets["train"] = wrapped
+            self.temporal_aux_audit = audit
         self.loaders = {
             split: build_loader(
                 dataset,
@@ -534,24 +599,43 @@ def train_step(
 ) -> tuple[float, float]:
     """One optimizer step; returns (loss, pre-clip grad norm or 0.0 without clipping)."""
     batch = move_batch(batch, run.device)
-    if run.config.get("conservation_mode", "none") == "none":
+    aux_on = bool(run.config.get("temporal_aux_enabled", False))
+    mode = run.config.get("conservation_mode", "none")
+    outputs = None
+    if mode == "none" and not aux_on:
         prediction = predict(model, batch, amp=amp, device=run.device)
         loss = run.criterion(prediction, batch["y_raw"])
         supervised_name = "supervised_mae" if run.criterion.describe() == "mae_raw" else "supervised_loss"
         parts = {supervised_name: loss, "total_loss": loss}
     else:
         outputs = predict_with_aux(model, batch, amp=amp, device=run.device)
-        loss, parts = conservation_objective(run.criterion, outputs, batch["y_raw"], run.config)
-        if (str(run.config.get("conservation_mode", "none")) == "projected"
-                and str(run.config.get("projection_supervision", "all")) == "inflow_only"):
-            required = ("inflow_final_mae", "raw_conservation_mae", "total_loss")
-            missing = [key for key in required if key not in parts]
-            unexpected = [key for key in ("supervised_mae", "raw_mae", "conservation_loss") if key in parts]
-            if missing or unexpected or loss is not parts["total_loss"]:
-                raise ReimplementationError(
-                    "inflow_only backward must use inflow_final_mae + raw_conservation_mae "
-                    f"(missing={missing}, unexpected={unexpected})"
-                )
+        if mode == "none":
+            loss = run.criterion(outputs["final_pred"], batch["y_raw"])
+            supervised_name = "supervised_mae" if run.criterion.describe() == "mae_raw" else "supervised_loss"
+            parts = {supervised_name: loss, "total_loss": loss}
+        else:
+            loss, parts = conservation_objective(run.criterion, outputs, batch["y_raw"], run.config)
+            if mode == "projected" and str(run.config.get("projection_supervision", "all")) == "inflow_only":
+                required = ("inflow_final_mae", "raw_conservation_mae", "total_loss")
+                missing = [key for key in required if key not in parts]
+                unexpected = [key for key in ("supervised_mae", "raw_mae", "conservation_loss") if key in parts]
+                if missing or unexpected or loss is not parts["total_loss"]:
+                    raise ReimplementationError(
+                        "inflow_only backward must use inflow_final_mae + raw_conservation_mae "
+                        f"(missing={missing}, unexpected={unexpected})"
+                    )
+    if aux_on:
+        if "temporal_aux_pred" not in outputs:
+            raise ReimplementationError("temporal_aux_enabled but the model returned no temporal_aux_pred")
+        if "y_seq_raw" not in batch:
+            raise ReimplementationError("temporal aux training requires y_seq_raw on the training batch")
+        aux, weighted = temporal_aux_terms(run.criterion, outputs, batch["y_seq_raw"], run.config)
+        loss = loss + weighted
+        parts = dict(parts)
+        parts["final_mae"] = parts.get("supervised_mae", parts.get("inflow_final_mae"))
+        parts["temporal_aux_mae"] = aux
+        parts["weighted_temporal_aux_loss"] = weighted
+        parts["total_loss"] = loss
     if not torch.isfinite(loss):
         raise ReimplementationError(f"non-finite training loss at epoch {epoch}: {float(loss)}")
     optimizer.zero_grad(set_to_none=True)
@@ -600,6 +684,7 @@ def train_task(
     validate_conservation_task(config, task_spec(task))
     validate_backbone_task(config, task_spec(task))
     validate_value_embedding_task(config, task_spec(task))
+    validate_temporal_aux_task(config, task_spec(task))
     output_root = conservation_output_root(config, output_root)
     planned_dir = run_directory(output_root, rate, task_spec(task).name, int(config["seed"]), config)
     from reimplementation.common.data.sampling_seeds import protect_historical_results
@@ -639,7 +724,10 @@ def train_task(
         "model_config": run.model_config.to_dict(),
         **model_reports(model),
         "smoke": smoke,
+        **temporal_aux_settings(cfg),
     }
+    if run.temporal_aux_audit is not None:
+        saved_config["temporal_aux_label_audit"] = run.temporal_aux_audit
     optimizer = build_optimizer(model, cfg)
     scheduler = build_scheduler(optimizer, cfg)
     amp = str(cfg["amp"])
@@ -653,6 +741,7 @@ def train_task(
     if resume_path is not None:
         payload = load_checkpoint(Path(resume_path), map_location="cpu")
         assert_conservation_checkpoint(payload, cfg, normalization_sha256=run.package["state_normalization_sha256"])
+        assert_temporal_aux_checkpoint(payload, cfg, run.temporal_aux_audit)
         assert_checkpoint_compatible(
             payload,
             penetration_rate=run.rate,
@@ -712,6 +801,7 @@ def train_task(
             "normalization_sha256": run.package["state_normalization_sha256"],
             "physical_definition_version": cfg.get("physical_definition_version"),
             "code_version": CODE_VERSION,
+            "temporal_aux_label_audit": run.temporal_aux_audit,
         }
 
     reset_peak_memory(run.device)
@@ -773,6 +863,12 @@ def train_task(
             _write_history(run_dir, history)
             logger.log({"stage": "epoch", "task": run.task.name, "rate": run.rate, **row})
             inflow_text = f" val_inflow={row['val_inflow_mae']:.5f}" if "val_inflow_mae" in row else ""
+            temporal_text = ""
+            if "train_temporal_aux_mae" in row and "train_total_loss" in row:
+                temporal_text = (
+                    f" temporal_aux_mae={row['train_temporal_aux_mae']:.5f}"
+                    f" total_loss={row['train_total_loss']:.5f}"
+                )
             aux_text = ""
             if "train_inflow_final_mae" in row and "train_raw_conservation_mae" in row and "train_total_loss" in row:
                 aux_text = (
@@ -782,7 +878,7 @@ def train_task(
                 )
             print(
                 f"[MSTT] {run.task.name} {run.rate} epoch={epoch} lr={lr:.2e} train={row['train_loss']:.5f} "
-                f"val_loss={row['val_loss']:.5f} val_mae={row['val_mae']:.5f}{inflow_text}{aux_text} "
+                f"val_loss={row['val_loss']:.5f} val_mae={row['val_mae']:.5f}{inflow_text}{temporal_text}{aux_text} "
                 f"{'*' if improved else ''} {row['epoch_total_seconds']:.1f}s",
                 flush=True,
             )
@@ -848,6 +944,8 @@ def train_task(
                 "amp": amp,
                 "batch_size": int(cfg["batch_size"]),
                 **conservation_settings(cfg),
+                **temporal_aux_settings(cfg),
+                "temporal_aux_label_audit": run.temporal_aux_audit,
                 "selection_prediction": "final",
                 "effective_selection_metric": (
                     "val_inflow_mae" if selects_inflow_mae(run.task)

@@ -122,14 +122,39 @@ def conservation_objective(criterion: RawScaleLoss, outputs, target_raw, config)
     return total, parts
 
 
+def temporal_aux_terms(criterion: RawScaleLoss, outputs, target_seq, config):
+    """Physical MAE of the auxiliary head on steps 0..10. The 12th step is not in this loss."""
+    if not bool(config.get("temporal_aux_enabled", False)):
+        raise ValueError("temporal_aux_terms requires temporal_aux_enabled")
+    scope = str(config.get("temporal_aux_scope", "history_except_last"))
+    if scope != "history_except_last":
+        raise ValueError(f"unsupported temporal_aux_scope {scope!r}")
+    prediction = outputs["temporal_aux_pred"]
+    target = target_seq
+    if prediction.ndim != 4 or target.ndim != 4 or prediction.shape != target.shape:
+        raise ValueError(
+            f"temporal aux prediction {tuple(prediction.shape)} != sequence target {tuple(target.shape)}"
+        )
+    if int(prediction.shape[1]) != 12:
+        raise ValueError(f"temporal aux prediction must have 12 steps, got {prediction.shape[1]}")
+    aux = criterion(prediction[:, :11], target[:, :11])
+    weight = float(config.get("temporal_aux_weight", 0.5))
+    weighted = aux * weight
+    return aux, weighted
+
+
 def objective_description(criterion: RawScaleLoss, config) -> str:
     mode = config.get("conservation_mode", "none")
     if mode == "soft":
-        return f"mae_raw + {float(config.get('conservation_lambda', .1)):g} * conservation_mae"
-    if mode == "projected" and str(config.get("projection_supervision", "all")) == "inflow_only":
-        return (f"inflow_final_mae + {float(config.get('projection_consistency_weight', 0.)):g}"
+        text = f"mae_raw + {float(config.get('conservation_lambda', .1)):g} * conservation_mae"
+    elif mode == "projected" and str(config.get("projection_supervision", "all")) == "inflow_only":
+        text = (f"inflow_final_mae + {float(config.get('projection_consistency_weight', 0.)):g}"
                 " * raw_conservation_mae")
-    if mode == "projected":
-        return (f"final_mae_raw + {float(config.get('projection_raw_loss_weight', .5)):g} * raw_mae_raw"
+    elif mode == "projected":
+        text = (f"final_mae_raw + {float(config.get('projection_raw_loss_weight', .5)):g} * raw_mae_raw"
                 f" + {float(config.get('projection_consistency_weight', 0.)):g} * raw_conservation_mae")
-    return criterion.describe()
+    else:
+        text = criterion.describe()
+    if bool(config.get("temporal_aux_enabled", False)):
+        text += f" + {float(config.get('temporal_aux_weight', 0.5)):g} * temporal_aux_mae[0:11]"
+    return text
