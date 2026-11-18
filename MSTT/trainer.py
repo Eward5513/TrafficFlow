@@ -41,6 +41,7 @@ from MSTT.config import (
     conservation_settings,
     conservation_output_root,
     temporal_aux_settings,
+    validate_history_fusion_task,
     validate_temporal_aux_task,
 )
 from MSTT.data.dataset import (
@@ -147,6 +148,7 @@ def model_config(config: Mapping[str, Any], task: TaskSpec) -> MSTTConfig:
     validate_backbone_task(config, task)
     validate_value_embedding_task(config, task)
     validate_temporal_aux_task(config, task)
+    validate_history_fusion_task(config, task)
     d_model = int(config["d_model"])
     ffn_width = d_model
     if str(config.get("backbone_mode", "shared")) == "state_independent":
@@ -295,7 +297,10 @@ def predict_with_aux(model, batch, *, amp, device):
     packed = {}
     for key, value in outputs.items():
         value = value.float()
-        # The 12-step auxiliary head is already [B, 12, N, 4]. Every older field gains the step axis.
+        # The 12-step auxiliary head is already [B, 12, N, 4]. raw_pred is the
+        # pre-projection normalized prediction, including the history residual
+        # when history fusion is on. final_pred is the projected prediction.
+        # Attention weights stay out of this dict. Every older field gains the step axis.
         if key != "temporal_aux_pred":
             value = value.unsqueeze(1)
         packed[key] = value
@@ -421,6 +426,7 @@ class TaskRun:
         validate_backbone_task(config, task_spec(task))
         validate_value_embedding_task(config, task_spec(task))
         validate_temporal_aux_task(config, task_spec(task))
+        validate_history_fusion_task(config, task_spec(task))
         self.config = dict(config)
         self.config["output_root"] = Path(output_root).as_posix()
         self.task = task_spec(task)
@@ -685,6 +691,7 @@ def train_task(
     validate_backbone_task(config, task_spec(task))
     validate_value_embedding_task(config, task_spec(task))
     validate_temporal_aux_task(config, task_spec(task))
+    validate_history_fusion_task(config, task_spec(task))
     output_root = conservation_output_root(config, output_root)
     planned_dir = run_directory(output_root, rate, task_spec(task).name, int(config["seed"]), config)
     from reimplementation.common.data.sampling_seeds import protect_historical_results

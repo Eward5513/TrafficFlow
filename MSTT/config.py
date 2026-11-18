@@ -157,6 +157,8 @@ MODEL_DEFAULTS: dict[str, Any] = {
     "fusion_chunk_size": None,
     "fusion_checkpoint": False,
     "temporal_aux_enabled": False,
+    # ``none`` keeps the auxiliary head out of the last-step prediction.
+    "history_fusion_mode": "none",
 }
 
 # Meaning of keys that older run directories never stored: v0.1 predates
@@ -192,6 +194,8 @@ LEGACY_DEFAULTS: dict[str, Any] = {
     "fusion_checkpoint": False,
     # Checkpoints written before the temporal auxiliary head did not have one.
     "temporal_aux_enabled": False,
+    # Checkpoints written before history fusion did not correct the last step with it.
+    "history_fusion_mode": "none",
 }
 
 TRAIN_DEFAULTS: dict[str, Any] = {
@@ -293,6 +297,7 @@ _CHOICES = {
     "conservation_mode": ("none", "soft", "projected"),
     "projection_supervision": ("all", "inflow_only"),
     "temporal_aux_scope": ("history_except_last",),
+    "history_fusion_mode": ("none", "gated_cross_attention"),
     "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
     "head_type": ("flatten", "last", "flatten_mlp", "state_token_transformer"),
@@ -407,6 +412,9 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError(f"temporal_aux_scope={aux_scope!r} not in {_CHOICES['temporal_aux_scope']}")
     if bool(config.get("temporal_aux_enabled", False)) and int(config["input_window"]) != 12:
         raise ValueError("temporal_aux_enabled requires input_window=12")
+    from MSTT.model.mstt import validate_history_fusion
+
+    validate_history_fusion(config)
     if str(config["target_mode"]) != "last-observed-step":
         raise ValueError("MSTT reconstructs the last observed slot; target_mode must be last-observed-step")
     backbone = str(config.get("backbone_mode", "shared"))
@@ -493,6 +501,20 @@ def with_legacy_defaults(saved: Mapping[str, Any]) -> dict[str, Any]:
 
 
 _CONSERVATION_TASKS = frozenset({"All2All", "AllSpC2All"})
+
+
+def validate_history_fusion_task(config: Mapping[str, Any], task: TaskSpec) -> None:
+    """The gated history path is a four-state last-step correction on top of the auxiliary head."""
+    from MSTT.model.mstt import validate_history_fusion
+
+    validate_history_fusion(config)
+    if str(config.get("history_fusion_mode", "none")) == "none":
+        return
+    if task.output_channels != STATE_CHANNELS:
+        raise ValueError(
+            "history_fusion_mode='gated_cross_attention' requires output channels "
+            f"{list(STATE_CHANNELS)} in that order, got task {task.name} {list(task.output_channels)}"
+        )
 
 
 def validate_temporal_aux_task(config: Mapping[str, Any], task: TaskSpec) -> None:
@@ -660,12 +682,13 @@ def conservation_settings(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def temporal_aux_settings(config: Mapping[str, Any]) -> dict[str, Any]:
-    """Auxiliary-loss identity. A checkpoint that predates the switch is recorded as off."""
+    """Auxiliary-loss identity. A checkpoint that predates either switch is recorded as off."""
     defaults = default_config()
     return {
         "temporal_aux_enabled": bool(config.get("temporal_aux_enabled", defaults["temporal_aux_enabled"])),
         "temporal_aux_weight": float(config.get("temporal_aux_weight", defaults["temporal_aux_weight"])),
         "temporal_aux_scope": str(config.get("temporal_aux_scope", defaults["temporal_aux_scope"])),
+        "history_fusion_mode": str(config.get("history_fusion_mode", defaults["history_fusion_mode"])),
     }
 
 

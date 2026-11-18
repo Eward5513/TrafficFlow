@@ -17,6 +17,7 @@ from MSTT.model.embedding import InputEmbedding, resolve_embedding_dims
 from MSTT.model.graph import SpatialGraph
 from MSTT.model.ffn import SwiGLU
 from MSTT.model.head import PredictionHead
+from MSTT.model.history_fusion import HistoryPredictionFusion
 from MSTT.model.joint_attention import JointSTAttention
 from MSTT.model.conservation import ConservationProjection
 from MSTT.model.state_branch import StateTSFBranch
@@ -96,6 +97,8 @@ class MSTTConfig:
     fusion_checkpoint: bool = False
     # Off by default so an older checkpoint has no extra parameters and consumes no extra RNG.
     temporal_aux_enabled: bool = False
+    # Off by default. Older auxiliary runs load as ``none`` and keep their parameter set.
+    history_fusion_mode: str = "none"
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any], **overrides: Any) -> "MSTTConfig":
@@ -198,6 +201,42 @@ def validate_independent_backbone(config: MSTTConfig | Mapping[str, Any]) -> Non
                 f"RoPE needs an even {label} head_dim on each state branch, got {head_dim} "
                 f"(branch d_model={branch_d}, heads={heads})"
             )
+
+
+def validate_history_fusion(config: MSTTConfig | Mapping[str, Any]) -> None:
+    """``gated_cross_attention`` reads the existing 11-step auxiliary predictions.
+
+    The widths inside ``HistoryPredictionFusion`` are fixed for this version,
+    so the encoder hidden size stays 128. ``none`` builds no extra parameters.
+    """
+    mode = str(_cfg_get(config, "history_fusion_mode", "none"))
+    if mode not in ("none", "gated_cross_attention"):
+        raise ValueError(
+            "history_fusion_mode must be 'none' or 'gated_cross_attention', "
+            f"got {mode!r}"
+        )
+    if mode == "none":
+        return
+    if not bool(_cfg_get(config, "temporal_aux_enabled", False)):
+        raise ValueError("history_fusion_mode='gated_cross_attention' requires temporal_aux_enabled")
+    window = _cfg_get(config, "input_window", None)
+    if window is None or int(window) != 12:
+        raise ValueError("history_fusion_mode='gated_cross_attention' requires input_window=12")
+    out_channels = _cfg_get(config, "out_channels", None)
+    if out_channels is not None and int(out_channels) != 4:
+        raise ValueError(
+            "history_fusion_mode='gated_cross_attention' requires 4 output states, "
+            f"got out_channels={out_channels}"
+        )
+    if str(_cfg_get(config, "backbone_mode", "shared")) != "shared":
+        raise ValueError("history_fusion_mode='gated_cross_attention' requires backbone_mode='shared'")
+    if str(_cfg_get(config, "head_type", "flatten")) != "flatten":
+        raise ValueError("history_fusion_mode='gated_cross_attention' requires head_type='flatten'")
+    if str(_cfg_get(config, "conservation_mode", "none")) != "projected":
+        raise ValueError("history_fusion_mode='gated_cross_attention' requires conservation_mode='projected'")
+    d_model = _cfg_get(config, "d_model", None)
+    if d_model is None or int(d_model) != 128:
+        raise ValueError("history_fusion_mode='gated_cross_attention' requires d_model=128")
 
 
 def validate_state_token_transformer(config: MSTTConfig | Mapping[str, Any]) -> None:
@@ -467,6 +506,13 @@ class MSTT(nn.Module):
             if int(config.out_channels) != 4 or int(config.input_window) != 12:
                 raise ValueError("temporal_aux_enabled requires 12 input steps and 4 output states")
             self.temporal_aux_head = nn.Linear(int(config.d_model), 4)
+        # After the auxiliary head, so a shared seed still matches every older parameter.
+        self.history_fusion = None
+        validate_history_fusion(config)
+        if str(config.history_fusion_mode) == "gated_cross_attention":
+            if self.temporal_aux_head is None or self.projection is None:
+                raise ValueError("history fusion requires the temporal auxiliary head and projected conservation")
+            self.history_fusion = HistoryPredictionFusion()
 
     def forward(
         self,
@@ -480,8 +526,15 @@ class MSTT(nn.Module):
 
     def forward_with_aux(self, x, time_of_day=None, day_of_week=None) -> dict[str, torch.Tensor]:
         hidden = self._encode(x, time_of_day, day_of_week)
-        raw = self.head(hidden)
+        base = self.head(hidden)
         temporal_aux = None if self.temporal_aux_head is None else self.temporal_aux_head(hidden)
+        raw = base
+        if self.history_fusion is not None:
+            if temporal_aux is None:
+                raise RuntimeError("history fusion requires temporal_aux_pred from this forward")
+            # Standardized history, earliest first. The 12th auxiliary step is not a key.
+            history = temporal_aux[:, :-1].permute(0, 2, 1, 3).contiguous()
+            raw = base + self.history_fusion(hidden[:, -1], history)
         if self.projection is None:
             outputs = {"raw_pred": raw, "final_pred": raw}
         else:
@@ -576,6 +629,10 @@ class MSTT(nn.Module):
                 "parameters": int(layer.weight.numel() + layer.bias.numel()),
                 "supervised_steps": "0..10",
             }
+        if self.history_fusion is None:
+            summary["history_fusion"] = {"enabled": False, "mode": "none", "parameters": 0}
+        else:
+            summary["history_fusion"] = self.history_fusion.describe()
         if self.config.backbone_mode == "state_independent":
             branches = [branch.summary() for branch in self.branches]
             embedding = summary["embedding"]

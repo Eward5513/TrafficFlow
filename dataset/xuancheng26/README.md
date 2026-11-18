@@ -326,7 +326,7 @@ python3 generate_mr_level_full_flow.py --training-root /data5/tzhang174/TrafficF
 python3 generate_mr_level_partial_flow.py --training-root /data5/tzhang174/TrafficFlow/xuancheng26/training_data_3s --workers 29 --skip-complete
 ```
 
-训练结果都在 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/`。`xuancheng26/training_results/` 已经不在数据盘上，不要重建。历史固定渗透率结果迁在 `datasets/legacy_unknown/physical_legacy_unknown/`。波动 10%–20% 这一轮用 `run_variable_baselines.py`，队列在 `training_results_3s/operations/variable_p10_p20_train42_eval5/`。已经完成的基线数字见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。
+训练结果都在 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/`。`xuancheng26/training_results/` 已经不在数据盘上，不要重建。历史固定渗透率结果迁在 `datasets/legacy_unknown/physical_legacy_unknown/`。波动 10%–20% 这一轮用 `run_variable_baselines.py`，队列在 `training_results_3s/operations/variable_p10_p20_train42_eval5/`。已经完成的基线数字见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。那里 I2I 和 A2I 的测试 MAE 是 inflow 单通道。A2A 的测试 MAE 是四个状态的算术平均；同一行的测试 Inflow MAE 来自该次运行 `test_sampling_metrics.json` 的 `inflow_mae`，是采样种子 42–46 的平均 ± 样本标准差。
 
 ```bash
 cd /home/tzhang174/TrafficFlow
@@ -380,4 +380,4 @@ training_results_3s/datasets/<dataset_id>/physical_<version>/<model>/
     seed_<model_seed>/<run_id>/
 ```
 
-固定渗透率的历史运行在 `dataset_id=legacy_unknown`、`physical_legacy_unknown`。已经跑完的 10%–20% 训练用 `physical_independent_fcd_v1`、观测标识 `p10_p20`、实验号 `variable_p10_p20_train42_eval5`。5%–15% 用同一物理版本、观测标识 `p5_p15`、实验号 `variable_p5_p15_train42_eval5`。5%–35% 只准备了数据和辅助输入，没有启动训练。完成结果的模型和指标见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。
+固定渗透率的历史运行在 `dataset_id=legacy_unknown`、`physical_legacy_unknown`。已经跑完的 10%–20% 训练用 `physical_independent_fcd_v1`、观测标识 `p10_p20`、实验号 `variable_p10_p20_train42_eval5`。5%–15% 用同一物理版本、观测标识 `p5_p15`、实验号 `variable_p5_p15_train42_eval5`。5%–35% 只准备了数据和辅助输入，没有启动训练。完成结果的模型和指标见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。A2A 行同时保留四状态总体测试 MAE，并单列 inflow 通道的测试 Inflow MAE。

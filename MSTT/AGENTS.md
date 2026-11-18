@@ -193,7 +193,8 @@ still launches only the four `p10_p20` datasets.
 shared `Linear(d_model, 4)` reads the encoder hidden state after the existing
 modules are constructed. Training adds `temporal_aux_weight` times the
 raw-scale MAE of steps 0..10 (`temporal_aux_scope=history_except_last`). The
-12th auxiliary step is not in that loss and is not fused into the last-step
+12th auxiliary step is not in that loss. `history_fusion_mode` defaults to
+`none`, and in that mode the auxiliary head is not fused into the last-step
 head. The training split also returns `y_seq_raw [12, N, 4]` from
 `shared/sequence_targets_12step`. Validation, test, and checkpoint selection
 stay on the last-step inflow MAE. A checkpoint that omits the switch loads as
@@ -201,6 +202,39 @@ disabled. Changing the weight or scope does not resume an older auxiliary run.
 The p5_p15 config is
 `configs/experiment_temporal_aux_history11_projected.json`, experiment id
 `separate_value_mlp_temporal_aux11_l05_projected`, weight 0.5.
+
+`history_fusion_mode=gated_cross_attention` is the follow-up on that auxiliary
+run. It requires `temporal_aux_enabled`, 12 steps, four output states,
+`backbone_mode=shared`, `head_type=flatten`, `conservation_mode=projected`,
+and `d_model=128`. The module is `HistoryPredictionFusion` in
+`model/history_fusion.py`, constructed after `temporal_aux_head`, so the same
+seed keeps the shared initialization. One forward still calls `_encode` and
+the auxiliary head once. `base` is the flatten head. `P [B, 12, N, 4]` is the
+auxiliary head in the standardized target scale. The fusion reads
+`h = H[:, -1]` and `P` steps 0..10, earliest first. Each history step is
+concatenated with a learned position row from `[11, 8]`, initialized normal
+with std 0.02. Q is `Linear(128, 64)(h)`. K and V are independent
+`Linear(12, 64)` maps of that token. Four heads of width 16 attend over the
+11 history steps of that road only (`softmax(QK^T / sqrt(16))`, dropout 0),
+and `Linear(64, 128)` produces `C`. The gate is
+`sigmoid(Linear(32, 128)(SiLU(Linear(256, 32)(cat(h, C)))))`, then
+`h_fused = h + g * C`. The residual is
+`Linear(32, 4)(SiLU(Linear(256, 32)(cat(h_fused, h))))`. Only that last
+linear starts at zero, so the initial raw prediction equals `base`. The
+existing projection then reads the corrected raw and the full hidden state.
+The loss is unchanged: projected four-state MAE + 0.5 times corrected raw MAE
++ 0.5 times auxiliary MAE on steps 0..10. Step 11 of `P` stays out of the
+auxiliary loss and out of the history keys. `predict_with_aux` still packs
+`raw_pred` and `final_pred` as `[B, 1, N, 4]` and `temporal_aux_pred` as
+`[B, 12, N, 4]`. Attention weights, gates, and deltas are not written into
+that dict or the five-seed NPZ. A checkpoint that omits the mode loads as
+`none` and still rebuilds with `strict=True`. At N=1406 the fusion adds
+39,132 parameters and the model has 1,354,496. Config:
+`configs/experiment_temporal_aux_history11_gated_cross_attention_projected.json`.
+Experiment id
+`separate_value_mlp_temporal_aux11_l05_gated_cross_attention_projected`.
+The four `p5_p15` frequencies use this same structure and the parent
+hyperparameters. Do not resume it from an auxiliary-only checkpoint.
 
 `projection_supervision` is `all` or `inflow_only`. Missing or `all` keeps
 original C: four-state final MAE + `projection_raw_loss_weight` * raw MAE +
