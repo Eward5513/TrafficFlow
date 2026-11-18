@@ -6,7 +6,7 @@ keeps one physical GPU until the process exits. A GPU is free only when
 nvidia-smi lists no compute process on it. Memory is not part of that
 decision. The scheduler asks again every 30 seconds.
 
-``control.json`` is ``{"max_gpus": N}``. A missing file starts at 7. The next
+``control.json`` is ``{"max_gpus": N}``. A missing file starts at 8. The next
 poll reads edits. ``SIGHUP`` wakes the scheduler and reads it immediately. A
 line in ``messages.jsonl``, ``{"max_gpus": N}``, is the same change. A new
 control file keeps that starting cap even when the first poll is after 09:00.
@@ -66,7 +66,7 @@ PHYSICAL_VERSION = "independent_fcd_v1"
 MODEL_SEED = 42
 EVAL_SEEDS = (42, 43, 44, 45, 46)
 POLL_SECONDS = 30
-DEFAULT_MAX_GPUS = 7
+DEFAULT_MAX_GPUS = 8
 MORNING_HOUR = 9
 MORNING_CAP = 4
 MIN_FREE_RAM_BYTES = 32 * 1024**3

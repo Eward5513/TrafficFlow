@@ -381,6 +381,49 @@ training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
   in_all__out_all/p5_p15/separate_value_mlp_temporal_aux11_l05_projected/seed_42/<run_id>/
 ```
 
+## Gated cross-attention over the auxiliary history
+
+`history_fusion_mode=gated_cross_attention` keeps that auxiliary head and adds
+one `HistoryPredictionFusion`. The flatten head remains the base prediction.
+The fusion reads the last encoder step and the auxiliary predictions for
+steps 0..10 of the same road, attends over those 11 steps, and adds a gated
+residual. The last linear of the residual starts at zero, so the initial raw
+prediction equals the flatten head. Conservation still projects the corrected
+raw prediction. The loss is the projected four-state MAE, plus 0.5 times the
+corrected raw MAE, plus 0.5 times the auxiliary MAE on steps 0..10. Step 11
+of the auxiliary head stays out of both the auxiliary loss and the history
+keys. Checkpoint selection stays the mean validation inflow MAE over seeds
+42–46.
+
+The config is
+`configs/experiment_temporal_aux_history11_gated_cross_attention_projected.json`.
+Experiment id
+`separate_value_mlp_temporal_aux11_l05_gated_cross_attention_projected`.
+At N=1406 the model has 1,354,496 parameters. The four `p5_p15` frequencies
+finished on 2026-11-18. Each ran 100 epochs with no early stop. The test
+metric below is projected inflow MAE. The temporal-aux column is
+`separate_value_mlp_temporal_aux11_l05_projected` on the same frequencies.
+
+| frequency | temporal aux | gated fusion | delta |
+| --- | ---: | ---: | ---: |
+| 30 min | 2.536 ± 0.006 | 2.539 ± 0.002 | +0.003 |
+| 1 h | 2.574 ± 0.010 | 2.626 ± 0.008 | +0.052 |
+| 2 h | 2.450 ± 0.006 | 2.506 ± 0.007 | +0.056 |
+| day | 2.454 ± 0.008 | 2.452 ± 0.010 | -0.002 |
+
+The equal-weight mean of the four frequencies is 2.531 for the gated fusion
+and 2.504 for the auxiliary loss, a difference of +0.027. Best epochs are
+53, 50, 76, and 64. Validation inflow MAE is 2.238, 2.213, 2.257, and
+2.207. Run ids are `20261118T150917_b4aec8e5`,
+`20261118T150917_e0718337`, `20261118T150917_690f1ead`, and
+`20261118T150918_d1e5a644`. Per-state metrics are in
+[TRAINING_RESULTS.md](TRAINING_RESULTS.md).
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all__out_all/p5_p15/separate_value_mlp_temporal_aux11_l05_gated_cross_attention_projected/seed_42/<run_id>/
+```
+
 ## Independent state TSFs
 
 `backbone_mode=state_independent` keeps the four-state `all` windows and
@@ -606,6 +649,7 @@ six-channel `separate_mlp_d144_projected_all`, and
 finished runs under `training_results_3s/datasets/variable_<period>_p5_p15/`
 are `separate_value_mlp_projected`, `separate_value_mlp_no_conservation`,
 `separate_value_mlp_temporal_aux11_l05_projected`,
+`separate_value_mlp_temporal_aux11_l05_gated_cross_attention_projected`,
 `shared_tsf_mlp_projected`,
 `state_independent_tsf_mlp_projected`,
 `state_independent_full_context_shared_tsf_mlp_projected`,

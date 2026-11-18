@@ -120,7 +120,7 @@ python3 run_fcd_simulations_3s.py --smoke-test
    - `generate_stjgcn_predefined_graph.py`（有向中心距离上的 PeMSD7 预定义图，写到 `graph/stjgcn/`）
 8. `generate_training_support_files.py`：节点表、校验报告和各模型配置。
 9. `prepare_rf_features.py`：随机森林的辅助特征。它不训练模型。
-10. `../run_variable_baselines.py`：12 个基线（不含 MSTT、PDFormer）× 4 个波动频率 × I2I/A2A/A2I。默认队列是 5%–15%，缺省 `control.json` 时同时占用 7 张空卡。已经存在的队列仍在每天 09:00 把上限调回 4；当天新建的队列保持这次写出的上限。`max_gpus` 只计算占 GPU 的任务；随机森林在 CPU 上跑，不占卡，也不计入这个上限。
+10. `../run_variable_baselines.py`：12 个基线（不含 MSTT、PDFormer）× 4 个波动频率 × I2I/A2A/A2I。默认队列是 5%–15%，缺省 `control.json` 时同时占用 8 张空卡。已经存在的队列仍在每天 09:00 把上限调回 4；当天新建的队列保持这次写出的上限。`max_gpus` 只计算占 GPU 的任务；随机森林在 CPU 上跑，不占卡，也不计入这个上限。
 
 ```bash
 cd /home/tzhang174/TrafficFlow/dataset/xuancheng26/model_prep
@@ -337,7 +337,7 @@ python3 dataset/xuancheng26/run_variable_baselines.py run
 # 10%–20% 仍用原来的状态目录，不和 5%–15% 共用。
 python3 dataset/xuancheng26/run_variable_baselines.py plan --observation-key p10_p20
 # 改最大 GPU 数：写 control.json 的 max_gpus，下一轮 30 秒轮询会读到；
-# kill -HUP <scheduler.lock 里的 pid> 会立刻重读。新建队列默认 7。
+# kill -HUP <scheduler.lock 里的 pid> 会立刻重读。新建队列默认 8。
 # 已有队列每天 09:00 把 max_gpus 调回 4；当天新建的队列保持刚写出的上限。
 # max_gpus 只计算正在占用 GPU 的任务。随机森林是纯 CPU 任务，不占名额，也不占用空卡。
 ```
