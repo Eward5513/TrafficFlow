@@ -336,6 +336,8 @@ python3 dataset/xuancheng26/run_variable_baselines.py status
 python3 dataset/xuancheng26/run_variable_baselines.py run
 # 10%–20% 仍用原来的状态目录，不和 5%–15% 共用。
 python3 dataset/xuancheng26/run_variable_baselines.py plan --observation-key p10_p20
+# 5%–35% 的状态目录是 operations/variable_p5_p35_train42_eval5/
+python3 dataset/xuancheng26/run_variable_baselines.py status --observation-key p5_p35
 # 改最大 GPU 数：写 control.json 的 max_gpus，下一轮 30 秒轮询会读到；
 # kill -HUP <scheduler.lock 里的 pid> 会立刻重读。新建队列默认 8。
 # 已有队列每天 09:00 把 max_gpus 调回 4；当天新建的队列保持刚写出的上限。
@@ -380,4 +382,4 @@ training_results_3s/datasets/<dataset_id>/physical_<version>/<model>/
     seed_<model_seed>/<run_id>/
 ```
 
-固定渗透率的历史运行在 `dataset_id=legacy_unknown`、`physical_legacy_unknown`。已经跑完的 10%–20% 训练用 `physical_independent_fcd_v1`、观测标识 `p10_p20`、实验号 `variable_p10_p20_train42_eval5`。5%–15% 用同一物理版本、观测标识 `p5_p15`、实验号 `variable_p5_p15_train42_eval5`。5%–35% 只准备了数据和辅助输入，没有启动训练。完成结果的模型和指标见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。A2A 行同时保留四状态总体测试 MAE，并单列 inflow 通道的测试 Inflow MAE。
+固定渗透率的历史运行在 `dataset_id=legacy_unknown`、`physical_legacy_unknown`。10%–20% 训练用 `physical_independent_fcd_v1`、观测标识 `p10_p20`、实验号 `variable_p10_p20_train42_eval5`，144 条都已完成。5%–15% 用同一物理版本、观测标识 `p5_p15`、实验号 `variable_p5_p15_train42_eval5`，144 条都已完成。5%–35% 用同一物理版本、观测标识 `p5_p35`、实验号 `variable_p5_p35_train42_eval5`；2026-11-20 15:12 的队列是 64 条完成、4 条训练中、76 条排队。完成结果的模型和指标见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。A2A 行同时保留四状态总体测试 MAE，并单列 inflow 通道的测试 Inflow MAE。

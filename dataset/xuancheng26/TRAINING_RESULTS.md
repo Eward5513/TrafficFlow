@@ -1,6 +1,6 @@
 # 宣城基线训练结果
 
-整理时间：2026-11-18 15:19 +0800。固定渗透率表仍是 2026-11-09 23:36 的摘录。10%–20% 的验证 MAE、测试 MAE 和 best epoch 仍是 2026-11-15 14:21 的全表。5%–15% 的这几列仍是 2026-11-18 14:28 已经写出五种子测试指标的基线。两轮 A2A 的测试 Inflow MAE 于同一天 15:19 从已有 `test_sampling_metrics.json` 补上。MSTT 的配置和数字在 [MSTT/TRAINING_RESULTS.md](../../MSTT/TRAINING_RESULTS.md)。
+整理时间：2026-11-20 15:14 +0800。固定渗透率表仍是 2026-11-09 23:36 的摘录。10%–20% 的验证 MAE、测试 MAE 和 best epoch 与 2026-11-15 14:21 的全表一致，144 条都已完成。5%–15% 补入了 2026-11-19 07:19 完成的其余 10 条 A2I，144 条都已完成。5%–35% 写入了 2026-11-20 15:12 已经写出五种子测试指标的 64 条。正在训练和尚未启动的任务不列入表。MSTT 的配置和数字在 [MSTT/TRAINING_RESULTS.md](../../MSTT/TRAINING_RESULTS.md)。
 
 数字都在数据盘 `/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/`。一条运行的目录是：
 
@@ -16,9 +16,9 @@ training_results_3s/datasets/<dataset_id>/physical_<version>/<model>/
 
 STAEformer 另外有一批实验号 `sampling_protocol` 的五种子评估。训练 sampling seed 和模型种子都是 42，评估种子是 42、43、44、45、46。那一节的数字是 `test_sampling_metrics.json` 里各种子指标的不加权平均，标准差是样本标准差。
 
-波动渗透率有两轮，物理版本都是 `independent_fcd_v1`。`variable_p10_p20_train42_eval5` 的观测标识是 `p10_p20`，渗透率在 0.10 到 0.20 之间均匀抽取。`variable_p5_p15_train42_eval5` 的观测标识是 `p5_p15`，渗透率在 0.05 到 0.15 之间均匀抽取。训练用 sampling seed 42，模型种子 42，验证和测试对种子 42–46 取平均。这一节读 `validation_sampling_metrics.json` 和 `test_sampling_metrics.json` 的 mean 与 std。A2A 的测试 Inflow MAE 读同一份测试文件里的 `inflow_mae`，只计 inflow 这一通道。四状态总体仍是旁边的测试 MAE，字段是 `mae`。checkpoint 按五种子验证 MAE 的平均来选。正在训练的任务不列入表。
+波动渗透率有三轮，物理版本都是 `independent_fcd_v1`。`variable_p10_p20_train42_eval5` 的观测标识是 `p10_p20`，渗透率在 0.10 到 0.20 之间均匀抽取。`variable_p5_p15_train42_eval5` 的观测标识是 `p5_p15`，渗透率在 0.05 到 0.15 之间均匀抽取。`variable_p5_p35_train42_eval5` 的观测标识是 `p5_p35`，渗透率在 0.05 到 0.35 之间均匀抽取。训练用 sampling seed 42，模型种子 42，验证和测试对种子 42–46 取平均。这一节读 `validation_sampling_metrics.json` 和 `test_sampling_metrics.json` 的 mean 与 std。A2A 的测试 Inflow MAE 读同一份测试文件里的 `inflow_mae`，只计 inflow 这一通道。四状态总体仍是旁边的测试 MAE，字段是 `mae`。checkpoint 按五种子验证 MAE 的平均来选。正在训练的任务不列入表。
 
-`p10` 是固定 10%。`p10_p20` 是 10%–20% 的波动渗透率。`p5_p15` 是 5%–15% 的波动渗透率。
+`p10` 是固定 10%。`p10_p20` 是 10%–20% 的波动渗透率。`p5_p15` 是 5%–15% 的波动渗透率。`p5_p35` 是 5%–35% 的波动渗透率。
 
 ## 输入和输出
 
@@ -277,13 +277,13 @@ STAEformer 另外有一批实验号 `sampling_protocol` 的五种子评估。训
 
 ## 波动渗透率
 
-两轮的模型都是 RF、STGCN、DCRNN、Graph WaveNet、STSGCN、STFGNN、STID、STAEformer、Seq2Seq GCN-LSTM、TLAST、ASTTN、STJGCN。每轮是 4 个波动周期 × 12 个模型 × I2I、A2A、A2I，共 144 条。30 分钟、1 小时、2 小时、全天的段长分别是 1800、3600、7200、86400 秒。
+三轮的模型都是 RF、STGCN、DCRNN、Graph WaveNet、STSGCN、STFGNN、STID、STAEformer、Seq2Seq GCN-LSTM、TLAST、ASTTN、STJGCN。每轮是 4 个波动周期 × 12 个模型 × I2I、A2A、A2I，共 144 条。30 分钟、1 小时、2 小时、全天的段长分别是 1800、3600、7200、86400 秒。
 
-验证 MAE 和测试 MAE 都是五个采样种子的平均 ± 样本标准差（`ddof=1`）。I2I 和 A2I 的 MAE 就是 inflow 单通道 MAE，表里这两类的测试 Inflow MAE 写「同测试 MAE」。A2A 的验证 MAE 和测试 MAE 是四个状态的算术平均。A2A 的测试 Inflow MAE 是同一份 `test_sampling_metrics.json` 的 `mean.inflow_mae` 与 `std.inflow_mae`，同样是种子 42–46 的不加权平均和样本标准差。`p10_p20` 与 `p5_p15` 各四个波动周期、12 个已完成模型，共 96 条 A2A 运行都有这个字段。RF 没有 epoch，best epoch 记为 —。同一个模型和同一个波动周期下，I2I、A2A、A2I 的 run id 相同，输入输出目录不同。
+验证 MAE 和测试 MAE 都是五个采样种子的平均 ± 样本标准差（`ddof=1`）。I2I 和 A2I 的 MAE 就是 inflow 单通道 MAE，表里这两类的测试 Inflow MAE 写「同测试 MAE」。A2A 的验证 MAE 和测试 MAE 是四个状态的算术平均。A2A 的测试 Inflow MAE 是同一份 `test_sampling_metrics.json` 的 `mean.inflow_mae` 与 `std.inflow_mae`，同样是种子 42–46 的不加权平均和样本标准差。已经写入下表的 A2A 运行都有这个字段。RF 没有 epoch，best epoch 记为 —。同一个模型和同一个波动周期下，I2I、A2A、A2I 的 run id 相同，输入输出目录不同。
 
 ### 10%–20%
 
-实验号 `variable_p10_p20_train42_eval5`，观测标识 `p10_p20`。验证 MAE、测试 MAE 和 best epoch 整理到 2026-11-15 14:21 +0800。队列 144 条都已经写出五种子测试指标：四个周期的 I2I、A2A、A2I 各 12 个模型。A2A 的测试 Inflow MAE 于 2026-11-18 15:19 补入。
+实验号 `variable_p10_p20_train42_eval5`，观测标识 `p10_p20`。验证 MAE、测试 MAE 和 best epoch 整理到 2026-11-15 14:21 +0800。2026-11-20 15:14 对照 `campaign_summary.json`，144 条逐格相同。队列 144 条都已经写出五种子测试指标：四个周期的 I2I、A2A、A2I 各 12 个模型。A2A 的测试 Inflow MAE 于 2026-11-18 15:19 补入。
 
 | 模型 | 波动周期 | 输入输出 | 验证 MAE | 测试 MAE | 测试 Inflow MAE | best epoch | run id |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -434,7 +434,7 @@ STAEformer 另外有一批实验号 `sampling_protocol` 的五种子评估。训
 
 ### 5%–15%
 
-实验号 `variable_p5_p15_train42_eval5`，观测标识 `p5_p15`。渗透率在 0.05 到 0.15 之间均匀抽取。验证 MAE、测试 MAE 和 best epoch 整理到 2026-11-18 14:28 +0800。队列 144 条里，134 条已经写出五种子测试指标。四个周期的 I2I 和 A2A 各 12 个模型都完成了。A2I 完成 30 分钟和 1 小时各 12 个；2 小时完成 10 个，ASTTN 和 STJGCN 还在训练。全天完成 RF、STGCN、DCRNN、Graph WaveNet 这 4 个；STSGCN 和 STFGNN 还在训练，STID、STAEformer、Seq2Seq GCN-LSTM、TLAST、ASTTN、STJGCN 还在排队。A2A 的测试 Inflow MAE 于 2026-11-18 15:19 补入。
+实验号 `variable_p5_p15_train42_eval5`，观测标识 `p5_p15`。渗透率在 0.05 到 0.15 之间均匀抽取。队列 144 条都已经写出五种子测试指标：四个周期的 I2I、A2A、A2I 各 12 个模型。其中 134 条的验证 MAE、测试 MAE 和 best epoch 整理到 2026-11-18 14:28 +0800。2026-11-19 07:19 补入 2 小时 A2I 的 ASTTN、STJGCN，以及全天 A2I 的 STSGCN、STFGNN、STID、STAEformer、Seq2Seq GCN-LSTM、TLAST、ASTTN、STJGCN。A2A 的测试 Inflow MAE 于 2026-11-18 15:19 补入，后补的 10 条 A2I 沿用同一口径。
 
 | 模型 | 波动周期 | 输入输出 | 验证 MAE | 测试 MAE | 测试 Inflow MAE | best epoch | run id |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -544,6 +544,8 @@ STAEformer 另外有一批实验号 `sampling_protocol` 的五种子评估。训
 | STAEformer | 2 小时 | A2I：all → inflow | 2.405 ± 0.015 | 2.547 ± 0.022 | 同测试 MAE | 52 | `20261113T125853_7178f48f` |
 | Seq2Seq GCN-LSTM | 2 小时 | A2I：all → inflow | 3.992 ± 0.005 | 3.883 ± 0.010 | 同测试 MAE | 86 | `20261113T125853_2cf8cce5` |
 | TLAST | 2 小时 | A2I：all → inflow | 2.382 ± 0.003 | 2.582 ± 0.008 | 同测试 MAE | 78 | `20261113T125853_856efa71` |
+| ASTTN | 2 小时 | A2I：all → inflow | 2.474 ± 0.006 | 2.629 ± 0.008 | 同测试 MAE | 88 | `20261113T125853_91616bf2` |
+| STJGCN | 2 小时 | A2I：all → inflow | 3.185 ± 0.019 | 3.350 ± 0.014 | 同测试 MAE | 8 | `20261113T125853_7f756477` |
 | RF | 全天 | I2I：inflow → inflow | 4.796 ± 0.009 | 4.906 ± 0.008 | 同测试 MAE | — | `20261113T125853_27e7609b` |
 | STGCN | 全天 | I2I：inflow → inflow | 2.569 ± 0.020 | 2.927 ± 0.039 | 同测试 MAE | 43 | `20261113T125853_9c242cd3` |
 | DCRNN | 全天 | I2I：inflow → inflow | 2.702 ± 0.012 | 3.012 ± 0.007 | 同测试 MAE | 16 | `20261113T125853_229c536d` |
@@ -572,3 +574,82 @@ STAEformer 另外有一批实验号 `sampling_protocol` 的五种子评估。训
 | STGCN | 全天 | A2I：all → inflow | 2.543 ± 0.015 | 2.656 ± 0.006 | 同测试 MAE | 43 | `20261113T125853_9c242cd3` |
 | DCRNN | 全天 | A2I：all → inflow | 2.590 ± 0.015 | 2.815 ± 0.013 | 同测试 MAE | 28 | `20261113T125853_229c536d` |
 | Graph WaveNet | 全天 | A2I：all → inflow | 2.549 ± 0.021 | 2.682 ± 0.013 | 同测试 MAE | 62 | `20261113T125853_4d0edb97` |
+| STSGCN | 全天 | A2I：all → inflow | 2.603 ± 0.006 | 2.882 ± 0.006 | 同测试 MAE | 58 | `20261113T125853_bc48f7e0` |
+| STFGNN | 全天 | A2I：all → inflow | 2.358 ± 0.011 | 2.692 ± 0.016 | 同测试 MAE | 61 | `20261113T125853_e4a0959a` |
+| STID | 全天 | A2I：all → inflow | 2.384 ± 0.004 | 2.635 ± 0.003 | 同测试 MAE | 67 | `20261113T125853_168a8b09` |
+| STAEformer | 全天 | A2I：all → inflow | 2.411 ± 0.008 | 2.940 ± 0.005 | 同测试 MAE | 34 | `20261113T125853_29701f39` |
+| Seq2Seq GCN-LSTM | 全天 | A2I：all → inflow | 3.529 ± 0.009 | 4.210 ± 0.014 | 同测试 MAE | 49 | `20261113T125853_caedef62` |
+| TLAST | 全天 | A2I：all → inflow | 2.334 ± 0.009 | 2.727 ± 0.011 | 同测试 MAE | 64 | `20261113T125853_c497b133` |
+| ASTTN | 全天 | A2I：all → inflow | 2.425 ± 0.006 | 2.741 ± 0.004 | 同测试 MAE | 97 | `20261113T125853_7c93d745` |
+| STJGCN | 全天 | A2I：all → inflow | 3.073 ± 0.011 | 3.341 ± 0.016 | 同测试 MAE | 8 | `20261113T125853_e986c755` |
+
+### 5%–35%
+
+实验号 `variable_p5_p35_train42_eval5`，观测标识 `p5_p35`。渗透率在 0.05 到 0.35 之间均匀抽取。验证 MAE、测试 MAE 和 best epoch 整理到 2026-11-20 15:12 +0800。队列 144 条里，64 条已经写出五种子测试指标。四个周期的 I2I 各 12 个模型都完成了。30 分钟 A2A 完成 RF、STGCN、DCRNN、Graph WaveNet、STSGCN、STFGNN、STID、STAEformer、Seq2Seq GCN-LSTM、TLAST、STJGCN 这 11 个，ASTTN 还在训练。1 小时 A2A 完成 RF、STGCN、DCRNN、Graph WaveNet、STID；STSGCN、STFGNN、STAEformer 还在训练，Seq2Seq GCN-LSTM、TLAST、ASTTN、STJGCN 还在排队。2 小时和全天的 A2A，以及四个周期的 A2I，都还在排队。
+
+| 模型 | 波动周期 | 输入输出 | 验证 MAE | 测试 MAE | 测试 Inflow MAE | best epoch | run id |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| RF | 30 分钟 | I2I：inflow → inflow | 4.124 ± 0.007 | 4.437 ± 0.002 | 同测试 MAE | — | `20261119T000034_00303018` |
+| STGCN | 30 分钟 | I2I：inflow → inflow | 2.577 ± 0.051 | 2.863 ± 0.016 | 同测试 MAE | 43 | `20261119T000034_702af2bd` |
+| DCRNN | 30 分钟 | I2I：inflow → inflow | 2.637 ± 0.010 | 2.987 ± 0.013 | 同测试 MAE | 30 | `20261119T000034_2ca69bdd` |
+| Graph WaveNet | 30 分钟 | I2I：inflow → inflow | 2.891 ± 0.027 | 3.209 ± 0.025 | 同测试 MAE | 79 | `20261119T000034_e220ec62` |
+| STSGCN | 30 分钟 | I2I：inflow → inflow | 2.789 ± 0.009 | 3.086 ± 0.010 | 同测试 MAE | 90 | `20261119T000034_e6dc91ba` |
+| STFGNN | 30 分钟 | I2I：inflow → inflow | 2.504 ± 0.028 | 2.835 ± 0.005 | 同测试 MAE | 96 | `20261119T000034_0b64fa9f` |
+| STID | 30 分钟 | I2I：inflow → inflow | 2.263 ± 0.002 | 2.644 ± 0.002 | 同测试 MAE | 68 | `20261119T000034_6e225d51` |
+| STAEformer | 30 分钟 | I2I：inflow → inflow | 2.284 ± 0.007 | 2.595 ± 0.013 | 同测试 MAE | 35 | `20261119T000034_176990e1` |
+| Seq2Seq GCN-LSTM | 30 分钟 | I2I：inflow → inflow | 3.720 ± 0.007 | 3.883 ± 0.003 | 同测试 MAE | 107 | `20261119T000034_348544d0` |
+| TLAST | 30 分钟 | I2I：inflow → inflow | 2.159 ± 0.003 | 2.697 ± 0.012 | 同测试 MAE | 45 | `20261119T000034_7b7aea57` |
+| ASTTN | 30 分钟 | I2I：inflow → inflow | 2.285 ± 0.004 | 2.639 ± 0.002 | 同测试 MAE | 64 | `20261119T000034_3b53f4aa` |
+| STJGCN | 30 分钟 | I2I：inflow → inflow | 2.674 ± 0.015 | 3.177 ± 0.007 | 同测试 MAE | 56 | `20261119T000034_92fba2e9` |
+| RF | 30 分钟 | A2A：all → all | 2.471 ± 0.004 | 2.657 ± 0.001 | 4.439 ± 0.003 | — | `20261119T000034_00303018` |
+| STGCN | 30 分钟 | A2A：all → all | 1.605 ± 0.009 | 1.684 ± 0.009 | 2.595 ± 0.015 | 49 | `20261119T000034_702af2bd` |
+| DCRNN | 30 分钟 | A2A：all → all | 1.601 ± 0.008 | 1.767 ± 0.003 | 2.758 ± 0.006 | 38 | `20261119T000034_2ca69bdd` |
+| Graph WaveNet | 30 分钟 | A2A：all → all | 1.526 ± 0.005 | 1.593 ± 0.010 | 2.464 ± 0.018 | 99 | `20261119T000034_e220ec62` |
+| STSGCN | 30 分钟 | A2A：all → all | 1.626 ± 0.002 | 1.802 ± 0.005 | 2.842 ± 0.009 | 106 | `20261119T000034_e6dc91ba` |
+| STFGNN | 30 分钟 | A2A：all → all | 1.457 ± 0.003 | 1.590 ± 0.005 | 2.440 ± 0.010 | 71 | `20261119T000034_0b64fa9f` |
+| STID | 30 分钟 | A2A：all → all | 1.466 ± 0.001 | 1.666 ± 0.001 | 2.617 ± 0.002 | 92 | `20261119T000034_6e225d51` |
+| STAEformer | 30 分钟 | A2A：all → all | 1.459 ± 0.003 | 1.632 ± 0.005 | 2.498 ± 0.010 | 42 | `20261119T000034_176990e1` |
+| Seq2Seq GCN-LSTM | 30 分钟 | A2A：all → all | 2.347 ± 0.004 | 2.454 ± 0.002 | 3.936 ± 0.004 | 85 | `20261119T000034_348544d0` |
+| TLAST | 30 分钟 | A2A：all → all | 1.400 ± 0.003 | 1.593 ± 0.003 | 2.482 ± 0.005 | 84 | `20261119T000034_7b7aea57` |
+| STJGCN | 30 分钟 | A2A：all → all | 1.896 ± 0.005 | 2.004 ± 0.012 | 2.744 ± 0.023 | 85 | `20261119T000034_92fba2e9` |
+| RF | 1 小时 | I2I：inflow → inflow | 4.290 ± 0.007 | 4.535 ± 0.004 | 同测试 MAE | — | `20261119T000034_c728dfa3` |
+| STGCN | 1 小时 | I2I：inflow → inflow | 2.546 ± 0.021 | 2.930 ± 0.014 | 同测试 MAE | 48 | `20261119T000034_2cd0349f` |
+| DCRNN | 1 小时 | I2I：inflow → inflow | 2.646 ± 0.020 | 3.078 ± 0.020 | 同测试 MAE | 28 | `20261119T000034_5d7dc036` |
+| Graph WaveNet | 1 小时 | I2I：inflow → inflow | 2.602 ± 0.022 | 3.012 ± 0.038 | 同测试 MAE | 78 | `20261119T000034_1e785bbe` |
+| STSGCN | 1 小时 | I2I：inflow → inflow | 2.756 ± 0.009 | 3.217 ± 0.005 | 同测试 MAE | 103 | `20261119T000034_61e1ec36` |
+| STFGNN | 1 小时 | I2I：inflow → inflow | 2.423 ± 0.013 | 2.892 ± 0.024 | 同测试 MAE | 115 | `20261119T000034_5fdb851d` |
+| STID | 1 小时 | I2I：inflow → inflow | 2.284 ± 0.002 | 2.693 ± 0.003 | 同测试 MAE | 82 | `20261119T000034_69bbdce6` |
+| STAEformer | 1 小时 | I2I：inflow → inflow | 2.270 ± 0.005 | 2.738 ± 0.006 | 同测试 MAE | 21 | `20261119T000034_926681fd` |
+| Seq2Seq GCN-LSTM | 1 小时 | I2I：inflow → inflow | 4.019 ± 0.010 | 4.304 ± 0.004 | 同测试 MAE | 100 | `20261119T000034_f47660b2` |
+| TLAST | 1 小时 | I2I：inflow → inflow | 2.157 ± 0.005 | 2.620 ± 0.008 | 同测试 MAE | 54 | `20261119T000034_74994596` |
+| ASTTN | 1 小时 | I2I：inflow → inflow | 2.264 ± 0.004 | 2.611 ± 0.004 | 同测试 MAE | 91 | `20261119T000034_4016fb89` |
+| STJGCN | 1 小时 | I2I：inflow → inflow | 2.852 ± 0.014 | 3.331 ± 0.021 | 同测试 MAE | 14 | `20261119T000034_2259da77` |
+| RF | 1 小时 | A2A：all → all | 2.570 ± 0.004 | 2.724 ± 0.002 | 4.553 ± 0.004 | — | `20261119T000034_c728dfa3` |
+| STGCN | 1 小时 | A2A：all → all | 1.622 ± 0.008 | 1.683 ± 0.003 | 2.586 ± 0.006 | 47 | `20261119T000034_2cd0349f` |
+| DCRNN | 1 小时 | A2A：all → all | 1.616 ± 0.009 | 1.807 ± 0.011 | 2.824 ± 0.021 | 39 | `20261119T000034_5d7dc036` |
+| Graph WaveNet | 1 小时 | A2A：all → all | 1.521 ± 0.005 | 1.623 ± 0.011 | 2.493 ± 0.021 | 68 | `20261119T000034_1e785bbe` |
+| STID | 1 小时 | A2A：all → all | 1.480 ± 0.001 | 1.703 ± 0.002 | 2.678 ± 0.003 | 90 | `20261119T000034_69bbdce6` |
+| RF | 2 小时 | I2I：inflow → inflow | 4.785 ± 0.008 | 4.258 ± 0.005 | 同测试 MAE | — | `20261119T000034_88803606` |
+| STGCN | 2 小时 | I2I：inflow → inflow | 2.791 ± 0.065 | 2.771 ± 0.016 | 同测试 MAE | 43 | `20261119T000034_1d07222e` |
+| DCRNN | 2 小时 | I2I：inflow → inflow | 2.941 ± 0.021 | 2.852 ± 0.019 | 同测试 MAE | 29 | `20261119T000034_02666711` |
+| Graph WaveNet | 2 小时 | I2I：inflow → inflow | 2.711 ± 0.046 | 2.884 ± 0.038 | 同测试 MAE | 99 | `20261119T000034_94d2d0d2` |
+| STSGCN | 2 小时 | I2I：inflow → inflow | 3.159 ± 0.043 | 3.066 ± 0.019 | 同测试 MAE | 92 | `20261119T000034_33a647c0` |
+| STFGNN | 2 小时 | I2I：inflow → inflow | 3.751 ± 0.016 | 3.379 ± 0.006 | 同测试 MAE | 7 | `20261119T000034_441b0922` |
+| STID | 2 小时 | I2I：inflow → inflow | 2.506 ± 0.003 | 2.522 ± 0.003 | 同测试 MAE | 39 | `20261119T000034_083ba804` |
+| STAEformer | 2 小时 | I2I：inflow → inflow | 2.345 ± 0.013 | 2.492 ± 0.032 | 同测试 MAE | 37 | `20261119T000034_f6b9842d` |
+| Seq2Seq GCN-LSTM | 2 小时 | I2I：inflow → inflow | 4.547 ± 0.004 | 4.243 ± 0.004 | 同测试 MAE | 57 | `20261119T000034_be0b416f` |
+| TLAST | 2 小时 | I2I：inflow → inflow | 2.314 ± 0.006 | 2.463 ± 0.004 | 同测试 MAE | 47 | `20261119T000034_f9b1a9f5` |
+| ASTTN | 2 小时 | I2I：inflow → inflow | 2.390 ± 0.005 | 2.674 ± 0.007 | 同测试 MAE | 91 | `20261119T000034_aee3ecec` |
+| STJGCN | 2 小时 | I2I：inflow → inflow | 2.723 ± 0.012 | 2.846 ± 0.010 | 同测试 MAE | 124 | `20261119T000034_7d3125ba` |
+| RF | 全天 | I2I：inflow → inflow | 4.117 ± 0.013 | 4.512 ± 0.008 | 同测试 MAE | — | `20261119T000034_e2950277` |
+| STGCN | 全天 | I2I：inflow → inflow | 2.647 ± 0.023 | 2.777 ± 0.021 | 同测试 MAE | 43 | `20261119T000034_a63882f5` |
+| DCRNN | 全天 | I2I：inflow → inflow | 2.800 ± 0.018 | 2.920 ± 0.011 | 同测试 MAE | 32 | `20261119T000034_d93015ba` |
+| Graph WaveNet | 全天 | I2I：inflow → inflow | 2.768 ± 0.061 | 2.802 ± 0.052 | 同测试 MAE | 84 | `20261119T000034_3cbbd791` |
+| STSGCN | 全天 | I2I：inflow → inflow | 2.971 ± 0.011 | 3.357 ± 0.022 | 同测试 MAE | 58 | `20261119T000034_cec33de5` |
+| STFGNN | 全天 | I2I：inflow → inflow | 2.849 ± 0.004 | 4.776 ± 0.015 | 同测试 MAE | 7 | `20261119T000034_bf7bfbf6` |
+| STID | 全天 | I2I：inflow → inflow | 2.424 ± 0.006 | 3.046 ± 0.005 | 同测试 MAE | 60 | `20261119T000034_ae379866` |
+| STAEformer | 全天 | I2I：inflow → inflow | 2.361 ± 0.016 | 3.364 ± 0.008 | 同测试 MAE | 62 | `20261119T000034_872f49c3` |
+| Seq2Seq GCN-LSTM | 全天 | I2I：inflow → inflow | 3.924 ± 0.011 | 5.190 ± 0.011 | 同测试 MAE | 12 | `20261119T000034_547cd145` |
+| TLAST | 全天 | I2I：inflow → inflow | 2.310 ± 0.013 | 2.899 ± 0.007 | 同测试 MAE | 44 | `20261119T000034_5d79c190` |
+| ASTTN | 全天 | I2I：inflow → inflow | 2.346 ± 0.006 | 2.711 ± 0.001 | 同测试 MAE | 87 | `20261119T000034_ad125685` |
+| STJGCN | 全天 | I2I：inflow → inflow | 2.882 ± 0.011 | 3.331 ± 0.010 | 同测试 MAE | 26 | `20261119T000034_cb822be2` |
