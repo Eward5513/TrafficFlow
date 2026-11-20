@@ -207,6 +207,9 @@ TRAIN_DEFAULTS: dict[str, Any] = {
     # Inactive unless temporal_aux_enabled. The first experiment uses the first 11 steps at weight 0.5.
     "temporal_aux_weight": 0.5,
     "temporal_aux_scope": "history_except_last",
+    # Inactive unless history_fusion_mode is dual_path_history_tsf. Old runs omit them.
+    "branch_a_loss_weight": 0.25,
+    "branch_b_loss_weight": 0.25,
     "seed": 42,
     "device": "auto",
     "batch_size": 16,
@@ -297,7 +300,7 @@ _CHOICES = {
     "conservation_mode": ("none", "soft", "projected"),
     "projection_supervision": ("all", "inflow_only"),
     "temporal_aux_scope": ("history_except_last",),
-    "history_fusion_mode": ("none", "gated_cross_attention"),
+    "history_fusion_mode": ("none", "gated_cross_attention", "dual_path_history_tsf"),
     "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
     "head_type": ("flatten", "last", "flatten_mlp", "state_token_transformer"),
@@ -415,6 +418,15 @@ def validate_config(config: Mapping[str, Any]) -> None:
     from MSTT.model.mstt import validate_history_fusion
 
     validate_history_fusion(config)
+    if str(config.get("history_fusion_mode", "none")) == "dual_path_history_tsf":
+        if float(config.get("projection_raw_loss_weight", TRAIN_DEFAULTS["projection_raw_loss_weight"])) != 0.0:
+            raise ValueError("history_fusion_mode='dual_path_history_tsf' requires projection_raw_loss_weight=0")
+        if float(config.get("projection_consistency_weight", TRAIN_DEFAULTS["projection_consistency_weight"])) != 0.0:
+            raise ValueError("history_fusion_mode='dual_path_history_tsf' requires projection_consistency_weight=0")
+        for key in ("branch_a_loss_weight", "branch_b_loss_weight"):
+            value = float(config.get(key, TRAIN_DEFAULTS[key]))
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{key} must be finite and non-negative")
     if str(config["target_mode"]) != "last-observed-step":
         raise ValueError("MSTT reconstructs the last observed slot; target_mode must be last-observed-step")
     backbone = str(config.get("backbone_mode", "shared"))
@@ -504,15 +516,16 @@ _CONSERVATION_TASKS = frozenset({"All2All", "AllSpC2All"})
 
 
 def validate_history_fusion_task(config: Mapping[str, Any], task: TaskSpec) -> None:
-    """The gated history path is a four-state last-step correction on top of the auxiliary head."""
+    """History modes are four-state last-step paths on top of the auxiliary head."""
     from MSTT.model.mstt import validate_history_fusion
 
     validate_history_fusion(config)
-    if str(config.get("history_fusion_mode", "none")) == "none":
+    mode = str(config.get("history_fusion_mode", "none"))
+    if mode == "none":
         return
     if task.output_channels != STATE_CHANNELS:
         raise ValueError(
-            "history_fusion_mode='gated_cross_attention' requires output channels "
+            f"history_fusion_mode={mode!r} requires output channels "
             f"{list(STATE_CHANNELS)} in that order, got task {task.name} {list(task.output_channels)}"
         )
 
@@ -684,12 +697,16 @@ def conservation_settings(config: Mapping[str, Any]) -> dict[str, Any]:
 def temporal_aux_settings(config: Mapping[str, Any]) -> dict[str, Any]:
     """Auxiliary-loss identity. A checkpoint that predates either switch is recorded as off."""
     defaults = default_config()
-    return {
+    settings = {
         "temporal_aux_enabled": bool(config.get("temporal_aux_enabled", defaults["temporal_aux_enabled"])),
         "temporal_aux_weight": float(config.get("temporal_aux_weight", defaults["temporal_aux_weight"])),
         "temporal_aux_scope": str(config.get("temporal_aux_scope", defaults["temporal_aux_scope"])),
         "history_fusion_mode": str(config.get("history_fusion_mode", defaults["history_fusion_mode"])),
     }
+    if settings["history_fusion_mode"] == "dual_path_history_tsf":
+        settings["branch_a_loss_weight"] = float(config.get("branch_a_loss_weight", defaults["branch_a_loss_weight"]))
+        settings["branch_b_loss_weight"] = float(config.get("branch_b_loss_weight", defaults["branch_b_loss_weight"]))
+    return settings
 
 
 def conservation_output_root(config: Mapping[str, Any], root: Path, *, explicit: bool = False) -> Path:

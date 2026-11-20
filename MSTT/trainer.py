@@ -55,7 +55,13 @@ from MSTT.data.dataset import (
 from MSTT.data.graph import load_r_graph
 from MSTT.model import MSTT, MSTTConfig
 from MSTT.utils.device import resolve_device
-from MSTT.utils.losses import RawScaleLoss, conservation_objective, objective_description, temporal_aux_terms
+from MSTT.utils.losses import (
+    RawScaleLoss,
+    add_dual_path_terms,
+    conservation_objective,
+    objective_description,
+    temporal_aux_terms,
+)
 from MSTT.utils.conservation_evaluation import collect_conservation_predictions, save_mstt_predictions
 from MSTT.utils.metrics import CORE, flat_core, raw_metrics
 from reimplementation.common.data.r_only_npz_dataset import SPLITS
@@ -518,10 +524,16 @@ class TaskRun:
         amp = str(self.config["amp"])
         mean, std = self.scaler_args()
         diagnostics = {}
+        branch_totals: dict[str, Any] = {}
         if self.task.name in {"All2All", "AllSpC2All"}:
+            def _predict(batch):
+                outputs = predict_with_aux(model, batch, amp=amp, device=self.device)
+                _stream_branch_inflow(outputs, batch, self.criterion, branch_totals)
+                return outputs
+
             packed, diagnostics = collect_conservation_predictions(
                 _limited(loader, limit),
-                lambda batch: predict_with_aux(model, batch, amp=amp, device=self.device),
+                _predict,
                 criterion=self.criterion, device=self.device,
             )
         else:
@@ -542,6 +554,12 @@ class TaskRun:
         metrics["loss_name"] = self.criterion.describe()
         metrics["sample_count"] = int(packed["pred_raw"].shape[0])
         metrics["split"] = split
+        if branch_totals.get("branch_a_count"):
+            metrics["branch_a_inflow_mae"] = branch_totals["branch_a"] / branch_totals["branch_a_count"]
+            metrics["branch_b_inflow_mae"] = branch_totals["branch_b"] / branch_totals["branch_b_count"]
+            metrics["raw_inflow_mae"] = branch_totals["raw"] / branch_totals["raw_count"]
+            for index, name in enumerate(STATE_CHANNELS):
+                metrics[f"gate_{name}_mean"] = float(branch_totals["gate_sum"][index] / branch_totals["gate_count"])
         return metrics, packed
 
     def selection_value(self, metrics: Mapping[str, Any]) -> float:
@@ -578,6 +596,27 @@ def _restore_rng(state: Mapping[str, Any], loader) -> None:
         loader.generator.set_state(state["loader"])
     if state.get("cuda") is not None and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(state["cuda"])
+
+
+def _stream_branch_inflow(outputs, batch, criterion, totals: dict[str, Any]) -> None:
+    """Sum inflow absolute errors and gate values. The prediction NPZ does not store these tensors."""
+    if "branch_a_pred" not in outputs:
+        return
+    target = batch["y_raw"].float()
+    for key, slot in (
+        ("branch_a_pred", "branch_a"),
+        ("branch_b_pred", "branch_b"),
+        ("raw_pred", "raw"),
+        ("final_pred", "final"),
+    ):
+        error = (criterion.denormalize(outputs[key])[..., 0] - target[..., 0]).abs()
+        totals[slot] = float(totals.get(slot, 0.0)) + float(error.detach().sum())
+        totals[slot + "_count"] = float(totals.get(slot + "_count", 0.0)) + float(error.numel())
+    gate = outputs["branch_gate"].detach().float()
+    summed = gate.sum(dim=tuple(range(gate.ndim - 1))).cpu()
+    previous = totals.get("gate_sum")
+    totals["gate_sum"] = summed if previous is None else previous + summed
+    totals["gate_count"] = float(totals.get("gate_count", 0.0)) + float(gate.numel() // int(gate.shape[-1]))
 
 
 def gradient_report(model: torch.nn.Module) -> dict[str, Any]:
@@ -630,7 +669,16 @@ def train_step(
                         "inflow_only backward must use inflow_final_mae + raw_conservation_mae "
                         f"(missing={missing}, unexpected={unexpected})"
                     )
-    if aux_on:
+    history_mode = str(run.config.get("history_fusion_mode", "none"))
+    if history_mode == "dual_path_history_tsf":
+        if outputs is None:
+            raise ReimplementationError("dual path history TSF requires auxiliary model outputs")
+        if "y_seq_raw" not in batch:
+            raise ReimplementationError("dual path history TSF training requires y_seq_raw on the training batch")
+        loss, parts = add_dual_path_terms(
+            run.criterion, outputs, batch["y_raw"], batch["y_seq_raw"], run.config, loss, parts
+        )
+    elif aux_on:
         if "temporal_aux_pred" not in outputs:
             raise ReimplementationError("temporal_aux_enabled but the model returned no temporal_aux_pred")
         if "y_seq_raw" not in batch:
@@ -670,9 +718,32 @@ def _write_history(run_dir: Path, history: list[dict[str, Any]]) -> None:
     atomic_write_text(run_dir / "training_history.csv", buffer.getvalue())
 
 
+def _branch_metric_keys(metrics: Mapping[str, Any]) -> list[str]:
+    return [
+        key for key in metrics
+        if key.startswith(("branch_", "gate_")) or key in {"inflow_mae", "raw_inflow_mae"}
+    ]
+
+
 def _save_split(run: TaskRun, split: str, metrics: dict[str, Any], packed: Mapping[str, np.ndarray], save_predictions: bool) -> None:
     save_sampling_outputs(run.run_dir, split, packed)
     atomic_write_json(run.run_dir / f"{split}_metrics.json", metrics)
+    report = packed.get("sampling_metrics") if isinstance(packed, Mapping) else None
+    if isinstance(report, Mapping) and isinstance(report.get("mean"), Mapping):
+        keys = [key for key in _branch_metric_keys(report["mean"]) if key.startswith(("branch_", "gate_", "raw_"))]
+        keys.extend(key for key in ("inflow_mae",) if key in report["mean"] and key not in keys)
+        if any(key.startswith("branch_") for key in keys):
+            atomic_write_json(
+                run.run_dir / f"{split}_branch_metrics.json",
+                {
+                    "mean": {key: report["mean"][key] for key in keys},
+                    "std": {key: report["std"][key] for key in keys},
+                    "per_seed": {
+                        str(seed): {key: row[key] for key in keys if key in row}
+                        for seed, row in report["per_seed"].items()
+                    },
+                },
+            )
     if save_predictions:
         save_mstt_predictions(run.run_dir / f"{split}_predictions.npz", packed)
 
@@ -815,6 +886,11 @@ def train_task(
     clock.mark_train_start()
     early_stopped = False
     epochs_this_process = 0
+    print(
+        f"[MSTT] start {run.task.name} {run.rate} parameters={param_count} "
+        f"device={run.device} run_dir={run_dir}",
+        flush=True,
+    )
     try:
         for epoch in range(start_epoch, epochs):
             epoch_start = time.perf_counter()
@@ -826,6 +902,8 @@ def train_task(
                 grad_norm_max = max(grad_norm_max, norm)
                 loss_sum += loss_value
                 loss_batches += 1
+                if epoch == start_epoch and loss_batches == 1:
+                    print(f"[MSTT] first_step loss={loss_value:.5f}", flush=True)
                 batch_samples = int(batch["x"].shape[0])
                 train_samples += batch_samples
                 for key, value in run.last_train_components.items():
@@ -856,6 +934,8 @@ def train_task(
                 **{f"val_{name}_mae": val_metrics[f"{name}_mae"] for name in run.channel_names},
                 **{f"val_{key}": value for key, value in val_metrics.items()
                    if key.startswith(("conservation_", "raw_", "negative_", "correction_", "projection_"))},
+                **{f"val_{key}": value for key, value in val_metrics.items()
+                   if key.startswith(("branch_", "gate_")) and isinstance(value, (int, float)) and not isinstance(value, bool)},
                 "selection_value": value,
                 "improved": improved,
                 "epoch_train_seconds": train_seconds,
@@ -875,6 +955,11 @@ def train_task(
                 temporal_text = (
                     f" temporal_aux_mae={row['train_temporal_aux_mae']:.5f}"
                     f" total_loss={row['train_total_loss']:.5f}"
+                )
+            if "train_branch_a_mae" in row and "train_branch_b_mae" in row:
+                temporal_text += (
+                    f" branch_a_mae={row['train_branch_a_mae']:.5f}"
+                    f" branch_b_mae={row['train_branch_b_mae']:.5f}"
                 )
             aux_text = ""
             if "train_inflow_final_mae" in row and "train_raw_conservation_mae" in row and "train_total_loss" in row:

@@ -424,6 +424,27 @@ training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
   in_all__out_all/p5_p15/separate_value_mlp_temporal_aux11_l05_gated_cross_attention_projected/seed_42/<run_id>/
 ```
 
+## Dual-path history TSF
+
+`history_fusion_mode=dual_path_history_tsf` keeps the auxiliary head and adds
+a second last-step head. Path A is the existing flatten head. Path B reads
+only the first 11 auxiliary predictions through one new 64-d T→S→FFN block
+and its own flatten head. Cross-attention lets the last hidden state and
+path A retrieve that history. A four-state gate, initialized at 0.5, mixes
+the two predictions, and conservation projects the mixture. The loss is the
+projected four-state MAE, plus 0.25 times each path's MAE, plus 0.5 times
+the auxiliary MAE on steps 0..10. The pre-projection raw MAE weight is 0.
+Checkpoint selection stays the mean validation inflow MAE over seeds 42–46.
+
+The config is `configs/experiment_dual_path_history_tsf_projected.json`.
+Experiment id `dual_path_history_tsf_gate4_projected_v1`. At N=1406 the
+model has 1,510,188 parameters.
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all__out_all/p5_p15/dual_path_history_tsf_gate4_projected_v1/seed_42/<run_id>/
+```
+
 ## Independent state TSFs
 
 `backbone_mode=state_independent` keeps the four-state `all` windows and

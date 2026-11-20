@@ -14,6 +14,7 @@ from torch import nn
 
 from MSTT.model.adaptive_embedding import AdaptiveEmbedding
 from MSTT.model.embedding import InputEmbedding, resolve_embedding_dims
+from MSTT.model.dual_history_tsf import DualPathHistoryTSF
 from MSTT.model.graph import SpatialGraph
 from MSTT.model.ffn import SwiGLU
 from MSTT.model.head import PredictionHead
@@ -203,40 +204,44 @@ def validate_independent_backbone(config: MSTTConfig | Mapping[str, Any]) -> Non
             )
 
 
-def validate_history_fusion(config: MSTTConfig | Mapping[str, Any]) -> None:
-    """``gated_cross_attention`` reads the existing 11-step auxiliary predictions.
+_HISTORY_FUSION_MODES = ("none", "gated_cross_attention", "dual_path_history_tsf")
 
-    The widths inside ``HistoryPredictionFusion`` are fixed for this version,
-    so the encoder hidden size stays 128. ``none`` builds no extra parameters.
+
+def validate_history_fusion(config: MSTTConfig | Mapping[str, Any]) -> None:
+    """Active history modes read the existing 11-step auxiliary predictions.
+
+    ``gated_cross_attention`` adds a residual inside ``HistoryPredictionFusion``.
+    ``dual_path_history_tsf`` builds a separate history TSF and mixes two
+    last-step heads. Both keep the observed encoder at width 128.
+    ``none`` builds no extra parameters.
     """
     mode = str(_cfg_get(config, "history_fusion_mode", "none"))
-    if mode not in ("none", "gated_cross_attention"):
+    if mode not in _HISTORY_FUSION_MODES:
         raise ValueError(
-            "history_fusion_mode must be 'none' or 'gated_cross_attention', "
-            f"got {mode!r}"
+            "history_fusion_mode must be 'none', 'gated_cross_attention', or "
+            f"'dual_path_history_tsf', got {mode!r}"
         )
     if mode == "none":
         return
     if not bool(_cfg_get(config, "temporal_aux_enabled", False)):
-        raise ValueError("history_fusion_mode='gated_cross_attention' requires temporal_aux_enabled")
+        raise ValueError(f"history_fusion_mode={mode!r} requires temporal_aux_enabled")
     window = _cfg_get(config, "input_window", None)
     if window is None or int(window) != 12:
-        raise ValueError("history_fusion_mode='gated_cross_attention' requires input_window=12")
+        raise ValueError(f"history_fusion_mode={mode!r} requires input_window=12")
     out_channels = _cfg_get(config, "out_channels", None)
     if out_channels is not None and int(out_channels) != 4:
         raise ValueError(
-            "history_fusion_mode='gated_cross_attention' requires 4 output states, "
-            f"got out_channels={out_channels}"
+            f"history_fusion_mode={mode!r} requires 4 output states, got out_channels={out_channels}"
         )
     if str(_cfg_get(config, "backbone_mode", "shared")) != "shared":
-        raise ValueError("history_fusion_mode='gated_cross_attention' requires backbone_mode='shared'")
+        raise ValueError(f"history_fusion_mode={mode!r} requires backbone_mode='shared'")
     if str(_cfg_get(config, "head_type", "flatten")) != "flatten":
-        raise ValueError("history_fusion_mode='gated_cross_attention' requires head_type='flatten'")
+        raise ValueError(f"history_fusion_mode={mode!r} requires head_type='flatten'")
     if str(_cfg_get(config, "conservation_mode", "none")) != "projected":
-        raise ValueError("history_fusion_mode='gated_cross_attention' requires conservation_mode='projected'")
+        raise ValueError(f"history_fusion_mode={mode!r} requires conservation_mode='projected'")
     d_model = _cfg_get(config, "d_model", None)
     if d_model is None or int(d_model) != 128:
-        raise ValueError("history_fusion_mode='gated_cross_attention' requires d_model=128")
+        raise ValueError(f"history_fusion_mode={mode!r} requires d_model=128")
 
 
 def validate_state_token_transformer(config: MSTTConfig | Mapping[str, Any]) -> None:
@@ -508,11 +513,15 @@ class MSTT(nn.Module):
             self.temporal_aux_head = nn.Linear(int(config.d_model), 4)
         # After the auxiliary head, so a shared seed still matches every older parameter.
         self.history_fusion = None
+        self.dual_history = None
         validate_history_fusion(config)
-        if str(config.history_fusion_mode) == "gated_cross_attention":
-            if self.temporal_aux_head is None or self.projection is None:
+        if self.temporal_aux_head is None or self.projection is None:
+            if str(config.history_fusion_mode) != "none":
                 raise ValueError("history fusion requires the temporal auxiliary head and projected conservation")
+        elif str(config.history_fusion_mode) == "gated_cross_attention":
             self.history_fusion = HistoryPredictionFusion()
+        elif str(config.history_fusion_mode) == "dual_path_history_tsf":
+            self.dual_history = DualPathHistoryTSF(config, graph)
 
     def forward(
         self,
@@ -529,18 +538,28 @@ class MSTT(nn.Module):
         base = self.head(hidden)
         temporal_aux = None if self.temporal_aux_head is None else self.temporal_aux_head(hidden)
         raw = base
+        branches = None
         if self.history_fusion is not None:
             if temporal_aux is None:
                 raise RuntimeError("history fusion requires temporal_aux_pred from this forward")
             # Standardized history, earliest first. The 12th auxiliary step is not a key.
             history = temporal_aux[:, :-1].permute(0, 2, 1, 3).contiguous()
             raw = base + self.history_fusion(hidden[:, -1], history)
+        elif self.dual_history is not None:
+            if temporal_aux is None:
+                raise RuntimeError("dual path history TSF requires temporal_aux_pred from this forward")
+            branches = self.dual_history(hidden, temporal_aux, base)
+            raw = branches["raw_pred"]
         if self.projection is None:
             outputs = {"raw_pred": raw, "final_pred": raw}
         else:
             outputs = self.projection(hidden, raw)
         if temporal_aux is not None:
             outputs["temporal_aux_pred"] = temporal_aux
+        if branches is not None:
+            outputs["branch_a_pred"] = branches["branch_a_pred"]
+            outputs["branch_b_pred"] = branches["branch_b_pred"]
+            outputs["branch_gate"] = branches["branch_gate"]
         return outputs
 
     def _encode(self, x, time_of_day=None, day_of_week=None) -> torch.Tensor:
@@ -582,8 +601,12 @@ class MSTT(nn.Module):
         fusion_ids = set()
         if isinstance(self.head, StateTokenTransformerHead):
             fusion_ids = {id(module) for module in self.head.modules() if isinstance(module, SwiGLU)}
+        history_ffn_ids = set()
+        if self.dual_history is not None:
+            history_ffn_ids = {id(module) for module in self.dual_history.modules() if isinstance(module, SwiGLU)}
+        excluded_ffn_ids = fusion_ids | history_ffn_ids
         backbone_ffns = [
-            module for module in self.modules() if isinstance(module, SwiGLU) and id(module) not in fusion_ids
+            module for module in self.modules() if isinstance(module, SwiGLU) and id(module) not in excluded_ffn_ids
         ]
         fusion_ffns = [module for module in self.modules() if isinstance(module, SwiGLU) and id(module) in fusion_ids]
         layout = str(self.config.attention_layout)
@@ -629,7 +652,17 @@ class MSTT(nn.Module):
                 "parameters": int(layer.weight.numel() + layer.bias.numel()),
                 "supervised_steps": "0..10",
             }
-        if self.history_fusion is None:
+        if self.dual_history is not None:
+            summary["history_fusion"] = {
+                "enabled": False,
+                "mode": "dual_path_history_tsf",
+                "parameters": 0,
+                "replaced_by": "history_tsf",
+            }
+            history = self.dual_history.describe()
+            history["branch_a_head"] = self.head.describe()
+            summary["history_tsf"] = history
+        elif self.history_fusion is None:
             summary["history_fusion"] = {"enabled": False, "mode": "none", "parameters": 0}
         else:
             summary["history_fusion"] = self.history_fusion.describe()

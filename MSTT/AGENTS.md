@@ -236,6 +236,25 @@ Experiment id
 The four `p5_p15` frequencies use this same structure and the parent
 hyperparameters. Do not resume it from an auxiliary-only checkpoint.
 
+`history_fusion_mode=dual_path_history_tsf` is a separate readout, not a
+residual on the flatten head. It keeps the same shared encoder, auxiliary
+head, and projected conservation. Path A is the existing flatten head.
+Path B embeds auxiliary steps 0..10 with `Linear(4, 64)`, a learned
+`[11, 64]` time table, and a learned `[N, 64]` road table, then one new
+T→S→FFN block (`d_model=64`, 4 heads, FFN 176). Its own flatten head maps
+`704 → 4`. Cross-attention reads `cat(h, A)` against that history block
+output, 4 heads of width 16, dropout 0. A four-state gate mixes A and B.
+Its last linear starts at zero, so the initial gate is 0.5 and the raw
+prediction is the average of A and B. Conservation projects only that
+mixture. The loss is final MAE + 0.25 path-A MAE + 0.25 path-B MAE + 0.5
+auxiliary MAE on steps 0..10. `projection_raw_loss_weight` and
+`projection_consistency_weight` are 0. The history block's SwiGLU is not
+counted as a backbone FFN. At N=1406 the new module has 194,824 parameters
+and the model has 1,510,188. Config:
+`configs/experiment_dual_path_history_tsf_projected.json`. Experiment id
+`dual_path_history_tsf_gate4_projected_v1`. Do not resume it from an
+auxiliary-only or gated-fusion checkpoint.
+
 `projection_supervision` is `all` or `inflow_only`. Missing or `all` keeps
 original C: four-state final MAE + `projection_raw_loss_weight` * raw MAE +
 `projection_consistency_weight` * pre-projection conservation MAE.

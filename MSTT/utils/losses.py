@@ -143,6 +143,41 @@ def temporal_aux_terms(criterion: RawScaleLoss, outputs, target_seq, config):
     return aux, weighted
 
 
+def add_dual_path_terms(criterion: RawScaleLoss, outputs, target_raw, target_seq, config, loss, parts):
+    """Add the two branch MAEs and the existing 11-step auxiliary MAE. One returned total."""
+    if str(config.get("history_fusion_mode", "none")) != "dual_path_history_tsf":
+        raise ValueError("add_dual_path_terms requires history_fusion_mode='dual_path_history_tsf'")
+    for key in ("branch_a_pred", "branch_b_pred", "branch_gate"):
+        if key not in outputs:
+            raise ValueError(f"dual path outputs are missing {key}")
+    branch_a = criterion(outputs["branch_a_pred"], target_raw)
+    branch_b = criterion(outputs["branch_b_pred"], target_raw)
+    weight_a = float(config.get("branch_a_loss_weight", 0.25))
+    weight_b = float(config.get("branch_b_loss_weight", 0.25))
+    weighted_a = branch_a * weight_a
+    weighted_b = branch_b * weight_b
+    aux, weighted_aux = temporal_aux_terms(criterion, outputs, target_seq, config)
+    total = loss + weighted_a + weighted_b + weighted_aux
+    updated = dict(parts)
+    updated["final_mae"] = updated.get("supervised_mae", updated.get("inflow_final_mae"))
+    updated["branch_a_mae"] = branch_a
+    updated["branch_b_mae"] = branch_b
+    updated["weighted_branch_a_loss"] = weighted_a
+    updated["weighted_branch_b_loss"] = weighted_b
+    updated["temporal_aux_mae"] = aux
+    updated["weighted_temporal_aux_loss"] = weighted_aux
+    gate = outputs["branch_gate"].detach()
+    gate_mean = gate.float().mean(dim=tuple(range(gate.ndim - 1)))
+    from MSTT.config import STATE_CHANNELS
+
+    if int(gate_mean.numel()) != len(STATE_CHANNELS):
+        raise ValueError(f"branch gate has {int(gate_mean.numel())} states, expected {len(STATE_CHANNELS)}")
+    for name, value in zip(STATE_CHANNELS, gate_mean):
+        updated[f"gate_{name}_mean"] = value
+    updated["total_loss"] = total
+    return total, updated
+
+
 def objective_description(criterion: RawScaleLoss, config) -> str:
     mode = config.get("conservation_mode", "none")
     if mode == "soft":
@@ -155,6 +190,11 @@ def objective_description(criterion: RawScaleLoss, config) -> str:
                 f" + {float(config.get('projection_consistency_weight', 0.)):g} * raw_conservation_mae")
     else:
         text = criterion.describe()
+    if str(config.get("history_fusion_mode", "none")) == "dual_path_history_tsf":
+        text += (
+            f" + {float(config.get('branch_a_loss_weight', 0.25)):g} * branch_a_mae"
+            f" + {float(config.get('branch_b_loss_weight', 0.25)):g} * branch_b_mae"
+        )
     if bool(config.get("temporal_aux_enabled", False)):
         text += f" + {float(config.get('temporal_aux_weight', 0.5)):g} * temporal_aux_mae[0:11]"
     return text
