@@ -526,9 +526,14 @@ class TaskRun:
         diagnostics = {}
         branch_totals: dict[str, Any] = {}
         if self.task.name in {"All2All", "AllSpC2All"}:
+            history_mode = str(self.config.get("history_fusion_mode", "none"))
+
             def _predict(batch):
                 outputs = predict_with_aux(model, batch, amp=amp, device=self.device)
-                _stream_branch_inflow(outputs, batch, self.criterion, branch_totals)
+                if history_mode == "two_stage_projected_tsf":
+                    _stream_two_stage_inflow(outputs, batch, self.criterion, branch_totals)
+                else:
+                    _stream_branch_inflow(outputs, batch, self.criterion, branch_totals)
                 return outputs
 
             packed, diagnostics = collect_conservation_predictions(
@@ -554,7 +559,15 @@ class TaskRun:
         metrics["loss_name"] = self.criterion.describe()
         metrics["sample_count"] = int(packed["pred_raw"].shape[0])
         metrics["split"] = split
-        if branch_totals.get("branch_a_count"):
+        if branch_totals.get("stage1_last_count"):
+            metrics["stage1_last_inflow_mae"] = branch_totals["stage1_last"] / branch_totals["stage1_last_count"]
+            metrics["raw_inflow_mae"] = branch_totals["raw"] / branch_totals["raw_count"]
+            streamed_final = branch_totals["final"] / branch_totals["final_count"]
+            if "inflow_mae" in metrics and abs(streamed_final - float(metrics["inflow_mae"])) > 1e-4:
+                raise ReimplementationError(
+                    f"streamed final inflow MAE {streamed_final} != inflow_mae {metrics['inflow_mae']}"
+                )
+        elif branch_totals.get("branch_a_count"):
             metrics["branch_a_inflow_mae"] = branch_totals["branch_a"] / branch_totals["branch_a_count"]
             metrics["branch_b_inflow_mae"] = branch_totals["branch_b"] / branch_totals["branch_b_count"]
             metrics["raw_inflow_mae"] = branch_totals["raw"] / branch_totals["raw_count"]
@@ -596,6 +609,36 @@ def _restore_rng(state: Mapping[str, Any], loader) -> None:
         loader.generator.set_state(state["loader"])
     if state.get("cuda") is not None and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(state["cuda"])
+
+
+def _stream_two_stage_inflow(outputs, batch, criterion, totals: dict[str, Any]) -> None:
+    """Sum inflow absolute errors for stage-1 last, residual raw, and final projection.
+
+    The divisor is the element count, not the mean of batch means. ``inflow_mae``
+    stays the existing final metric; this check only confirms the same sum.
+    """
+    if "temporal_aux_pred" not in outputs or "raw_pred" not in outputs or "final_pred" not in outputs:
+        raise ReimplementationError("two_stage evaluation is missing stage predictions")
+    target = batch["y_raw"].float()
+    stage1_last = outputs["temporal_aux_pred"][:, -1:]
+    if (
+        stage1_last.shape != target.shape
+        or outputs["raw_pred"].shape != target.shape
+        or outputs["final_pred"].shape != target.shape
+    ):
+        raise ReimplementationError(
+            "two_stage inflow shapes "
+            f"stage1={tuple(stage1_last.shape)} raw={tuple(outputs['raw_pred'].shape)} "
+            f"final={tuple(outputs['final_pred'].shape)} target={tuple(target.shape)}"
+        )
+    for slot, prediction in (
+        ("stage1_last", stage1_last),
+        ("raw", outputs["raw_pred"]),
+        ("final", outputs["final_pred"]),
+    ):
+        error = (criterion.denormalize(prediction)[..., 0] - target[..., 0]).abs()
+        totals[slot] = float(totals.get(slot, 0.0)) + float(error.detach().double().sum())
+        totals[slot + "_count"] = float(totals.get(slot + "_count", 0.0)) + float(error.numel())
 
 
 def _stream_branch_inflow(outputs, batch, criterion, totals: dict[str, Any]) -> None:
@@ -670,6 +713,12 @@ def train_step(
                         f"(missing={missing}, unexpected={unexpected})"
                     )
     history_mode = str(run.config.get("history_fusion_mode", "none"))
+    if history_mode == "two_stage_projected_tsf":
+        if outputs is None or "y_seq_raw" not in batch:
+            raise ReimplementationError("two-stage training requires auxiliary outputs and y_seq_raw")
+        last = batch["y_seq_raw"][:, -1:]
+        if last.shape != batch["y_raw"].shape or not torch.equal(last, batch["y_raw"]):
+            raise ReimplementationError("y_seq_raw[:, -1:] does not match y_raw")
     if history_mode == "dual_path_history_tsf":
         if outputs is None:
             raise ReimplementationError("dual path history TSF requires auxiliary model outputs")
@@ -718,10 +767,13 @@ def _write_history(run_dir: Path, history: list[dict[str, Any]]) -> None:
     atomic_write_text(run_dir / "training_history.csv", buffer.getvalue())
 
 
+_STAGE_INFLOW_KEYS = ("stage1_last_inflow_mae", "raw_inflow_mae", "inflow_mae")
+
+
 def _branch_metric_keys(metrics: Mapping[str, Any]) -> list[str]:
     return [
         key for key in metrics
-        if key.startswith(("branch_", "gate_")) or key in {"inflow_mae", "raw_inflow_mae"}
+        if key.startswith(("branch_", "gate_")) or key in {"inflow_mae", "raw_inflow_mae", "stage1_last_inflow_mae"}
     ]
 
 
@@ -740,6 +792,19 @@ def _save_split(run: TaskRun, split: str, metrics: dict[str, Any], packed: Mappi
                     "std": {key: report["std"][key] for key in keys},
                     "per_seed": {
                         str(seed): {key: row[key] for key in keys if key in row}
+                        for seed, row in report["per_seed"].items()
+                    },
+                },
+            )
+        stage_keys = [key for key in _STAGE_INFLOW_KEYS if key in report["mean"]]
+        if "stage1_last_inflow_mae" in stage_keys:
+            atomic_write_json(
+                run.run_dir / f"{split}_stage_inflow.json",
+                {
+                    "mean": {key: report["mean"][key] for key in stage_keys},
+                    "std": {key: report["std"][key] for key in stage_keys},
+                    "per_seed": {
+                        str(seed): {key: row[key] for key in stage_keys if key in row}
                         for seed, row in report["per_seed"].items()
                     },
                 },
@@ -933,7 +998,7 @@ def train_task(
                 **{f"val_{key}": val_metrics[key] for key in CORE + ("scaled_mae",)},
                 **{f"val_{name}_mae": val_metrics[f"{name}_mae"] for name in run.channel_names},
                 **{f"val_{key}": value for key, value in val_metrics.items()
-                   if key.startswith(("conservation_", "raw_", "negative_", "correction_", "projection_"))},
+                   if key.startswith(("conservation_", "raw_", "negative_", "correction_", "projection_", "stage1_"))},
                 **{f"val_{key}": value for key, value in val_metrics.items()
                    if key.startswith(("branch_", "gate_")) and isinstance(value, (int, float)) and not isinstance(value, bool)},
                 "selection_value": value,

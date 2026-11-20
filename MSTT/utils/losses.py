@@ -123,12 +123,14 @@ def conservation_objective(criterion: RawScaleLoss, outputs, target_raw, config)
 
 
 def temporal_aux_terms(criterion: RawScaleLoss, outputs, target_seq, config):
-    """Physical MAE of the auxiliary head on steps 0..10. The 12th step is not in this loss."""
+    """Physical MAE of the supervised auxiliary tensor.
+
+    ``history_except_last`` uses steps 0..10. ``all_steps`` uses the full 12-step
+    tensor. Each scope averages every element in its own slice once.
+    """
     if not bool(config.get("temporal_aux_enabled", False)):
         raise ValueError("temporal_aux_terms requires temporal_aux_enabled")
     scope = str(config.get("temporal_aux_scope", "history_except_last"))
-    if scope != "history_except_last":
-        raise ValueError(f"unsupported temporal_aux_scope {scope!r}")
     prediction = outputs["temporal_aux_pred"]
     target = target_seq
     if prediction.ndim != 4 or target.ndim != 4 or prediction.shape != target.shape:
@@ -137,7 +139,12 @@ def temporal_aux_terms(criterion: RawScaleLoss, outputs, target_seq, config):
         )
     if int(prediction.shape[1]) != 12:
         raise ValueError(f"temporal aux prediction must have 12 steps, got {prediction.shape[1]}")
-    aux = criterion(prediction[:, :11], target[:, :11])
+    if scope == "history_except_last":
+        aux = criterion(prediction[:, :11], target[:, :11])
+    elif scope == "all_steps":
+        aux = criterion(prediction, target)
+    else:
+        raise ValueError(f"unsupported temporal_aux_scope {scope!r}")
     weight = float(config.get("temporal_aux_weight", 0.5))
     weighted = aux * weight
     return aux, weighted
@@ -179,6 +186,9 @@ def add_dual_path_terms(criterion: RawScaleLoss, outputs, target_raw, target_seq
 
 
 def objective_description(criterion: RawScaleLoss, config) -> str:
+    if str(config.get("history_fusion_mode", "none")) == "two_stage_projected_tsf":
+        weight = float(config.get("temporal_aux_weight", 0.5))
+        return f"final_mae_raw + {weight:g} * stage1_projected_mae[0:12]"
     mode = config.get("conservation_mode", "none")
     if mode == "soft":
         text = f"mae_raw + {float(config.get('conservation_lambda', .1)):g} * conservation_mae"
@@ -196,5 +206,9 @@ def objective_description(criterion: RawScaleLoss, config) -> str:
             f" + {float(config.get('branch_b_loss_weight', 0.25)):g} * branch_b_mae"
         )
     if bool(config.get("temporal_aux_enabled", False)):
-        text += f" + {float(config.get('temporal_aux_weight', 0.5)):g} * temporal_aux_mae[0:11]"
+        scope = str(config.get("temporal_aux_scope", "history_except_last"))
+        if scope == "all_steps":
+            text += f" + {float(config.get('temporal_aux_weight', 0.5)):g} * temporal_aux_mae[0:12]"
+        else:
+            text += f" + {float(config.get('temporal_aux_weight', 0.5)):g} * temporal_aux_mae[0:11]"
     return text

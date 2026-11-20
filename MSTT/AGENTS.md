@@ -255,6 +255,25 @@ and the model has 1,510,188. Config:
 `dual_path_history_tsf_gate4_projected_v1`. Do not resume it from an
 auxiliary-only or gated-fusion checkpoint.
 
+`history_fusion_mode=two_stage_projected_tsf` is a second full-width TSF, not
+a residual on the flatten head. The shared embedding (four value MLPs, road,
+TOD, DOW, and adaptive) runs twice. The first TSF reads the partial
+observation. `temporal_aux_head` reconstructs all 12 steps. A new projection
+MLP, separate from the existing last-step projection, puts every step on the
+conservation surface in the target z-score. The second TSF has its own
+T→S→FFN parameters and reads only those 12 projected values. `head_type=last`
+is the residual head: its linear layer starts at zero, so the initial raw
+last step equals the projected first-stage last step. The existing projection
+then reads that sum and the second TSF's last hidden state. The loss is the
+projected last-step four-state MAE plus 0.5 times the 12-step projected MAE
+(`temporal_aux_scope=all_steps`). `projection_raw_loss_weight`,
+`projection_consistency_weight`, and both branch weights are 0. The second
+block's SwiGLU is not counted as a backbone FFN. At N=1406 the model has
+1,513,288 parameters. Config:
+`configs/experiment_two_stage_projected_tsf.json`. Experiment id
+`two_stage_projected_tsf_shared_embedding_v1`. Do not resume it from an
+auxiliary-only, gated-fusion, or dual-path checkpoint.
+
 `projection_supervision` is `all` or `inflow_only`. Missing or `all` keeps
 original C: four-state final MAE + `projection_raw_loss_weight` * raw MAE +
 `projection_consistency_weight` * pre-projection conservation MAE.

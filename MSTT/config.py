@@ -299,8 +299,8 @@ _CHOICES = {
     "ffn_placement": ("after_spatial",),
     "conservation_mode": ("none", "soft", "projected"),
     "projection_supervision": ("all", "inflow_only"),
-    "temporal_aux_scope": ("history_except_last",),
-    "history_fusion_mode": ("none", "gated_cross_attention", "dual_path_history_tsf"),
+    "temporal_aux_scope": ("history_except_last", "all_steps"),
+    "history_fusion_mode": ("none", "gated_cross_attention", "dual_path_history_tsf", "two_stage_projected_tsf"),
     "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
     "head_type": ("flatten", "last", "flatten_mlp", "state_token_transformer"),
@@ -418,6 +418,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     from MSTT.model.mstt import validate_history_fusion
 
     validate_history_fusion(config)
+    validate_two_stage_training(config)
     if str(config.get("history_fusion_mode", "none")) == "dual_path_history_tsf":
         if float(config.get("projection_raw_loss_weight", TRAIN_DEFAULTS["projection_raw_loss_weight"])) != 0.0:
             raise ValueError("history_fusion_mode='dual_path_history_tsf' requires projection_raw_loss_weight=0")
@@ -515,11 +516,42 @@ def with_legacy_defaults(saved: Mapping[str, Any]) -> dict[str, Any]:
 _CONSERVATION_TASKS = frozenset({"All2All", "AllSpC2All"})
 
 
+def validate_two_stage_training(config: Mapping[str, Any]) -> None:
+    """Loss constraints for the two-stage readout. Other modes keep their own scope."""
+    mode = str(config.get("history_fusion_mode", "none"))
+    scope = str(config.get("temporal_aux_scope", TRAIN_DEFAULTS["temporal_aux_scope"]))
+    if scope == "all_steps" and mode != "two_stage_projected_tsf":
+        raise ValueError(
+            "temporal_aux_scope='all_steps' requires history_fusion_mode='two_stage_projected_tsf'"
+        )
+    if mode != "two_stage_projected_tsf":
+        return
+    if scope != "all_steps":
+        raise ValueError(
+            "history_fusion_mode='two_stage_projected_tsf' requires temporal_aux_scope='all_steps'"
+        )
+    weight = float(config.get("temporal_aux_weight", TRAIN_DEFAULTS["temporal_aux_weight"]))
+    if weight != 0.5:
+        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires temporal_aux_weight=0.5")
+    if str(config.get("projection_supervision", TRAIN_DEFAULTS["projection_supervision"])) != "all":
+        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires projection_supervision='all'")
+    for key in (
+        "projection_raw_loss_weight",
+        "projection_consistency_weight",
+        "branch_a_loss_weight",
+        "branch_b_loss_weight",
+    ):
+        value = float(config.get(key, TRAIN_DEFAULTS[key]))
+        if value != 0.0:
+            raise ValueError(f"history_fusion_mode='two_stage_projected_tsf' requires {key}=0")
+
+
 def validate_history_fusion_task(config: Mapping[str, Any], task: TaskSpec) -> None:
     """History modes are four-state last-step paths on top of the auxiliary head."""
     from MSTT.model.mstt import validate_history_fusion
 
     validate_history_fusion(config)
+    validate_two_stage_training(config)
     mode = str(config.get("history_fusion_mode", "none"))
     if mode == "none":
         return
@@ -527,6 +559,11 @@ def validate_history_fusion_task(config: Mapping[str, Any], task: TaskSpec) -> N
         raise ValueError(
             f"history_fusion_mode={mode!r} requires output channels "
             f"{list(STATE_CHANNELS)} in that order, got task {task.name} {list(task.output_channels)}"
+        )
+    if mode == "two_stage_projected_tsf" and task.input_channels != STATE_CHANNELS:
+        raise ValueError(
+            "history_fusion_mode='two_stage_projected_tsf' requires input channels "
+            f"{list(STATE_CHANNELS)} in that order, got task {task.name} {list(task.input_channels)}"
         )
 
 
@@ -703,7 +740,7 @@ def temporal_aux_settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "temporal_aux_scope": str(config.get("temporal_aux_scope", defaults["temporal_aux_scope"])),
         "history_fusion_mode": str(config.get("history_fusion_mode", defaults["history_fusion_mode"])),
     }
-    if settings["history_fusion_mode"] == "dual_path_history_tsf":
+    if settings["history_fusion_mode"] in {"dual_path_history_tsf", "two_stage_projected_tsf"}:
         settings["branch_a_loss_weight"] = float(config.get("branch_a_loss_weight", defaults["branch_a_loss_weight"]))
         settings["branch_b_loss_weight"] = float(config.get("branch_b_loss_weight", defaults["branch_b_loss_weight"]))
     return settings

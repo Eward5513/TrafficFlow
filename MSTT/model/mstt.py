@@ -204,22 +204,30 @@ def validate_independent_backbone(config: MSTTConfig | Mapping[str, Any]) -> Non
             )
 
 
-_HISTORY_FUSION_MODES = ("none", "gated_cross_attention", "dual_path_history_tsf")
+_HISTORY_FUSION_MODES = (
+    "none",
+    "gated_cross_attention",
+    "dual_path_history_tsf",
+    "two_stage_projected_tsf",
+)
+_FLATTEN_HISTORY_MODES = ("gated_cross_attention", "dual_path_history_tsf")
 
 
 def validate_history_fusion(config: MSTTConfig | Mapping[str, Any]) -> None:
-    """Active history modes read the existing 11-step auxiliary predictions.
+    """Active history modes keep the observed encoder at width 128.
 
-    ``gated_cross_attention`` adds a residual inside ``HistoryPredictionFusion``.
-    ``dual_path_history_tsf`` builds a separate history TSF and mixes two
-    last-step heads. Both keep the observed encoder at width 128.
+    ``gated_cross_attention`` and ``dual_path_history_tsf`` read the 11-step
+    auxiliary head and require ``head_type='flatten'``.
+    ``two_stage_projected_tsf`` rebuilds all 12 steps, runs a second TSF on
+    those projected values, and requires ``head_type='last'``.
     ``none`` builds no extra parameters.
     """
     mode = str(_cfg_get(config, "history_fusion_mode", "none"))
     if mode not in _HISTORY_FUSION_MODES:
         raise ValueError(
-            "history_fusion_mode must be 'none', 'gated_cross_attention', or "
-            f"'dual_path_history_tsf', got {mode!r}"
+            "history_fusion_mode must be 'none', 'gated_cross_attention', "
+            "'dual_path_history_tsf', or 'two_stage_projected_tsf', "
+            f"got {mode!r}"
         )
     if mode == "none":
         return
@@ -235,13 +243,27 @@ def validate_history_fusion(config: MSTTConfig | Mapping[str, Any]) -> None:
         )
     if str(_cfg_get(config, "backbone_mode", "shared")) != "shared":
         raise ValueError(f"history_fusion_mode={mode!r} requires backbone_mode='shared'")
-    if str(_cfg_get(config, "head_type", "flatten")) != "flatten":
-        raise ValueError(f"history_fusion_mode={mode!r} requires head_type='flatten'")
     if str(_cfg_get(config, "conservation_mode", "none")) != "projected":
         raise ValueError(f"history_fusion_mode={mode!r} requires conservation_mode='projected'")
     d_model = _cfg_get(config, "d_model", None)
     if d_model is None or int(d_model) != 128:
         raise ValueError(f"history_fusion_mode={mode!r} requires d_model=128")
+    head = str(_cfg_get(config, "head_type", "flatten"))
+    if mode in _FLATTEN_HISTORY_MODES:
+        if head != "flatten":
+            raise ValueError(f"history_fusion_mode={mode!r} requires head_type='flatten'")
+        return
+    if head != "last":
+        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires head_type='last'")
+    layers = _cfg_get(config, "num_layers", None)
+    if layers is None or int(layers) != 1:
+        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires num_layers=1")
+    if str(_cfg_get(config, "attention_layout", "factorized_ts")) != "factorized_ts":
+        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires attention_layout='factorized_ts'")
+    if str(_cfg_get(config, "value_embedding_mode", "joint_linear")) != "separate_mlp":
+        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires value_embedding_mode='separate_mlp'")
+    if not bool(_cfg_get(config, "use_adaptive_embedding", False)):
+        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires use_adaptive_embedding")
 
 
 def validate_state_token_transformer(config: MSTTConfig | Mapping[str, Any]) -> None:
@@ -514,6 +536,8 @@ class MSTT(nn.Module):
         # After the auxiliary head, so a shared seed still matches every older parameter.
         self.history_fusion = None
         self.dual_history = None
+        self.stage2_block = None
+        self.stage1_projection = None
         validate_history_fusion(config)
         if self.temporal_aux_head is None or self.projection is None:
             if str(config.history_fusion_mode) != "none":
@@ -522,6 +546,17 @@ class MSTT(nn.Module):
             self.history_fusion = HistoryPredictionFusion()
         elif str(config.history_fusion_mode) == "dual_path_history_tsf":
             self.dual_history = DualPathHistoryTSF(config, graph)
+        elif str(config.history_fusion_mode) == "two_stage_projected_tsf":
+            if not isinstance(self.head, PredictionHead) or self.head.head_type != "last":
+                raise ValueError("two_stage_projected_tsf uses the last-step head as its residual readout")
+            nn.init.zeros_(self.head.proj.weight)
+            nn.init.zeros_(self.head.proj.bias)
+            self.stage2_block = build_factorized_block(config, graph)
+            self.stage1_projection = ConservationProjection(
+                config.d_model, config.projection_mlp_hidden_dim, target_mean, target_std,
+            )
+            _assert_parameters_disjoint(self.stage2_block, self.blocks)
+            _assert_parameters_disjoint(self.stage1_projection, [self.projection])
 
     def forward(
         self,
@@ -534,6 +569,8 @@ class MSTT(nn.Module):
         return self.head(self._encode(x, time_of_day, day_of_week))
 
     def forward_with_aux(self, x, time_of_day=None, day_of_week=None) -> dict[str, torch.Tensor]:
+        if self.stage2_block is not None:
+            return self._forward_two_stage(x, time_of_day, day_of_week)
         hidden = self._encode(x, time_of_day, day_of_week)
         base = self.head(hidden)
         temporal_aux = None if self.temporal_aux_head is None else self.temporal_aux_head(hidden)
@@ -562,6 +599,29 @@ class MSTT(nn.Module):
             outputs["branch_gate"] = branches["branch_gate"]
         return outputs
 
+    def _embed_shared(self, values, time_of_day=None, day_of_week=None) -> torch.Tensor:
+        """One embedding call: value MLP, road, TOD, DOW, then adaptive."""
+        hidden = self.embedding(values, time_of_day, day_of_week)
+        if self.adaptive is not None:
+            hidden = self.adaptive(hidden)
+        return hidden
+
+    def _forward_two_stage(self, x, time_of_day=None, day_of_week=None) -> dict[str, torch.Tensor]:
+        """Rebuild 12 projected steps, then correct only the last step."""
+        if self.temporal_aux_head is None or self.stage1_projection is None or self.projection is None:
+            raise RuntimeError("two-stage forward requires the step head and both projections")
+        if self.stage2_block is None:
+            raise RuntimeError("two-stage forward requires an independent second TSF")
+        hidden = self._encode(x, time_of_day, day_of_week)
+        raw_steps = self.temporal_aux_head(hidden)
+        stage1 = self.stage1_projection.project_aligned(hidden, raw_steps)
+        projected = stage1["final_pred"]
+        second = self.stage2_block(self._embed_shared(projected, time_of_day, day_of_week))
+        raw2 = projected[:, -1] + self.head(second)
+        outputs = self.projection(second, raw2)
+        outputs["temporal_aux_pred"] = projected
+        return outputs
+
     def _encode(self, x, time_of_day=None, day_of_week=None) -> torch.Tensor:
         if x.ndim != 4:
             raise ValueError(f"x must be [B, T, N, C_in], got {tuple(x.shape)}")
@@ -587,9 +647,7 @@ class MSTT(nn.Module):
                     f"concatenated state branches have width {hidden.shape[-1]}, expected {self.config.d_model}"
                 )
             return hidden
-        hidden = self.embedding(x, time_of_day, day_of_week)
-        if self.adaptive is not None:
-            hidden = self.adaptive(hidden)
+        hidden = self._embed_shared(x, time_of_day, day_of_week)
         for block in self.blocks:
             hidden = block(hidden)
         return hidden
@@ -604,7 +662,10 @@ class MSTT(nn.Module):
         history_ffn_ids = set()
         if self.dual_history is not None:
             history_ffn_ids = {id(module) for module in self.dual_history.modules() if isinstance(module, SwiGLU)}
-        excluded_ffn_ids = fusion_ids | history_ffn_ids
+        stage2_ffn_ids = set()
+        if self.stage2_block is not None:
+            stage2_ffn_ids = {id(module) for module in self.stage2_block.modules() if isinstance(module, SwiGLU)}
+        excluded_ffn_ids = fusion_ids | history_ffn_ids | stage2_ffn_ids
         backbone_ffns = [
             module for module in self.modules() if isinstance(module, SwiGLU) and id(module) not in excluded_ffn_ids
         ]
@@ -644,13 +705,15 @@ class MSTT(nn.Module):
             summary["temporal_aux_head"] = {"enabled": False}
         else:
             layer = self.temporal_aux_head
+            supervised = "0..11" if self.stage2_block is not None else "0..10"
             summary["temporal_aux_head"] = {
                 "enabled": True,
                 "in_features": int(layer.in_features),
                 "out_features": int(layer.out_features),
                 "shared_across_time_and_roads": True,
                 "parameters": int(layer.weight.numel() + layer.bias.numel()),
-                "supervised_steps": "0..10",
+                "supervised_steps": supervised,
+                "supervised_values": "projected_12step_target_zscore" if self.stage2_block is not None else "auxiliary_head",
             }
         if self.dual_history is not None:
             summary["history_fusion"] = {
@@ -713,6 +776,41 @@ class MSTT(nn.Module):
             attention_inner_dim=int(self.blocks[0].temporal.inner_dim),
             block_order=["T", "S", "FFN"],
         )
+        if self.stage2_block is not None and self.stage1_projection is not None:
+            stage2_ffns = [module for module in self.stage2_block.modules() if isinstance(module, SwiGLU)]
+            first, last = self.stage1_projection.mlp[0], self.stage1_projection.mlp[-1]
+            summary.update(
+                temporal_attention_count=2,
+                spatial_attention_count=2,
+                stage2_ffn_count=len(stage2_ffns),
+                stage2_ffn_hidden_dims=[int(ffn.w_gate.out_features) for ffn in stage2_ffns],
+                readout=(
+                    "stage1 linear head on every step, stage1 conservation projection, "
+                    "stage2 TSF on the projected values, zero-initialized last-step residual "
+                    "added to the projected last step, then the stage2 conservation projection"
+                ),
+            )
+            summary["two_stage"] = {
+                "mode": "two_stage_projected_tsf",
+                "stage1_input": "partial_observation",
+                "stage2_input": "projected_12step_target_zscore",
+                "shared_embedding": True,
+                "shared_value_mlps": True,
+                "stage1_blocks": len(self.blocks),
+                "stage2_blocks": 1,
+                "backbone_ffn_count": summary["backbone_ffn_count"],
+                "stage2_ffn_count": len(stage2_ffns),
+                "stage1_projection_mlp": {
+                    "input_dim": int(first.in_features),
+                    "hidden_dim": int(first.out_features),
+                    "output_dim": int(last.out_features),
+                },
+                "stage2_projection_mlp": summary.get("projection_mlp"),
+                "residual_head": self.head.describe(),
+                "residual_head_input_width": int(self.head.proj.in_features),
+                "aux_supervised_steps": "0..11",
+                "total_parameters": summary["total_parameters"],
+            }
         return summary
 
     def spatial_summary(self) -> dict[str, Any]:
@@ -762,6 +860,9 @@ class MSTT(nn.Module):
             summary["independent_copies"] = (
                 f"{branch_count} independent {name} spatial attentions, one per state channel"
             )
+        if self.stage2_block is not None:
+            summary["stage_copies"] = 2
+            summary["stage2"] = "independent second TSF; same spatial attention settings, separate parameters"
         return summary
 
     def _context_table_summary(self) -> dict[str, Any]:
