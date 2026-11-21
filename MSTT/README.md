@@ -440,9 +440,144 @@ The config is `configs/experiment_dual_path_history_tsf_projected.json`.
 Experiment id `dual_path_history_tsf_gate4_projected_v1`. At N=1406 the
 model has 1,510,188 parameters.
 
+The four `p5_p15` frequencies finished on 2026-11-21. Each ran 100 epochs
+with no early stop. The test metric below is projected inflow MAE. The gated
+column is
+`separate_value_mlp_temporal_aux11_l05_gated_cross_attention_projected` on
+the same frequencies.
+
+| frequency | gated fusion | dual path | delta |
+| --- | ---: | ---: | ---: |
+| 30 min | 2.539 ± 0.002 | 2.559 ± 0.007 | +0.020 |
+| 1 h | 2.626 ± 0.008 | 2.595 ± 0.006 | -0.031 |
+| 2 h | 2.506 ± 0.007 | 2.541 ± 0.006 | +0.035 |
+| day | 2.452 ± 0.010 | 2.472 ± 0.003 | +0.020 |
+
+The equal-weight mean of the four frequencies is 2.542 for the dual path
+and 2.531 for the gated fusion, a difference of +0.011. The day frequency
+is the lowest dual-path result. Best epochs are 62, 86, 81, and 55.
+Validation inflow MAE is 2.251, 2.229, 2.277, and 2.229. Run ids are
+`20261120T161301_4958318a`, `20261120T161301_fcf5d2a5`,
+`20261120T161301_494a0077`, and `20261120T161301_92c2aec8`. Per-state
+metrics are in [TRAINING_RESULTS.md](TRAINING_RESULTS.md).
+
 ```text
 training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
   in_all__out_all/p5_p15/dual_path_history_tsf_gate4_projected_v1/seed_42/<run_id>/
+```
+
+## Two-stage projected TSF
+
+`history_fusion_mode=two_stage_projected_tsf` runs the shared embedding
+twice. The first TSF reads the partial observation. Its auxiliary head
+reconstructs all 12 steps, and a separate projection puts every step on the
+conservation surface. The second TSF has its own T→S→FFN and reads only
+those 12 projected values. The last-step head is a residual whose linear
+layer starts at zero, so the initial raw last step equals the projected
+first-stage last step. The existing projection then reads that sum and the
+second TSF's last hidden state. The loss is the projected last-step
+four-state MAE plus 0.5 times the 12-step projected MAE. The pre-projection
+raw MAE weight is 0. Checkpoint selection stays the mean validation inflow
+MAE over seeds 42–46.
+
+The config is `configs/experiment_two_stage_projected_tsf.json`. Experiment
+id `two_stage_projected_tsf_shared_embedding_v1`. At N=1406 the model has
+1,513,288 parameters.
+
+The four `p5_p15` frequencies finished on 2026-11-21. Each ran 100 epochs
+with no early stop. The test metric below is projected inflow MAE.
+
+| frequency | dual path | two-stage | delta |
+| --- | ---: | ---: | ---: |
+| 30 min | 2.559 ± 0.007 | 2.562 ± 0.008 | +0.003 |
+| 1 h | 2.595 ± 0.006 | 2.620 ± 0.005 | +0.025 |
+| 2 h | 2.541 ± 0.006 | 2.564 ± 0.005 | +0.023 |
+| day | 2.472 ± 0.003 | 2.509 ± 0.004 | +0.037 |
+
+The equal-weight mean of the four frequencies is 2.564 for the shared
+two-stage model and 2.542 for the dual path, a difference of +0.022. The
+day frequency is the lowest two-stage result. The first stage's last-step
+inflow MAE is 2.626 ± 0.009, 2.710 ± 0.006, 2.623 ± 0.009, and
+2.599 ± 0.005. That four-frequency mean is 2.640, and the final projection
+is 0.076 lower. Best epochs are 67, 64, 39, and 53. Validation inflow MAE
+is 2.199, 2.206, 2.261, and 2.230. Run ids are
+`20261120T165545_6043cae0`, `20261120T165545_887818af`,
+`20261120T165545_2fdc2fca`, and `20261120T165545_12e8d55f`. Per-state
+metrics are in [TRAINING_RESULTS.md](TRAINING_RESULTS.md).
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all__out_all/p5_p15/two_stage_projected_tsf_shared_embedding_v1/seed_42/<run_id>/
+```
+
+## Two-stage independent value MLPs
+
+`stage2_value_mlp_sharing=independent` keeps the shared road, TOD, DOW, and
+adaptive tables and gives the second stage its own four value MLPs, copied
+from the first set at initialization. The loss, projection, and checkpoint
+rule stay those of the shared two-stage run. Task stays `All2All`. The
+config is `configs/experiment_two_stage_independent_value_mlp.json` in
+the `mstt-two-stage-followups` worktree. Experiment id
+`two_stage_projected_independent_value_mlp_v1`. At N=1406 the model has
+1,513,640 parameters.
+
+30 minutes, 1 hour, and 2 hours finished on 2026-11-21. Each ran 100 epochs
+with no early stop. The day run has not written test metrics. The test
+metric below is projected inflow MAE.
+
+| frequency | shared two-stage | independent MLP | delta |
+| --- | ---: | ---: | ---: |
+| 30 min | 2.562 ± 0.008 | 2.595 ± 0.006 | +0.033 |
+| 1 h | 2.620 ± 0.005 | 2.639 ± 0.006 | +0.019 |
+| 2 h | 2.564 ± 0.005 | 2.565 ± 0.006 | +0.001 |
+
+The equal-weight mean of these three frequencies is 2.600 for the
+independent MLPs and 2.582 for the shared embedding. The 2-hour frequency
+is the lowest of the three. Best epochs are 50, 78, and 41. Validation
+inflow MAE is 2.201, 2.203, and 2.266. Run ids are
+`20261120T195215_1daa92a7`, `20261120T195215_017aa87d`, and
+`20261120T195215_857524d7`. Per-state metrics are in
+[TRAINING_RESULTS.md](TRAINING_RESULTS.md).
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all__out_all/p5_p15/two_stage_projected_independent_value_mlp_v1/seed_42/<run_id>/
+```
+
+## Two-stage stage-1 speed gate
+
+`value_embedding_mode=state_aux_gate` applies the auxiliary speed gate once,
+on stage 1, before the road, TOD, and DOW concat. Stage 2 reads the 12
+projected states through the same four value MLPs and does not call the
+gate. `stage2_value_mlp_sharing` stays `shared`. The loss stays the
+two-stage loss. Task is `AllSpC2All` and `d_model` stays 128. The config is
+`configs/experiment_two_stage_stage1_speed_gate.json` in the
+`mstt-two-stage-followups` worktree. Experiment id
+`two_stage_projected_stage1_speed_gate_v1`. At N=1406 the model has
+1,514,440 parameters.
+
+30 minutes, 1 hour, and 2 hours finished on 2026-11-21. Each ran 100 epochs
+with no early stop. The day run has not written test metrics. The test
+metric below is projected inflow MAE.
+
+| frequency | shared two-stage | stage-1 speed gate | delta |
+| --- | ---: | ---: | ---: |
+| 30 min | 2.562 ± 0.008 | 2.533 ± 0.005 | -0.029 |
+| 1 h | 2.620 ± 0.005 | 2.603 ± 0.006 | -0.017 |
+| 2 h | 2.564 ± 0.005 | 2.490 ± 0.004 | -0.074 |
+
+The equal-weight mean of these three frequencies is 2.542 for the stage-1
+speed gate and 2.582 for the shared two-stage model. The same three
+frequencies of the single-layer `state_aux_gate_d128_projected_all` average
+2.479. The 2-hour frequency is the lowest of the three finished runs. Best
+epochs are 52, 63, and 51. Validation inflow MAE is 2.219, 2.195, and
+2.235. Run ids are `20261120T195215_f290063b`,
+`20261120T195215_589e9d9e`, and `20261120T195215_be56b07c`. Per-state
+metrics are in [TRAINING_RESULTS.md](TRAINING_RESULTS.md).
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all_sp_c__out_all/p5_p15/two_stage_projected_stage1_speed_gate_v1/seed_42/<run_id>/
 ```
 
 ## Independent state TSFs
@@ -671,6 +806,8 @@ finished runs under `training_results_3s/datasets/variable_<period>_p5_p15/`
 are `separate_value_mlp_projected`, `separate_value_mlp_no_conservation`,
 `separate_value_mlp_temporal_aux11_l05_projected`,
 `separate_value_mlp_temporal_aux11_l05_gated_cross_attention_projected`,
+`dual_path_history_tsf_gate4_projected_v1`,
+`two_stage_projected_tsf_shared_embedding_v1`,
 `shared_tsf_mlp_projected`,
 `state_independent_tsf_mlp_projected`,
 `state_independent_full_context_shared_tsf_mlp_projected`,
@@ -678,6 +815,9 @@ are `separate_value_mlp_projected`, `separate_value_mlp_no_conservation`,
 `state_independent_full_context_independent_node16_tsf_mlp_projected`,
 `state_independent_full_context_shared_node16_tsf_token_transformer_projected`,
 and `state_aux_gate_d128_projected_all`.
+`two_stage_projected_independent_value_mlp_v1` and
+`two_stage_projected_stage1_speed_gate_v1` have test metrics for 30 minutes,
+1 hour, and 2 hours. Their day runs have not written test metrics.
 The config and metrics for each completed run are in
 [TRAINING_RESULTS.md](TRAINING_RESULTS.md). This tree no longer launches the
 deleted ablation scripts.
