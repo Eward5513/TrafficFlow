@@ -32,6 +32,9 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def main(argv=None) -> dict:
+    from MSTT.utils.threads import apply_thread_cap
+
+    apply_thread_cap()
     args = parse_args(argv)
     from MSTT.trainer import TaskRun, assert_conservation_checkpoint, assert_model_checkpoint_matches, run_directory
     from reimplementation.common.errors import ReimplementationError

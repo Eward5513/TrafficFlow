@@ -19,6 +19,13 @@ features. ``AuxiliaryStateGate`` maps them to 32 coefficients,
 the road, TOD, and DOW parts are concatenated. The gate's last linear layer
 is zero-initialized, so ``g`` starts at 1. Forward does not store the gate.
 
+``value_embedding_mode="state_aux_gate_split_mlp"`` uses that same six-channel
+slice, the same four state MLPs, and the same product. Only the gate module
+changes: ``SplitAuxiliaryStateGate`` encodes speed and the observation count
+separately, then one joint layer produces the 32 coefficients. The value
+width stays 32. This is not the six-channel ``separate_mlp``, which would
+expand value to 48.
+
 ``external_calendar_embeddings=True`` keeps concat fusion and the configured
 TOD/DOW widths, but this module does not create those parameter tables.
 ``forward`` then requires ``tod_features`` and ``dow_features`` shaped
@@ -45,10 +52,11 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from MSTT.model.auxiliary_gate import AUX_CHANNELS, AuxiliaryStateGate
+from MSTT.model.auxiliary_gate import AUX_CHANNELS, AuxiliaryStateGate, SplitAuxiliaryStateGate
 
 FUSION_MODES = ("add", "concat")
-VALUE_EMBEDDING_MODES = ("joint_linear", "separate_mlp", "state_aux_gate")
+AUX_GATE_MODES = ("state_aux_gate", "state_aux_gate_split_mlp")
+VALUE_EMBEDDING_MODES = ("joint_linear", "separate_mlp", *AUX_GATE_MODES)
 STATE_AUX_BRANCHES = 4
 STATE_AUX_VALUE_DIM = 32
 
@@ -121,10 +129,13 @@ class InputEmbedding(nn.Module):
         self.value_branch_dim: int | None = None
         if value_embedding_mode == "separate_mlp":
             self.value_mlps = self._separate_value_mlps(self.in_channels)
-        elif value_embedding_mode == "state_aux_gate":
+        elif value_embedding_mode in AUX_GATE_MODES:
             self._require_state_aux_gate()
             self.value_mlps = self._separate_value_mlps(STATE_AUX_BRANCHES)
-            self.auxiliary_gate = AuxiliaryStateGate()
+            if value_embedding_mode == "state_aux_gate":
+                self.auxiliary_gate = AuxiliaryStateGate()
+            else:
+                self.auxiliary_gate = SplitAuxiliaryStateGate()
         else:
             self.value_projection = nn.Linear(self.in_channels, self.widths["value"])
         if self.external_node_embedding:
@@ -174,7 +185,7 @@ class InputEmbedding(nn.Module):
                 [mlp(x[..., channel:channel + 1]) for channel, mlp in enumerate(self.value_mlps)],
                 dim=-1,
             )
-        elif self.value_embedding_mode == "state_aux_gate":
+        elif self.value_embedding_mode in AUX_GATE_MODES:
             # Gate after the four state MLPs, before node / TOD / DOW. Not stored.
             states = x[..., :STATE_AUX_BRANCHES]
             aux = x[..., STATE_AUX_BRANCHES:]
@@ -306,16 +317,17 @@ class InputEmbedding(nn.Module):
 
     def _require_state_aux_gate(self) -> None:
         """Six real inputs, four state branches, and a 32-d value. ``in_channels`` stays 6."""
+        mode = self.value_embedding_mode
         if int(self.in_channels) != STATE_AUX_BRANCHES + AUX_CHANNELS:
             raise ValueError(
-                "state_aux_gate requires "
+                f"{mode} requires "
                 f"in_channels={STATE_AUX_BRANCHES + AUX_CHANNELS}, got {self.in_channels}"
             )
         if self.fusion != "concat":
-            raise ValueError(f"state_aux_gate value embedding requires fusion='concat', got {self.fusion!r}")
+            raise ValueError(f"{mode} value embedding requires fusion='concat', got {self.fusion!r}")
         value_dim = int(self.widths["value"])
         if value_dim != STATE_AUX_VALUE_DIM:
-            raise ValueError(f"state_aux_gate requires value_dim={STATE_AUX_VALUE_DIM}, got {value_dim}")
+            raise ValueError(f"{mode} requires value_dim={STATE_AUX_VALUE_DIM}, got {value_dim}")
 
     def _separate_value_mlps(self, branch_count: int) -> nn.ModuleList:
         count = int(branch_count)
@@ -368,7 +380,7 @@ class InputEmbedding(nn.Module):
                 bias=projection.bias is not None,
             )
             return summary
-        if self.value_embedding_mode == "state_aux_gate":
+        if self.value_embedding_mode in AUX_GATE_MODES:
             mlps = list(self.value_mlps)
             branch_widths = [int(mlp[-1].out_features) for mlp in mlps]
             gate = self.auxiliary_gate
@@ -382,6 +394,19 @@ class InputEmbedding(nn.Module):
                 formula=str(gate.formula),
                 init="identity",
             )
+            if isinstance(gate, SplitAuxiliaryStateGate):
+                speed_ptrs = [int(param.data_ptr()) for param in gate.speed_encoder.parameters()]
+                count_ptrs = [int(param.data_ptr()) for param in gate.count_encoder.parameters()]
+                summary.update(
+                    speed_encoder="Linear(1,8)-SiLU-Linear(8,8)",
+                    count_encoder="Linear(1,8)-SiLU-Linear(8,8)",
+                    fusion="Linear(16,32)-SiLU-Linear(32,32)",
+                    encoders_independent=(
+                        gate.speed_encoder is not gate.count_encoder
+                        and len(speed_ptrs) == len(set(speed_ptrs))
+                        and not set(speed_ptrs) & set(count_ptrs)
+                    ),
+                )
             return summary
         mlps = list(self.value_mlps)
         descriptions = [_mlp_spec(mlp) for mlp in mlps]

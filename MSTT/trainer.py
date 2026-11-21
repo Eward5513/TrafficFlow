@@ -127,6 +127,21 @@ def is_smoke(config: Mapping[str, Any]) -> bool:
     return config.get("max_train_batches") is not None or config.get("max_eval_batches") is not None
 
 
+def attach_temporal_history_if_loaded(datasets: dict, enabled: bool):
+    """Mount 12-step train labels only when that split is already open.
+
+    ``evaluate.py --splits test`` does not load the train split. Training still
+    audits ``y_seq_raw`` against the last-step label.
+    """
+    if not enabled or "train" not in datasets:
+        return None
+    from MSTT.data.temporal_aux import attach_temporal_history_labels
+
+    wrapped, audit = attach_temporal_history_labels(datasets["train"])
+    datasets["train"] = wrapped
+    return audit
+
+
 def model_reports(model: MSTT) -> dict[str, Any]:
     """Summaries written into the resolved config. Independent runs record channel order."""
     architecture = model.architecture_summary()
@@ -184,8 +199,9 @@ def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     """``add`` fusion ignores the concat widths, so they do not distinguish two ``add`` runs.
 
     ``value_embedding_mode`` stays in the compared dict. ``joint_linear``,
-    ``separate_mlp``, and ``state_aux_gate`` build different value modules, so
-    a run directory or checkpoint from one cannot be reused for another.
+    ``separate_mlp``, ``state_aux_gate``, and ``state_aux_gate_split_mlp`` build
+    different value modules, so a run directory or checkpoint from one cannot
+    be reused for another.
     Missing values are filled with ``joint_linear`` by ``with_legacy_defaults``
     before this compare. ``fusion_mlp_hidden_dim`` is inactive for flatten/last
     and for ``state_token_transformer``. The fusion token width, head count,
@@ -466,13 +482,9 @@ class TaskRun:
             sample_counts=self.package["sample_counts"],
             splits=tuple(splits),
         )
-        self.temporal_aux_audit = None
-        if bool(config.get("temporal_aux_enabled", False)):
-            from MSTT.data.temporal_aux import attach_temporal_history_labels
-
-            wrapped, audit = attach_temporal_history_labels(self.datasets["train"])
-            self.datasets["train"] = wrapped
-            self.temporal_aux_audit = audit
+        self.temporal_aux_audit = attach_temporal_history_if_loaded(
+            self.datasets, bool(config.get("temporal_aux_enabled", False))
+        )
         self.loaders = {
             split: build_loader(
                 dataset,

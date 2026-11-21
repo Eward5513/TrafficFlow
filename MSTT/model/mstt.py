@@ -127,8 +127,8 @@ def validate_independent_backbone(config: MSTTConfig | Mapping[str, Any]) -> Non
     the per-head size.
     """
     mode = str(_cfg_get(config, "value_embedding_mode", "joint_linear"))
-    if mode == "state_aux_gate":
-        raise ValueError("backbone_mode=state_independent cannot use value_embedding_mode=state_aux_gate")
+    if mode in {"state_aux_gate", "state_aux_gate_split_mlp"}:
+        raise ValueError(f"backbone_mode=state_independent cannot use value_embedding_mode={mode}")
     if mode != "separate_mlp":
         raise ValueError(f"backbone_mode=state_independent requires value_embedding_mode='separate_mlp', got {mode!r}")
     requirements = {

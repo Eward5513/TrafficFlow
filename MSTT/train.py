@@ -64,6 +64,9 @@ def apply_explicit_run_id(config: dict, args: argparse.Namespace) -> dict:
 
 
 def main(argv: list[str] | None = None) -> dict:
+    from MSTT.utils.threads import apply_thread_cap
+
+    apply_thread_cap()
     args = build_parser().parse_args(argv)
     config = apply_explicit_run_id(overlay_args(load_config(args.config), args), args)
     if args.gpu is not None:

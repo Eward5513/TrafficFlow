@@ -189,6 +189,21 @@ and that dataset's `all_sp_c_normalization.json`. It does not reuse the
 `p10_p20` scaler, vehicle lists, or checkpoints. `run_all_sp_c_state_aux_gate.sh`
 still launches only the four `p10_p20` datasets.
 
+`value_embedding_mode=state_aux_gate_split_mlp` keeps that six-channel input,
+the four state MLPs, the product with `g`, and the 128-d TSF. Speed and the
+observation count each have their own `1→8→8` MLP. Those 16 features go through
+one `Linear(16, 32) → SiLU → Linear(32, 32)`, and only the last linear layer
+starts at zero, so `g = 1` at initialization. There is no temporal auxiliary
+loss and no history fusion. At N=1406 the gate has 1,776 parameters and the
+model has 1,316,624, 624 more than `state_aux_gate`. Config:
+`configs/all_sp_c_state_aux_gate_split_mlp_d128_projected_all.json`. Experiment
+id `state_aux_gate_split_mlp_d128_projected_all`. Do not resume it from
+`state_aux_gate_d128_projected_all`.
+`MSTT/run_mstt_state_aux_gate_split_mlp_p5_p15.py` queues the four `p5_p15`
+frequencies and takes a free GPU only when the live baseline scheduler will
+not launch. At its current cap, a card freed while two or more baseline CUDA
+tasks are still alive stays available.
+
 `temporal_aux_enabled` defaults to false and adds no parameters. When true, one
 shared `Linear(d_model, 4)` reads the encoder hidden state after the existing
 modules are constructed. Training adds `temporal_aux_weight` times the
@@ -202,6 +217,17 @@ disabled. Changing the weight or scope does not resume an older auxiliary run.
 The p5_p15 config is
 `configs/experiment_temporal_aux_history11_projected.json`, experiment id
 `separate_value_mlp_temporal_aux11_l05_projected`, weight 0.5.
+
+`configs/experiment_state_aux_gate_temporal_aux_history11_projected.json`
+combines that auxiliary loss with `value_embedding_mode=state_aux_gate`.
+The task is `AllSpC2All`. `history_fusion_mode` stays `none`, so the
+auxiliary head does not enter the flatten head or the projection. At N=1406
+the model has 1,316,516 parameters, 516 more than the speed-gate parent.
+Experiment id `state_aux_gate_d128_temporal_aux11_l05_projected_all`.
+Do not resume it from `state_aux_gate_d128_projected_all` or from
+`separate_value_mlp_temporal_aux11_l05_projected`.
+`MSTT/run_mstt_state_aux_gate_temporal_aux_p5_p15.py` launches the four
+`p5_p15` frequencies and sets each process to 15 threads.
 
 `history_fusion_mode=gated_cross_attention` is the follow-up on that auxiliary
 run. It requires `temporal_aux_enabled`, 12 steps, four output states,

@@ -287,6 +287,44 @@ training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
   in_all_sp_c__out_all/p5_p15/state_aux_gate_d128_projected_all/seed_42/<run_id>/
 ```
 
+## Speed gate with the first 11 auxiliary steps
+
+`configs/experiment_state_aux_gate_temporal_aux_history11_projected.json`
+keeps the `p5_p15` speed-gate backbone and adds the existing auxiliary head.
+The auxiliary prediction is a training loss on steps 0..10. It is not an
+input to the flatten head or the conservation projection.
+`history_fusion_mode` stays `none`. The loss is the projected four-state
+MAE, plus 0.5 times the pre-projection four-state MAE, plus 0.5 times the
+auxiliary MAE on steps 0..10. Checkpoint selection stays the mean validation
+inflow MAE over seeds 42–46. At N=1406 the auxiliary head adds 516
+parameters and the model has 1,316,516. Experiment id
+`state_aux_gate_d128_temporal_aux11_l05_projected_all`. Do not resume it
+from the speed-gate checkpoint or from the four-channel auxiliary run.
+
+The four `p5_p15` frequencies finished on 2026-11-21. Each ran 100 epochs
+with no early stop. The test metric below is projected inflow MAE. The
+baseline is `state_aux_gate_d128_projected_all` on the same frequencies.
+
+| frequency | speed gate | speed gate + aux | delta |
+| --- | ---: | ---: | ---: |
+| 30 min | 2.472 ± 0.010 | 2.515 ± 0.006 | +0.043 |
+| 1 h | 2.508 ± 0.011 | 2.561 ± 0.008 | +0.053 |
+| 2 h | 2.456 ± 0.002 | 2.477 ± 0.003 | +0.021 |
+| day | 2.545 ± 0.010 | 2.463 ± 0.007 | -0.082 |
+
+The equal-weight mean of the four frequencies is 2.504 with the auxiliary
+loss and 2.495 for the speed gate alone, a difference of +0.009. The day
+frequency is the lowest. Best epochs are 59, 55, 66, and 67. Validation
+inflow MAE is 2.225, 2.210, 2.270, and 2.223. Run ids are
+`20261121T131503_af7fb43a`, `20261121T131503_b1c7c37a`,
+`20261121T131503_d534d347`, and `20261121T131503_42b25fc9`. Per-state
+metrics are in [TRAINING_RESULTS.md](TRAINING_RESULTS.md).
+
+```text
+training_results_3s/datasets/<dataset_id>/physical_independent_fcd_v1/MSTT/
+  in_all_sp_c__out_all/p5_p15/state_aux_gate_d128_temporal_aux11_l05_projected_all/seed_42/<run_id>/
+```
+
 ## No conservation projection
 
 `separate_value_mlp_no_conservation` keeps the four-channel
@@ -521,22 +559,22 @@ the `mstt-two-stage-followups` worktree. Experiment id
 `two_stage_projected_independent_value_mlp_v1`. At N=1406 the model has
 1,513,640 parameters.
 
-30 minutes, 1 hour, and 2 hours finished on 2026-11-21. Each ran 100 epochs
-with no early stop. The day run has not written test metrics. The test
-metric below is projected inflow MAE.
+The four `p5_p15` frequencies finished on 2026-11-21. Each ran 100 epochs
+with no early stop. The test metric below is projected inflow MAE.
 
 | frequency | shared two-stage | independent MLP | delta |
 | --- | ---: | ---: | ---: |
 | 30 min | 2.562 ± 0.008 | 2.595 ± 0.006 | +0.033 |
 | 1 h | 2.620 ± 0.005 | 2.639 ± 0.006 | +0.019 |
 | 2 h | 2.564 ± 0.005 | 2.565 ± 0.006 | +0.001 |
+| day | 2.509 ± 0.004 | 2.540 ± 0.004 | +0.031 |
 
-The equal-weight mean of these three frequencies is 2.600 for the
-independent MLPs and 2.582 for the shared embedding. The 2-hour frequency
-is the lowest of the three. Best epochs are 50, 78, and 41. Validation
-inflow MAE is 2.201, 2.203, and 2.266. Run ids are
-`20261120T195215_1daa92a7`, `20261120T195215_017aa87d`, and
-`20261120T195215_857524d7`. Per-state metrics are in
+The equal-weight mean of the four frequencies is 2.585 for the independent
+MLPs and 2.564 for the shared embedding. The day frequency is the lowest.
+Best epochs are 50, 78, 41, and 52. Validation inflow MAE is 2.201, 2.203,
+2.266, and 2.245. Run ids are `20261120T195215_1daa92a7`,
+`20261120T195215_017aa87d`, `20261120T195215_857524d7`, and
+`20261120T195215_758c6404`. Per-state metrics are in
 [TRAINING_RESULTS.md](TRAINING_RESULTS.md).
 
 ```text
@@ -556,23 +594,23 @@ two-stage loss. Task is `AllSpC2All` and `d_model` stays 128. The config is
 `two_stage_projected_stage1_speed_gate_v1`. At N=1406 the model has
 1,514,440 parameters.
 
-30 minutes, 1 hour, and 2 hours finished on 2026-11-21. Each ran 100 epochs
-with no early stop. The day run has not written test metrics. The test
-metric below is projected inflow MAE.
+The four `p5_p15` frequencies finished on 2026-11-21. Each ran 100 epochs
+with no early stop. The test metric below is projected inflow MAE.
 
 | frequency | shared two-stage | stage-1 speed gate | delta |
 | --- | ---: | ---: | ---: |
 | 30 min | 2.562 ± 0.008 | 2.533 ± 0.005 | -0.029 |
 | 1 h | 2.620 ± 0.005 | 2.603 ± 0.006 | -0.017 |
 | 2 h | 2.564 ± 0.005 | 2.490 ± 0.004 | -0.074 |
+| day | 2.509 ± 0.004 | 2.534 ± 0.006 | +0.025 |
 
-The equal-weight mean of these three frequencies is 2.542 for the stage-1
-speed gate and 2.582 for the shared two-stage model. The same three
+The equal-weight mean of the four frequencies is 2.540 for the stage-1
+speed gate and 2.564 for the shared two-stage model. The same four
 frequencies of the single-layer `state_aux_gate_d128_projected_all` average
-2.479. The 2-hour frequency is the lowest of the three finished runs. Best
-epochs are 52, 63, and 51. Validation inflow MAE is 2.219, 2.195, and
-2.235. Run ids are `20261120T195215_f290063b`,
-`20261120T195215_589e9d9e`, and `20261120T195215_be56b07c`. Per-state
+2.495. The 2-hour frequency is the lowest. Best epochs are 52, 63, 51, and
+63. Validation inflow MAE is 2.219, 2.195, 2.235, and 2.199. Run ids are
+`20261120T195215_f290063b`, `20261120T195215_589e9d9e`,
+`20261120T195215_be56b07c`, and `20261120T195215_b4a73a15`. Per-state
 metrics are in [TRAINING_RESULTS.md](TRAINING_RESULTS.md).
 
 ```text
@@ -814,10 +852,10 @@ are `separate_value_mlp_projected`, `separate_value_mlp_no_conservation`,
 `state_independent_full_context_shared_node16_tsf_mlp_projected`,
 `state_independent_full_context_independent_node16_tsf_mlp_projected`,
 `state_independent_full_context_shared_node16_tsf_token_transformer_projected`,
-and `state_aux_gate_d128_projected_all`.
-`two_stage_projected_independent_value_mlp_v1` and
-`two_stage_projected_stage1_speed_gate_v1` have test metrics for 30 minutes,
-1 hour, and 2 hours. Their day runs have not written test metrics.
+`state_aux_gate_d128_projected_all`,
+`state_aux_gate_d128_temporal_aux11_l05_projected_all`,
+`two_stage_projected_independent_value_mlp_v1`, and
+`two_stage_projected_stage1_speed_gate_v1`.
 The config and metrics for each completed run are in
 [TRAINING_RESULTS.md](TRAINING_RESULTS.md). This tree no longer launches the
 deleted ablation scripts.
