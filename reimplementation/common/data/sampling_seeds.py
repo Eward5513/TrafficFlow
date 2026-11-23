@@ -18,7 +18,18 @@ from reimplementation.common.data.r_only_npz_dataset import (
 from reimplementation.common.utils.hashing import sha256_file
 
 
-def configure_sampling(config: Mapping, *, model_name: str | None = None) -> dict:
+def configure_sampling(
+    config: Mapping,
+    *,
+    model_name: str | None = None,
+    allowed_train_sampling_seeds: tuple[int, ...] | list[int] | None = None,
+) -> dict:
+    """Resolve sampling paths.
+
+    The default caller may train only on seed 42. A caller that has its own
+    published-seed check, currently MSTT, passes ``allowed_train_sampling_seeds``.
+    Evaluation order stays 42, 43, 44, 45, 46 either way.
+    """
     cfg = dict(config)
     explicit = set(cfg.get("explicit_path_keys") or [])
     dataset_id = cfg.get("dataset_id")
@@ -31,8 +42,23 @@ def configure_sampling(config: Mapping, *, model_name: str | None = None) -> dic
     root = Path(spec["sampling_root"])
     train_seed = int(cfg.get("train_sampling_seed", TRAIN_SAMPLING_SEED))
     seeds = tuple(int(s) for s in cfg.get("evaluation_sampling_seeds", SAMPLING_SEEDS))
-    if train_seed != TRAIN_SAMPLING_SEED or seeds != SAMPLING_SEEDS:
+    allowed = (
+        (int(TRAIN_SAMPLING_SEED),)
+        if allowed_train_sampling_seeds is None
+        else tuple(int(item) for item in allowed_train_sampling_seeds)
+    )
+    if seeds != tuple(SAMPLING_SEEDS):
         raise ValueError("official protocol requires training seed 42 and evaluation seeds 42–46")
+    if train_seed not in SAMPLING_SEEDS or train_seed not in allowed:
+        if allowed == (int(TRAIN_SAMPLING_SEED),):
+            raise ValueError("official protocol requires training seed 42 and evaluation seeds 42–46")
+        if train_seed not in allowed:
+            raise ValueError(
+                f"train_sampling_seed {train_seed} is not in the caller-allowed published seeds {list(allowed)}"
+            )
+        raise ValueError(
+            f"train_sampling_seed {train_seed} is not a published sampling seed {list(SAMPLING_SEEDS)}"
+        )
     model_seed = int(cfg.get("model_seed", cfg.get("seed", 42)))
     bind_observation_keys(spec["observation_keys"])
     window = sampling_window_root(root, train_seed)

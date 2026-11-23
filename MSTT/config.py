@@ -189,6 +189,12 @@ TRAIN_DEFAULTS: dict[str, Any] = {
     "save_validation_predictions": False,
     "max_train_batches": None,
     "max_eval_batches": None,
+    # 0 keeps the historical logs. Levels accumulate: 1 health, 2 modules,
+    # 3 mechanisms, 4 traffic associations. Not part of the model state.
+    "monitor_level": 0,
+    "monitor_module_interval": 5,
+    "monitor_mechanism_epochs": [1, 5, 20, 50, 100],
+    "monitor_probe_size": 4,
 }
 
 DATA_DEFAULTS: dict[str, Any] = {
@@ -298,8 +304,13 @@ def overlay_args(config: dict[str, Any], args: argparse.Namespace) -> dict[str, 
     config["explicit_path_keys"] = [key for key in passed if key in {"dataset_id", "sampling_root"}]
     if hasattr(args, "seed") and not hasattr(args, "model_seed"):
         config["model_seed"] = args.seed
+    from data_root import SAMPLING_SEEDS
     from reimplementation.common.data.sampling_seeds import configure_sampling
-    return configure_sampling(config, model_name="MSTT")
+    return configure_sampling(
+        config,
+        model_name="MSTT",
+        allowed_train_sampling_seeds=SAMPLING_SEEDS,
+    )
 
 
 def resolve_ffn_hidden_dim(d_model: int, value: int | None) -> int:
@@ -389,6 +400,18 @@ def validate_config(config: Mapping[str, Any]) -> None:
             config["tod_embedding_dim"],
             config["dow_embedding_dim"],
         )
+    level = config.get("monitor_level", 0)
+    if isinstance(level, bool) or int(level) not in (0, 1, 2, 3, 4):
+        raise ValueError(f"monitor_level must be an integer 0–4, got {level!r}")
+    if int(config.get("monitor_module_interval", 5)) < 1:
+        raise ValueError("monitor_module_interval must be a positive integer")
+    mechanism_epochs = config.get("monitor_mechanism_epochs", [1, 5, 20, 50, 100])
+    if not isinstance(mechanism_epochs, (list, tuple)) or not mechanism_epochs:
+        raise ValueError("monitor_mechanism_epochs must be a non-empty list of 1-based epoch numbers")
+    if any(isinstance(item, bool) or int(item) < 1 for item in mechanism_epochs):
+        raise ValueError(f"monitor_mechanism_epochs must be positive, got {mechanism_epochs!r}")
+    if int(config.get("monitor_probe_size", 4)) < 1:
+        raise ValueError("monitor_probe_size must be a positive integer")
 
 
 def attention_head_count(config: Mapping[str, Any], key: str) -> int:

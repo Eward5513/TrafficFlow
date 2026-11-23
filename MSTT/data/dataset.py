@@ -108,6 +108,7 @@ def open_task_datasets(
     num_nodes: int,
     sample_counts: Mapping[str, int],
     splits: tuple[str, ...] = SPLITS,
+    expected_train_sampling_seed: int = 42,
 ) -> dict[str, AlignedStateWindowDataset]:
     tag = rate_tag(rate)
     selector = {"input_type": task.input_type, "target_type": task.target_type, "num_nodes": num_nodes}
@@ -122,6 +123,7 @@ def open_task_datasets(
             n_his=n_his,
             num_nodes=num_nodes,
             expected_count=int(sample_counts[split]),
+            expected_train_sampling_seed=int(expected_train_sampling_seed),
         )
         if not isinstance(dataset, AlignedStateWindowDataset):
             raise ReimplementationError("expected the dated four-state loader")

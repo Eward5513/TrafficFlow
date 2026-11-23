@@ -440,12 +440,26 @@ def open_split_dataset(
     n_his: int | None = None,
     num_nodes: int | None = None,
     expected_count: int | None = None,
+    expected_train_sampling_seed: int = 42,
 ) -> Dataset:
-    """Read the canonical dated package; training is restricted to sampling42."""
-    from data_root import sampling_root_from_window
+    """Read the canonical dated package.
+
+    Training must sit in ``seed_<expected_train_sampling_seed>``. Callers that
+    do not pass the argument keep the historical seed-42 training directory.
+    """
+    from data_root import SAMPLING_SEEDS, sampling_root_from_window
     sampling_root_from_window(data_root)
-    if split == "train" and Path(data_root).parent.parent.name != "seed_42":
-        raise ReimplementationError("training uses sampling seed42 only")
+    if split == "train":
+        expected = int(expected_train_sampling_seed)
+        if expected not in SAMPLING_SEEDS:
+            raise ReimplementationError(
+                f"training sampling seed {expected} is not a published seed {list(SAMPLING_SEEDS)}"
+            )
+        actual = Path(data_root).parent.parent.name
+        if actual != f"seed_{expected}":
+            raise ReimplementationError(
+                f"training window directory is {actual}, expected seed_{expected}"
+            )
 
     steps = int(n_his if n_his is not None else _history_steps(config))
     nodes = int(num_nodes if num_nodes is not None else config["num_nodes"])

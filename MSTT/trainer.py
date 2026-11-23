@@ -1,4 +1,7 @@
-"""Fixed-backbone MSTT: train sampling42; select and evaluate on five samplings.
+"""Fixed-backbone MSTT: default train sampling 42; select and evaluate on five samplings.
+
+An explicit ``train_sampling_seed`` in 42–46 reads that published training
+directory. Validation and test still cover seeds 42–46.
 
 Each model keeps its own optimizer/loss. Validation selection uses the mean
 physical-scale MAE, and the restored best checkpoint evaluates all five test inputs.
@@ -172,6 +175,16 @@ def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def recorded_train_sampling_seed(payload: Mapping[str, Any]) -> int:
+    """Historical runs omitted the field and trained on sampling seed 42."""
+    if "train_sampling_seed" in payload and payload.get("train_sampling_seed") is not None:
+        return int(payload["train_sampling_seed"])
+    nested = payload.get("config")
+    if isinstance(nested, Mapping) and nested.get("train_sampling_seed") is not None:
+        return int(nested["train_sampling_seed"])
+    return 42
+
+
 def assert_run_dir_matches(run_dir: Path, config: Mapping[str, Any], task: TaskSpec) -> None:
     """Refuse to skip into or resume a run directory trained with another model config or batch size."""
     path = Path(run_dir) / "resolved_config.json"
@@ -196,6 +209,22 @@ def assert_run_dir_matches(run_dir: Path, config: Mapping[str, Any], task: TaskS
         for key, value in conservation_settings(config).items():
             if conservation_settings(stored)[key] != value:
                 diff[key] = (conservation_settings(stored)[key], value)
+    stored_train_seed = recorded_train_sampling_seed(stored)
+    requested_train_seed = int(config.get("train_sampling_seed", 42))
+    if stored_train_seed != requested_train_seed:
+        diff["train_sampling_seed"] = (stored_train_seed, requested_train_seed)
+    stored_model_seed = int(stored.get("model_seed", stored.get("seed", 42)))
+    requested_model_seed = int(config.get("model_seed", config.get("seed", 42)))
+    if stored_model_seed != requested_model_seed:
+        diff["model_seed"] = (stored_model_seed, requested_model_seed)
+    stored_eval = [int(item) for item in stored.get("evaluation_sampling_seeds", [42, 43, 44, 45, 46])]
+    requested_eval = [int(item) for item in config.get("evaluation_sampling_seeds", [42, 43, 44, 45, 46])]
+    if stored_eval != requested_eval:
+        diff["evaluation_sampling_seeds"] = (stored_eval, requested_eval)
+    stored_level = int(stored.get("monitor_level", 0) or 0)
+    requested_level = int(config.get("monitor_level", 0) or 0)
+    if stored_level != requested_level:
+        diff["monitor_level"] = (stored_level, requested_level)
     if diff:
         raise ReimplementationError(
             f"{run_dir} holds a run with a different config (stored, requested): {diff}; "
@@ -329,7 +358,9 @@ class TaskRun:
     """Everything one (task, rate, seed) run needs, built once."""
 
     def __init__(self, config: Mapping[str, Any], *, task: str, rate: str, output_root: Path, splits=SPLITS) -> None:
-        config = configure_sampling(config)
+        from data_root import SAMPLING_SEEDS
+
+        config = configure_sampling(config, model_name="MSTT", allowed_train_sampling_seeds=SAMPLING_SEEDS)
         validate_config(config)
         validate_conservation_task(config, task_spec(task))
         validate_value_embedding_task(config, task_spec(task))
@@ -365,6 +396,7 @@ class TaskRun:
             num_nodes=self.num_nodes,
             sample_counts=self.package["sample_counts"],
             splits=tuple(splits),
+            expected_train_sampling_seed=int(self.config["train_sampling_seed"]),
         )
         self.loaders = {
             split: build_loader(
@@ -399,8 +431,11 @@ class TaskRun:
 
     def evaluate(self, model: MSTT, split: str, limit: int | None = None):
         if split not in self.loaders:
-            datasets = open_task_datasets(self.data_root, self.rate, self.task, n_his=self.n_his,
-                                         num_nodes=self.num_nodes, sample_counts=self.package["sample_counts"], splits=(split,))
+            datasets = open_task_datasets(
+                self.data_root, self.rate, self.task, n_his=self.n_his,
+                num_nodes=self.num_nodes, sample_counts=self.package["sample_counts"], splits=(split,),
+                expected_train_sampling_seed=int(self.config["train_sampling_seed"]),
+            )
             self.loaders[split] = build_loader(datasets[split], batch_size=int(self.config["eval_batch_size"]),
                                                shuffle=False, seed=self.seed, num_workers=int(self.config["num_workers"]))
         def one(loader):
@@ -494,6 +529,14 @@ def gradient_report(model: torch.nn.Module) -> dict[str, Any]:
     return {"missing": missing, "nonfinite": nonfinite, "all_zero": zero}
 
 
+def _scaler_found_inf(grad_scaler: torch.amp.GradScaler, optimizer: torch.optim.Optimizer) -> bool:
+    if not grad_scaler.is_enabled():
+        return False
+    state = grad_scaler._per_optimizer_states.get(id(optimizer)) or {}
+    found = state.get("found_inf_per_device") or {}
+    return any(bool(tensor.item()) for tensor in found.values() if tensor is not None)
+
+
 def train_step(
     run: TaskRun,
     model: MSTT,
@@ -504,6 +547,8 @@ def train_step(
     amp: str,
     clip: float,
     epoch: int,
+    monitor: Any | None = None,
+    step_index: int = 0,
 ) -> tuple[float, float]:
     """One optimizer step; returns (loss, pre-clip grad norm or 0.0 without clipping)."""
     batch = move_batch(batch, run.device)
@@ -520,12 +565,27 @@ def train_step(
         raise ReimplementationError(f"non-finite training loss at epoch {epoch}: {float(loss)}")
     optimizer.zero_grad(set_to_none=True)
     grad_scaler.scale(loss).backward()
+    capture = monitor is not None and monitor.wants_capture(epoch, step_index)
+    need_norm = clip > 0.0 or (monitor is not None and monitor.level >= 1)
     norm = 0.0
-    if clip > 0.0:
-        grad_scaler.unscale_(optimizer)
-        norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), clip))
+    skipped = False
+    if need_norm or capture:
+        if grad_scaler.is_enabled():
+            grad_scaler.unscale_(optimizer)
+        if capture and monitor is not None:
+            monitor.begin_capture(model)
+        if clip > 0.0:
+            norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), clip))
+        elif need_norm:
+            norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf")))
+        if grad_scaler.is_enabled():
+            skipped = _scaler_found_inf(grad_scaler, optimizer)
     grad_scaler.step(optimizer)
+    if capture and monitor is not None:
+        monitor.finish_capture(model, skipped=skipped)
     grad_scaler.update()
+    if monitor is not None and monitor.level >= 1:
+        monitor.note_train_step(norm, clip, skipped)
     run.last_train_components = {key: float(value.detach()) for key, value in parts.items()}
     return float(loss.detach()), norm
 
@@ -669,6 +729,12 @@ def train_task(
         if payload.get("task") != run.task.name:
             raise ReimplementationError(f"checkpoint task {payload.get('task')} != {run.task.name}")
         assert_model_checkpoint_matches(payload, run.model_config.to_dict())
+        checkpoint_train_seed = recorded_train_sampling_seed(payload)
+        if checkpoint_train_seed != int(cfg["train_sampling_seed"]):
+            raise ReimplementationError(
+                f"checkpoint train_sampling_seed={checkpoint_train_seed} != requested "
+                f"{int(cfg['train_sampling_seed'])}; refusing to continue a different training sample"
+            )
         model.load_state_dict(payload["model_state_dict"])
         optimizer.load_state_dict(payload["optimizer_state_dict"])
         if scheduler is not None and payload.get("scheduler_state_dict"):
@@ -714,8 +780,15 @@ def train_task(
             "normalization_sha256": run.package["state_normalization_sha256"],
             "physical_definition_version": cfg.get("physical_definition_version"),
             "code_version": CODE_VERSION,
+            "train_sampling_seed": int(cfg["train_sampling_seed"]),
+            "model_seed": int(cfg["model_seed"]),
+            "evaluation_sampling_seeds": [int(item) for item in cfg["evaluation_sampling_seeds"]],
         }
 
+    from MSTT.monitoring import RunMonitor
+
+    monitor = RunMonitor(run, model, train_data_sha256=data_sha)
+    training_finalized = False
     reset_peak_memory(run.device)
     clock.mark_train_start()
     early_stopped = False
@@ -726,13 +799,19 @@ def train_task(
         flush=True,
     )
     try:
+        monitor.prepare(snapshot_init=start_epoch == 0)
+        if start_epoch > 0:
+            monitor.truncate(start_epoch - 1)
         for epoch in range(start_epoch, epochs):
             epoch_start = time.perf_counter()
             model.train()
             loss_sum, loss_batches, grad_norm_max = 0.0, 0, 0.0
             component_sums, train_samples = {}, 0
-            for batch in _limited(train_loader, cfg.get("max_train_batches")):
-                loss_value, norm = train_step(run, model, batch, optimizer, grad_scaler, amp=amp, clip=clip, epoch=epoch)
+            for step_index, batch in enumerate(_limited(train_loader, cfg.get("max_train_batches"))):
+                loss_value, norm = train_step(
+                    run, model, batch, optimizer, grad_scaler,
+                    amp=amp, clip=clip, epoch=epoch, monitor=monitor, step_index=step_index,
+                )
                 grad_norm_max = max(grad_norm_max, norm)
                 loss_sum += loss_value
                 loss_batches += 1
@@ -798,6 +877,15 @@ def train_task(
                 f"{'*' if improved else ''} {row['epoch_total_seconds']:.1f}s",
                 flush=True,
             )
+            if monitor.active():
+                monitor.on_epoch_end(
+                    epoch,
+                    row,
+                    train_seconds=float(train_seconds),
+                    val_seconds=max(0.0, float(row["epoch_total_seconds"]) - float(train_seconds)),
+                    train_samples=int(train_samples),
+                    val_metrics=val_metrics,
+                )
             if patience is not None and wait >= int(patience):
                 early_stopped = True
                 break
@@ -853,6 +941,12 @@ def train_task(
                 "code_version": CODE_VERSION,
                 "graph": {key: value for key, value in run.graph_info.items() if key != "node_ids"},
                 "data_file_sha256": data_sha,
+                "train_sampling_seed": int(cfg["train_sampling_seed"]),
+                "model_seed": int(cfg["model_seed"]),
+                "evaluation_sampling_seeds": [int(item) for item in cfg["evaluation_sampling_seeds"]],
+                "dataset_id": cfg.get("dataset_id"),
+                "experiment_id": cfg.get("experiment_id"),
+                "run_id": cfg.get("run_id"),
                 "state_normalization_sha256": run.package["state_normalization_sha256"],
                 "split_manifest_sha256": run.package["split_manifest_sha256"],
                 "sample_counts": run.package["sample_counts"],
@@ -873,10 +967,22 @@ def train_task(
         for key in ("peak_gpu_memory_allocated_mb", "peak_gpu_memory_reserved_mb"):
             metadata[key] = max([metadata.get(key) or 0.0] + [row.get(key) or 0.0 for row in history])
         atomic_write_json(run_dir / "run_metadata.json", metadata)
+        training_finalized = True
+        if monitor.active():
+            monitor.on_best(model)
+            monitor.on_predictions_ready(model)
+            monitor.finish()
     except Exception as exc:
-        atomic_write_json(run_dir / "run_metadata.json", {"status": "failed", "reason": repr(exc), "task": run.task.name, "penetration": run.rate})
+        if not training_finalized:
+            atomic_write_json(
+                run_dir / "run_metadata.json",
+                {"status": "failed", "reason": repr(exc), "task": run.task.name, "penetration": run.rate},
+            )
+        if monitor.active():
+            monitor.fail(exc)
         raise
     finally:
+        monitor.close()
         logger.close()
     summary = summary_from_disk(run_dir)
     merge_summary(output_root, [summary])
@@ -918,6 +1024,9 @@ SUMMARY_FIELDS = [
     "run_dir",
     "experiment_id",
     "dataset_id",
+    "train_sampling_seed",
+    "model_seed",
+    "evaluation_sampling_seeds",
 ]
 
 
@@ -955,6 +1064,10 @@ def summary_from_disk(run_dir: Path) -> dict[str, Any]:
         resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
         row["experiment_id"] = str(resolved.get("experiment_id") or "")
         row["dataset_id"] = str(resolved.get("dataset_id") or "")
+        row["train_sampling_seed"] = int(meta.get("train_sampling_seed", resolved.get("train_sampling_seed", 42)))
+        row["model_seed"] = int(meta.get("model_seed", resolved.get("model_seed", row["seed"])))
+        seeds = meta.get("evaluation_sampling_seeds", resolved.get("evaluation_sampling_seeds", [42, 43, 44, 45, 46]))
+        row["evaluation_sampling_seeds"] = ",".join(str(int(item)) for item in seeds)
     if not row["experiment_id"] or not row["dataset_id"]:
         parts = run_dir.parts
         if not row["dataset_id"] and "datasets" in parts:

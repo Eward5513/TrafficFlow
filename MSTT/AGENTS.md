@@ -113,12 +113,18 @@ is its final record.
 
 ## Protocol
 
-Train on sampling seed 42 only (5540 windows at every rate). Each epoch
+The default training sampling seed is 42 (5540 windows at every rate).
+`--train-sampling-seed` may select another published seed in 42–46; MSTT
+passes that allowed set into `configure_sampling`, and the training window
+directory must be that seed. Other models stay on seed 42. Each epoch
 scores validation seeds 42–46 separately on raw-scale MAE and selects
 `best_checkpoint.pt` by the unweighted mean. Test is scored the same way
 after that checkpoint is restored, with per-seed metrics, the mean, and the
 sample standard deviation (`ddof=1`). Test never selects the checkpoint.
 All2All and AllSpC2All select by the five-seed mean validation inflow MAE.
+`monitor_level` 0 leaves the historical logs. Levels 1–4 accumulate health,
+module, mechanism, and traffic-association records under `<run_dir>/monitoring/`.
+Those records are not model weights and do not select the checkpoint.
 
 ## Rules
 
