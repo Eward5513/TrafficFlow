@@ -15,6 +15,7 @@ import fcntl
 import io
 import itertools
 import json
+import os
 import random
 import time
 from pathlib import Path
@@ -537,6 +538,62 @@ def _scaler_found_inf(grad_scaler: torch.amp.GradScaler, optimizer: torch.optim.
     return any(bool(tensor.item()) for tensor in found.values() if tensor is not None)
 
 
+def validation_seed_report(packed: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Per-seed inflow MAE and window count from one evaluation payload."""
+    report = packed.get("sampling_metrics") if isinstance(packed, Mapping) else None
+    per_seed = report.get("per_seed") if isinstance(report, Mapping) else None
+    extracted: dict[str, dict[str, Any]] = {}
+    if not isinstance(per_seed, Mapping):
+        return extracted
+    for seed, metrics in per_seed.items():
+        if not isinstance(metrics, Mapping):
+            continue
+        inflow = metrics.get("inflow_mae")
+        count = metrics.get("sample_count")
+        extracted[str(seed)] = {
+            "inflow_mae": None if inflow is None else float(inflow),
+            "sample_count": None if count is None else int(count),
+        }
+    return extracted
+
+
+def commit_epoch_checkpoints(run_dir: Path, payload: Mapping[str, Any], *, improved: bool) -> None:
+    """Persist the last checkpoint only after the caller has stored this epoch's monitor rows.
+
+    The best weights are staged and replace the previous best only after that last checkpoint
+    is on disk, so a crash cannot leave an uncommitted epoch as the selected checkpoint.
+    """
+    run_dir = Path(run_dir)
+    pending = run_dir / "best_checkpoint.pending.pt"
+    if improved:
+        save_checkpoint(pending, payload)
+    save_checkpoint(run_dir / "last_checkpoint.pt", payload)
+    if improved:
+        os.replace(pending, run_dir / "best_checkpoint.pt")
+
+
+def recover_uncommitted_best(run_dir: Path) -> str | None:
+    """Drop or install a staged best checkpoint according to the committed last checkpoint."""
+    run_dir = Path(run_dir)
+    pending = run_dir / "best_checkpoint.pending.pt"
+    if not pending.is_file():
+        return None
+    last_path = run_dir / "last_checkpoint.pt"
+    if not last_path.is_file():
+        pending.unlink()
+        return "removed staged best checkpoint because no committed last checkpoint exists"
+    last = load_checkpoint(last_path, map_location="cpu")
+    staged = load_checkpoint(pending, map_location="cpu")
+    if int(staged.get("epoch", -1)) > int(last.get("epoch", -1)):
+        pending.unlink()
+        return "removed staged best checkpoint from an uncommitted epoch"
+    if int(staged.get("epoch", -1)) == int(last.get("best_epoch", -2)):
+        os.replace(pending, run_dir / "best_checkpoint.pt")
+        return "installed staged best checkpoint matching the committed epoch"
+    pending.unlink()
+    return "removed staged best checkpoint that does not match the committed selection"
+
+
 def train_step(
     run: TaskRun,
     model: MSTT,
@@ -749,6 +806,10 @@ def train_task(
         previous_wall_seconds = float(payload.get("cumulative_wall_seconds", sum(row["epoch_total_seconds"] for row in history)))
         _restore_rng(payload["rng_state"], train_loader)
         print(f"[MSTT] resume {resume_path} at epoch {start_epoch}", flush=True)
+        _write_history(run_dir, history)
+    recovery_note = recover_uncommitted_best(run_dir)
+    if recovery_note:
+        print(f"[MSTT] {recovery_note}", flush=True)
     atomic_write_json(run_dir / "resolved_config.json", saved_config)
     param_count = model.parameter_count()
     epochs = int(cfg["epochs"])
@@ -825,7 +886,13 @@ def train_task(
             if scheduler is not None:
                 scheduler.step(epoch + 1)
             train_seconds = time.perf_counter() - epoch_start
-            val_metrics, _ = run.evaluate(model, "validation", cfg.get("max_eval_batches"))
+            val_metrics, val_packed = run.evaluate(model, "validation", cfg.get("max_eval_batches"))
+            validation_seeds = validation_seed_report(val_packed)
+            val_packed.pop("sampling_predictions", None)
+            for packed_key in list(val_packed):
+                if isinstance(val_packed.get(packed_key), np.ndarray):
+                    del val_packed[packed_key]
+            del val_packed
             value = run.selection_value(val_metrics)
             if not np.isfinite(value):
                 raise ReimplementationError(f"non-finite validation {cfg['selection_metric']} at epoch {epoch}")
@@ -857,9 +924,15 @@ def train_task(
             }
             history.append(row)
             epochs_this_process += 1
-            if improved:
-                save_checkpoint(run_dir / "best_checkpoint.pt", checkpoint_payload(epoch))
-            save_checkpoint(run_dir / "last_checkpoint.pt", checkpoint_payload(epoch))
+            if monitor.active():
+                monitor.on_epoch_end(
+                    epoch,
+                    row,
+                    train_seconds=float(train_seconds),
+                    val_seconds=max(0.0, float(row["epoch_total_seconds"]) - float(train_seconds)),
+                    train_samples=int(train_samples),
+                    validation_seeds=validation_seeds,
+                )
             _write_history(run_dir, history)
             logger.log({"stage": "epoch", "task": run.task.name, "rate": run.rate, **row})
             inflow_text = f" val_inflow={row['val_inflow_mae']:.5f}" if "val_inflow_mae" in row else ""
@@ -877,15 +950,7 @@ def train_task(
                 f"{'*' if improved else ''} {row['epoch_total_seconds']:.1f}s",
                 flush=True,
             )
-            if monitor.active():
-                monitor.on_epoch_end(
-                    epoch,
-                    row,
-                    train_seconds=float(train_seconds),
-                    val_seconds=max(0.0, float(row["epoch_total_seconds"]) - float(train_seconds)),
-                    train_samples=int(train_samples),
-                    val_metrics=val_metrics,
-                )
+            commit_epoch_checkpoints(run_dir, checkpoint_payload(epoch), improved=improved)
             if patience is not None and wait >= int(patience):
                 early_stopped = True
                 break
@@ -969,17 +1034,24 @@ def train_task(
         atomic_write_json(run_dir / "run_metadata.json", metadata)
         training_finalized = True
         if monitor.active():
-            monitor.on_best(model)
-            monitor.on_predictions_ready(model)
-            monitor.finish()
+            try:
+                if monitor.level >= 3:
+                    monitor.on_best(model)
+                if monitor.level >= 4:
+                    monitor.on_predictions_ready(model)
+                monitor.finish()
+            except Exception as exc:
+                monitor.anomalies.append(repr(exc))
+                monitor._summary("monitor_pending")
+                raise
     except Exception as exc:
         if not training_finalized:
             atomic_write_json(
                 run_dir / "run_metadata.json",
                 {"status": "failed", "reason": repr(exc), "task": run.task.name, "penetration": run.rate},
             )
-        if monitor.active():
-            monitor.fail(exc)
+            if monitor.active():
+                monitor.fail(exc)
         raise
     finally:
         monitor.close()

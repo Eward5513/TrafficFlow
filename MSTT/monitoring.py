@@ -108,8 +108,25 @@ def _append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def _jsonl_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """One logical record. Weight and bias of the same module stay distinct."""
+    return (
+        row.get("run_id"),
+        row.get("kind"),
+        row.get("epoch_index"),
+        row.get("phase"),
+        row.get("source"),
+        row.get("module"),
+        row.get("parameter"),
+        row.get("probe_id") if "probe_id" in row else None,
+    )
+
+
 def _truncate_jsonl(path: Path, committed_epoch: int) -> int:
-    """Drop an interrupted epoch and duplicate keys. ``committed_epoch`` is kept."""
+    """Drop an interrupted epoch, a torn final line, and duplicate logical records.
+
+    ``committed_epoch`` is kept. A half-written trailing JSON line is discarded.
+    """
     if not path.is_file():
         return 0
     kept: list[dict[str, Any]] = []
@@ -123,18 +140,14 @@ def _truncate_jsonl(path: Path, committed_epoch: int) -> int:
         except json.JSONDecodeError:
             removed += 1
             continue
+        if not isinstance(row, dict):
+            removed += 1
+            continue
         epoch = row.get("epoch_index")
         if epoch is not None and int(epoch) > int(committed_epoch):
             removed += 1
             continue
-        key = (
-            row.get("kind"),
-            row.get("epoch_index"),
-            row.get("phase"),
-            row.get("module"),
-            row.get("source"),
-            row.get("probe_id"),
-        )
+        key = _jsonl_key(row)
         if key in seen:
             removed += 1
             continue
@@ -143,6 +156,14 @@ def _truncate_jsonl(path: Path, committed_epoch: int) -> int:
     payload = "".join(json.dumps(_py(row), ensure_ascii=False, sort_keys=True) + "\n" for row in kept)
     atomic_write_text(path, payload)
     return removed
+
+
+def gate_vector_stats(values: np.ndarray) -> tuple[float, float]:
+    """Per-vector mean and mean absolute deviation from 1, before any road-slot average."""
+    flat = np.asarray(values, dtype=np.float64).reshape(-1)
+    if flat.size == 0:
+        return float("nan"), float("nan")
+    return float(flat.mean()), float(np.abs(flat - 1.0).mean())
 
 
 def _tensor_summary(values: torch.Tensor, *, cap: int = QUANTILE_CAP) -> dict[str, Any]:
@@ -357,22 +378,66 @@ def _l2(values: torch.Tensor) -> float:
 
 
 def _attention_distribution(weights: torch.Tensor) -> dict[str, Any]:
-    """``weights`` [query, head, key], already softmaxed on the key axis."""
+    """``weights`` [query, head, key], already softmaxed on the key axis.
+
+    Each head keeps its own entropy and mass. The cross-head fields are the
+    query-weighted means of those head values.
+    """
     probs = weights.float()
     entropy = -(probs.clamp_min(1e-12).log() * probs).sum(dim=-1)
     key_count = int(probs.shape[-1])
     normalizer = math.log(key_count) if key_count > 1 else 1.0
     top = torch.topk(probs, k=min(TOPK, key_count), dim=-1).values
+    query_count = int(probs.shape[0])
+    heads = []
+    for head in range(int(probs.shape[1])):
+        heads.append(
+            {
+                "head": head,
+                "query_count": query_count,
+                "entropy_mean": float(entropy[:, head].mean()) if query_count else None,
+                "normalized_entropy_mean": float((entropy[:, head] / normalizer).mean()) if query_count else None,
+                "top1_mass_mean": float(top[:, head, 0].mean()) if query_count else None,
+                "topk_mass_mean": float(top[:, head].sum(dim=-1).mean()) if query_count else None,
+            }
+        )
+
+    def weighted(key: str) -> float | None:
+        if query_count == 0 or not heads:
+            return None
+        total = sum(int(item["query_count"]) for item in heads)
+        return float(sum(float(item[key]) * int(item["query_count"]) for item in heads) / total)
+
     return {
-        "query_count": int(probs.shape[0]),
-        "head_count": int(probs.shape[1]),
+        "query_count": query_count,
+        "head_count": len(heads),
         "key_count": key_count,
-        "entropy_mean": float(entropy.mean()),
-        "normalized_entropy_mean": float((entropy / normalizer).mean()),
-        "top1_mass_mean": float(top[..., 0].mean()),
-        "topk_mass_mean": float(top.sum(dim=-1).mean()),
+        "heads": heads,
+        "entropy_mean": weighted("entropy_mean"),
+        "normalized_entropy_mean": weighted("normalized_entropy_mean"),
+        "top1_mass_mean": weighted("top1_mass_mean"),
+        "topk_mass_mean": weighted("topk_mass_mean"),
         "topk": int(min(TOPK, key_count)),
     }
+
+
+def _combine_head_stats(parts: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Query-weighted mean of per-head stats across chunks."""
+    if not parts:
+        return []
+    combined = []
+    for head in range(len(parts[0]["heads"])):
+        weight = sum(int(part["heads"][head]["query_count"]) for part in parts)
+        row = {"head": head, "query_count": weight}
+        for key in ("entropy_mean", "normalized_entropy_mean", "top1_mass_mean", "topk_mass_mean"):
+            if weight == 0:
+                row[key] = None
+            else:
+                row[key] = float(
+                    sum(float(part["heads"][head][key]) * int(part["heads"][head]["query_count"]) for part in parts) / weight
+                )
+        combined.append(row)
+    return combined
 
 
 def _temporal_attention(module, hidden: torch.Tensor, roads: list[int]) -> dict[str, Any] | None:
@@ -396,17 +461,37 @@ def _temporal_attention(module, hidden: torch.Tensor, roads: list[int]) -> dict[
     scale = 1.0 / math.sqrt(int(module.head_dim))
     scores = torch.einsum("rhqd,rhkd->rhqk", q, k) * scale
     weights = torch.softmax(scores.float(), dim=-1)
-    stats = _attention_distribution(weights.permute(0, 2, 1, 3).reshape(-1, module.num_heads, steps))
+    flat = weights.permute(0, 2, 1, 3).reshape(-1, module.num_heads, steps)
+    stats = _attention_distribution(flat)
     diagonal = weights[:, :, torch.arange(steps, device=weights.device), torch.arange(steps, device=weights.device)]
+    history = weights.mean(dim=(0, 2))
+    self_by_head = []
+    for head in range(int(module.num_heads)):
+        self_by_head.append(
+            {
+                "head": head,
+                "query_count": int(diagonal[:, head].numel()),
+                "self_weight_mean": float(diagonal[:, head].mean()),
+                "history_mass_mean": [float(item) for item in history[head].detach().cpu().tolist()],
+            }
+        )
+        stats["heads"][head]["self_weight_mean"] = self_by_head[-1]["self_weight_mean"]
+        stats["heads"][head]["history_mass_mean"] = self_by_head[-1]["history_mass_mean"]
+    query_weight = sum(item["query_count"] for item in self_by_head) or 1
     stats.update(
         applicable=True,
         kind="temporal",
-        self_weight_mean=float(diagonal.mean()),
-        history_mass_mean=[float(item) for item in weights.mean(dim=(0, 1, 2)).detach().cpu().tolist()],
+        self_weight_by_head=self_by_head,
+        self_weight_mean=float(sum(item["self_weight_mean"] * item["query_count"] for item in self_by_head) / query_weight),
+        history_mass_by_head=self_by_head,
+        history_mass_mean=[
+            float(sum(item["history_mass_mean"][step] * item["query_count"] for item in self_by_head) / query_weight)
+            for step in range(steps)
+        ],
         scale="1/sqrt(head_dim)",
         head_dim=int(module.head_dim),
         query_roads=roads_t,
-        note="softmax over the 12 history keys; weights are not stored",
+        note="softmax over the 12 history keys; each head is kept; weights are not stored",
     )
     return stats
 
@@ -437,38 +522,51 @@ def _spatial_attention(module, hidden: torch.Tensor, roads: list[int], times: tu
     q = q.index_select(0, time_index).index_select(2, road_index)
     k = k.index_select(0, time_index)
     scale = 1.0 / math.sqrt(int(module.head_dim))
-    entropies = []
-    top1 = []
-    topk = []
-    self_mass = []
+    pieces = []
+    self_sum = torch.zeros(int(module.num_heads), dtype=torch.float64)
+    self_count = torch.zeros(int(module.num_heads), dtype=torch.float64)
     for start in range(0, len(use_roads), 4):
         q_chunk = q[:, :, start : start + 4, :]
         scores = torch.einsum("thrd,thnd->thrn", q_chunk, k) * scale
         weights = torch.softmax(scores.float(), dim=-1)
         flat = weights.permute(0, 2, 1, 3).reshape(-1, module.num_heads, nodes)
-        piece = _attention_distribution(flat)
-        entropies.append(piece["entropy_mean"])
-        top1.append(piece["top1_mass_mean"])
-        topk.append(piece["topk_mass_mean"])
+        pieces.append(_attention_distribution(flat))
         local_roads = road_index[start : start + q_chunk.shape[2]]
         gathered = weights[:, :, torch.arange(q_chunk.shape[2], device=weights.device), local_roads]
-        self_mass.append(float(gathered.mean()))
+        for head in range(int(module.num_heads)):
+            self_sum[head] += gathered[:, head].double().sum().cpu()
+            self_count[head] += float(gathered[:, head].numel())
         del scores, weights, flat
+    heads = _combine_head_stats(pieces)
+    self_by_head = []
+    for head, row in enumerate(heads):
+        self_mean = float(self_sum[head] / self_count[head]) if float(self_count[head]) else None
+        row["self_weight_mean"] = self_mean
+        self_by_head.append({"head": head, "query_count": row["query_count"], "self_weight_mean": self_mean})
+    query_weight = sum(int(row["query_count"]) for row in heads) or 1
+
+    def merged(key: str) -> float | None:
+        return float(sum(float(row[key]) * int(row["query_count"]) for row in heads) / query_weight)
+
+    self_weight = float(sum(float(row["self_weight_mean"]) * int(row["query_count"]) for row in self_by_head) / query_weight)
     return {
         "applicable": True,
         "kind": "spatial",
-        "entropy_mean": float(np.mean(entropies)),
-        "normalized_entropy_mean": float(np.mean(entropies) / math.log(nodes)),
-        "top1_mass_mean": float(np.mean(top1)),
-        "topk_mass_mean": float(np.mean(topk)),
+        "heads": heads,
+        "entropy_mean": merged("entropy_mean"),
+        "normalized_entropy_mean": merged("normalized_entropy_mean"),
+        "top1_mass_mean": merged("top1_mass_mean"),
+        "topk_mass_mean": merged("topk_mass_mean"),
         "topk": TOPK,
-        "self_weight_mean": float(np.mean(self_mass)),
+        "self_weight_by_head": self_by_head,
+        "self_weight_mean": self_weight,
         "key_count": int(nodes),
+        "query_count": int(query_weight / max(len(heads), 1)),
         "query_times": use_times,
         "query_roads": use_roads,
         "scale": "1/sqrt(head_dim)",
         "head_dim": int(module.head_dim),
-        "note": "queries are chunked; the N×N matrix is not materialized or saved",
+        "note": "queries are chunked and averaged with query weights; each head is kept; the N×N matrix is not saved",
     }
 
 
@@ -491,50 +589,77 @@ def _speed_key(speed: np.ndarray, count: np.ndarray) -> np.ndarray:
 
 
 class _Bucket:
-    def __init__(self) -> None:
+    def __init__(self, channels: tuple[str, ...] = STATE_CHANNELS) -> None:
+        self.channels = tuple(channels)
         self.road_slots = 0
-        self.windows: set[int] = set()
-        self.abs = np.zeros(4, dtype=np.float64)
-        self.signed_in = 0.0
+        self.windows: set[tuple[Any, ...]] = set()
+        self.abs = np.zeros(len(self.channels), dtype=np.float64)
+        self.signed_first = 0.0
         self.gate = 0.0
         self.gate_dev = 0.0
         self.gate_count = 0
-        self.correction = np.zeros(4, dtype=np.float64)
+        self.correction = np.zeros(len(self.channels), dtype=np.float64)
         self.correction_count = 0
 
-    def add(self, pred: np.ndarray, true: np.ndarray, window_ids: np.ndarray, gate=None, correction=None) -> None:
-        error = pred.astype(np.float64) - true.astype(np.float64)
+    def add(
+        self,
+        pred: np.ndarray,
+        true: np.ndarray,
+        window_ids: np.ndarray,
+        gate_mean=None,
+        gate_abs_deviation=None,
+        correction=None,
+        identities: list[tuple[Any, ...]] | None = None,
+    ) -> None:
+        pred = np.asarray(pred, dtype=np.float64)
+        true = np.asarray(true, dtype=np.float64)
+        if pred.shape[-1] != len(self.channels) or true.shape[-1] != len(self.channels):
+            raise ValueError(f"bucket channels {self.channels} do not match prediction {pred.shape}")
+        error = pred - true
         self.road_slots += int(error.shape[0])
-        self.windows.update(int(item) for item in window_ids.tolist())
+        if identities is None:
+            self.windows.update((int(item),) for item in np.asarray(window_ids).reshape(-1).tolist())
+        else:
+            self.windows.update(tuple(item) for item in identities)
         self.abs += np.abs(error).sum(axis=0)
-        self.signed_in += float(error[:, 0].sum())
-        if gate is not None:
-            self.gate += float(gate.reshape(-1).sum())
-            self.gate_dev += float(np.abs(gate.reshape(-1) - 1.0).sum())
-            self.gate_count += int(gate.reshape(-1).size)
-        if correction is not None:
-            self.correction += np.abs(correction.astype(np.float64)).sum(axis=0)
-            self.correction_count += int(correction.shape[0])
+        self.signed_first += float(error[:, 0].sum())
+        if gate_mean is not None:
+            values = np.asarray(gate_mean, dtype=np.float64).reshape(-1)
+            self.gate += float(values.sum())
+            self.gate_count += int(values.size)
+        if gate_abs_deviation is not None:
+            values = np.asarray(gate_abs_deviation, dtype=np.float64).reshape(-1)
+            self.gate_dev += float(values.sum())
+            if gate_mean is None:
+                self.gate_count += int(values.size)
+        if correction is not None and np.asarray(correction).shape[-1] == len(self.channels):
+            self.correction += np.abs(np.asarray(correction, dtype=np.float64)).sum(axis=0)
+            self.correction_count += int(np.asarray(correction).shape[0])
 
     def export(self) -> dict[str, Any]:
         if self.road_slots == 0:
-            return {"missing": True, "road_slot_count": 0, "window_count": len(self.windows)}
+            return {"missing": True, "road_slot_count": 0, "window_count": len(self.windows), "channels": list(self.channels)}
         mae = self.abs / self.road_slots
+        first = self.channels[0]
         payload = {
             "missing": False,
             "road_slot_count": int(self.road_slots),
             "window_count": len(self.windows),
-            "inflow_mae": float(mae[0]),
-            "inflow_bias": float(self.signed_in / self.road_slots),
-            "state_mae": {name: float(mae[index]) for index, name in enumerate(STATE_CHANNELS)},
+            "channels": list(self.channels),
+            f"{first}_mae": float(mae[0]),
+            f"{first}_bias": float(self.signed_first / self.road_slots),
+            "state_mae": {name: float(mae[index]) for index, name in enumerate(self.channels)},
             "count_unit": "road-slot (one road in one window)",
         }
+        if first == "inflow":
+            payload["inflow_mae"] = payload[f"{first}_mae"]
+            payload["inflow_bias"] = payload[f"{first}_bias"]
         if self.gate_count:
             payload["gate_mean"] = float(self.gate / self.gate_count)
             payload["gate_abs_deviation_mean"] = float(self.gate_dev / self.gate_count)
         if self.correction_count:
             payload["projection_correction_mae"] = {
-                name: float(self.correction[index] / self.correction_count) for index, name in enumerate(STATE_CHANNELS)
+                name: float(self.correction[index] / self.correction_count) for index, name in enumerate(self.channels)
             }
         return payload
 
@@ -545,28 +670,36 @@ def _accumulate_into(
     true,
     groups: Mapping[str, np.ndarray],
     window_ids,
-    gate=None,
+    gate_mean=None,
+    gate_abs_deviation=None,
     correction=None,
+    *,
+    channels: tuple[str, ...] = STATE_CHANNELS,
+    identities: list[tuple[Any, ...]] | None = None,
 ) -> None:
     flat_pred = np.asarray(pred).reshape(-1, np.asarray(pred).shape[-1])
     flat_true = np.asarray(true).reshape(-1, np.asarray(true).shape[-1])
     flat_windows = np.asarray(window_ids).reshape(-1)
-    flat_gate = None if gate is None else np.asarray(gate).reshape(-1)
+    flat_gate = None if gate_mean is None else np.asarray(gate_mean).reshape(-1)
+    flat_dev = None if gate_abs_deviation is None else np.asarray(gate_abs_deviation).reshape(-1)
     flat_correction = None if correction is None else np.asarray(correction).reshape(-1, np.asarray(correction).shape[-1])
     for name, labels in groups.items():
         flat_labels = np.asarray(labels).reshape(-1)
         dest = tables.setdefault(name, {})
         for key in sorted(set(flat_labels.tolist()), key=str):
             mask = flat_labels == key
-            if not bool(np.any(mask)):
+            indexes = np.flatnonzero(mask)
+            if indexes.size == 0:
                 continue
-            bucket = dest.setdefault(str(key), _Bucket())
+            bucket = dest.setdefault(str(key), _Bucket(channels))
             bucket.add(
-                flat_pred[mask],
-                flat_true[mask],
-                flat_windows[mask],
-                None if flat_gate is None else flat_gate[mask],
-                None if flat_correction is None else flat_correction[mask],
+                flat_pred[indexes],
+                flat_true[indexes],
+                flat_windows[indexes],
+                None if flat_gate is None else flat_gate[indexes],
+                None if flat_dev is None else flat_dev[indexes],
+                None if flat_correction is None else flat_correction[indexes],
+                None if identities is None else [identities[int(index)] for index in indexes.tolist()],
             )
 
 
@@ -577,9 +710,23 @@ def _export_tables(tables: Mapping[str, Mapping[str, _Bucket]]) -> dict[str, dic
     }
 
 
-def _accumulate_groups(pred, true, groups: Mapping[str, np.ndarray], window_ids, gate=None, correction=None) -> dict[str, dict[str, dict[str, Any]]]:
+def _accumulate_groups(
+    pred,
+    true,
+    groups: Mapping[str, np.ndarray],
+    window_ids,
+    gate_mean=None,
+    gate_abs_deviation=None,
+    correction=None,
+    *,
+    channels: tuple[str, ...] = STATE_CHANNELS,
+    identities: list[tuple[Any, ...]] | None = None,
+) -> dict[str, dict[str, dict[str, Any]]]:
     tables: dict[str, dict[str, _Bucket]] = {}
-    _accumulate_into(tables, pred, true, groups, window_ids, gate, correction)
+    _accumulate_into(
+        tables, pred, true, groups, window_ids, gate_mean, gate_abs_deviation, correction,
+        channels=channels, identities=identities,
+    )
     return _export_tables(tables)
 
 
@@ -605,9 +752,10 @@ def _average_seed_tables(per_seed: Mapping[int, Mapping[str, Mapping[str, Mappin
             def mean_of(getter):
                 return float(np.mean([getter(row) for _seed, row in present]))
 
+            names = sorted({channel for _seed, row in present for channel in row.get("state_mae", {})})
             state = {
                 name: mean_of(lambda row, channel=name: row["state_mae"][channel])
-                for name in STATE_CHANNELS
+                for name in names
             }
             payload = {
                 "key": key,
@@ -618,6 +766,7 @@ def _average_seed_tables(per_seed: Mapping[int, Mapping[str, Mapping[str, Mappin
                 "inflow_bias": mean_of(lambda row: row["inflow_bias"]),
                 "state_mae": state,
                 "road_slot_count_sum": int(sum(row["road_slot_count"] for _seed, row in present)),
+                "window_count_sum": int(sum(int(row.get("window_count", 0)) for _seed, row in present)),
                 "aggregation": "unweighted_mean_of_per_seed_metrics",
             }
             if any("gate_mean" in row for _seed, row in present):
@@ -627,9 +776,10 @@ def _average_seed_tables(per_seed: Mapping[int, Mapping[str, Mapping[str, Mappin
                 payload["gate_n_seeds"] = len(gated)
             if any("projection_correction_mae" in row for _seed, row in present):
                 corrected = [row for _seed, row in present if "projection_correction_mae" in row]
+                correction_names = sorted({name for row in corrected for name in row["projection_correction_mae"]})
                 payload["projection_correction_mae"] = {
-                    name: float(np.mean([row["projection_correction_mae"][name] for row in corrected]))
-                    for name in STATE_CHANNELS
+                    name: float(np.mean([row["projection_correction_mae"][name] for row in corrected if name in row["projection_correction_mae"]]))
+                    for name in correction_names
                 }
             rows.append(payload)
         averaged[table_name] = rows
@@ -695,7 +845,7 @@ class RunMonitor:
     def active(self) -> bool:
         return self.level > 0
 
-    def prepare(self, *, snapshot_init: bool) -> None:
+    def prepare(self, *, snapshot_init: bool, rewrite_manifest: bool = True) -> None:
         if not self.active():
             return
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -709,7 +859,8 @@ class RunMonitor:
             self.plan = _parameter_plan(self.model, self.road_index)
         if self.level >= 2 and not self.probes:
             self._select_train_val_probes()
-        self._write_manifest()
+        if rewrite_manifest:
+            self._write_manifest()
         if snapshot_init and self.level >= 3 and any(self.probes.values()):
             self._mechanisms(epoch_index=None, phase="init")
 
@@ -719,9 +870,81 @@ class RunMonitor:
         removed = 0
         for name in ("health.jsonl", "module_stats.jsonl", "mechanisms.jsonl"):
             removed += _truncate_jsonl(self.directory / name, committed_epoch_index)
-        self.anomalies.append(
-            f"resume truncated monitoring rows above epoch_index {committed_epoch_index}; removed {removed}"
+        removed += self._drop_future_channels(committed_epoch_index)
+        self._reload_coverage()
+        self._note_coverage_gaps(committed_epoch_index)
+        note = f"resume truncated monitoring rows above epoch_index {committed_epoch_index}; removed {removed}"
+        if note not in self.anomalies:
+            self.anomalies.append(note)
+        return removed
+
+    def _drop_future_channels(self, committed_epoch_index: int) -> int:
+        directory = self.directory / "channels"
+        if not directory.is_dir():
+            return 0
+        removed = 0
+        for path in directory.glob("epoch_*.npz"):
+            try:
+                epoch_no = int(path.stem.split("_")[-1])
+            except ValueError:
+                continue
+            if epoch_no - 1 > int(committed_epoch_index):
+                path.unlink()
+                removed += 1
+        return removed
+
+    def _read_jsonl(self, name: str) -> list[dict[str, Any]]:
+        path = self.directory / name
+        rows = []
+        if not path.is_file():
+            return rows
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        return rows
+
+    def _reload_coverage(self) -> None:
+        """Rebuild the in-memory coverage lists from records already on disk."""
+        health = self._read_jsonl("health.jsonl")
+        modules = self._read_jsonl("module_stats.jsonl")
+        mechanisms = self._read_jsonl("mechanisms.jsonl")
+        self.health_epochs = sorted({int(row["epoch_index"]) for row in health if row.get("epoch_index") is not None})
+        self.module_epochs = sorted({int(row["epoch_index"]) for row in modules if row.get("epoch_index") is not None})
+        self.mechanism_epochs_done = sorted(
+            {int(row["epoch_index"]) for row in mechanisms if row.get("epoch_index") is not None and row.get("phase") == "epoch"}
         )
+        cumulative = [
+            float(row["monitor_seconds_cumulative"])
+            for row in health
+            if isinstance(row.get("monitor_seconds_cumulative"), (int, float))
+        ]
+        if cumulative:
+            self.monitor_seconds = max(self.monitor_seconds, max(cumulative))
+        summary_path = self.directory / "summary.json"
+        if summary_path.is_file():
+            try:
+                prior = json.loads(summary_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                prior = {}
+            for item in prior.get("anomalies") or []:
+                if item not in self.anomalies:
+                    self.anomalies.append(str(item))
+
+    def _note_coverage_gaps(self, committed_epoch_index: int) -> None:
+        if int(committed_epoch_index) < 0:
+            return
+        missing = [epoch for epoch in range(int(committed_epoch_index) + 1) if epoch not in self.health_epochs]
+        if not missing:
+            return
+        note = f"missing persisted health records for committed epoch_index {missing}"
+        if note not in self.anomalies:
+            self.anomalies.append(note)
 
     def wants_capture(self, epoch_index: int, step_index: int) -> bool:
         return self.level >= 2 and int(step_index) == 0 and self._module_epoch(epoch_index)
@@ -801,17 +1024,18 @@ class RunMonitor:
         train_seconds: float,
         val_seconds: float,
         train_samples: int,
-        val_metrics: Mapping[str, Any],
+        validation_seeds: Mapping[str, Mapping[str, Any]],
     ) -> None:
         if not self.active():
             return
-        self._health(epoch_index, row, train_seconds, val_seconds, train_samples, val_metrics)
-        probe_needed = self.level >= 2 and (self._module_epoch(epoch_index) or self._mechanism_epoch(epoch_index))
-        if probe_needed:
-            activation = self._probe_pass(epoch_index, phase="epoch")
-            if self._module_epoch(epoch_index):
+        self._health(epoch_index, row, train_seconds, val_seconds, train_samples, validation_seeds)
+        module_due = self.level >= 2 and self._module_epoch(epoch_index)
+        mechanism_due = self.level >= 3 and self._mechanism_epoch(epoch_index)
+        if module_due or mechanism_due:
+            activation = self._probe_pass(epoch_index, phase="epoch", mechanisms=mechanism_due)
+            if module_due:
                 self._write_module_stats(epoch_index, activation)
-            if self._mechanism_epoch(epoch_index):
+            if mechanism_due:
                 self._mechanisms(epoch_index, phase="epoch", cached=activation)
         self._norms = []
         self._over_clip = 0
@@ -832,8 +1056,9 @@ class RunMonitor:
         self._write_associations(model)
         self.associations_written = True
 
-    def finish(self) -> None:
-        self._summary("completed")
+    def finish(self, *, replay: bool = False) -> None:
+        self._reload_coverage()
+        self._summary("completed", replay=replay)
 
     def fail(self, exc: BaseException) -> None:
         if not self.active():
@@ -970,7 +1195,7 @@ class RunMonitor:
             },
             "units": {
                 "speed": "km/h raw average_speed_raw",
-                "count": "speed_observation_count vehicles",
+                "count": "道路在该 5 分钟内贡献的有效逐秒 FCD 快照条数；同一辆车可以贡献多条。count=0 的速度是填充值，单独成列",
                 "states": "vehicle counts",
                 "slot": "5-minute index within the day",
                 "day_index": "weekday, Monday=0; the calendar date comes from the split manifest",
@@ -1001,18 +1226,31 @@ class RunMonitor:
         }
         atomic_write_json(self.directory / "manifest.json", _py(payload))
 
-    def _health(self, epoch_index, row, train_seconds, val_seconds, train_samples, val_metrics) -> None:
+    def _health(self, epoch_index, row, train_seconds, val_seconds, train_samples, validation_seeds) -> None:
         missing = []
         per_seed = {}
-        report = val_metrics.get("sampling_metrics") if isinstance(val_metrics, Mapping) else None
-        if isinstance(report, Mapping) and isinstance(report.get("per_seed"), Mapping):
-            for seed, metrics in report["per_seed"].items():
-                value = metrics.get("inflow_mae") if isinstance(metrics, Mapping) else None
-                per_seed[str(seed)] = None if value is None else float(value)
-                if value is None:
-                    missing.append(f"validation_seed_{seed}_inflow_mae")
+        total_windows = 0
+        counted_seeds = 0
+        if not isinstance(validation_seeds, Mapping) or not validation_seeds:
+            missing.append("validation_seeds")
         else:
-            missing.append("sampling_metrics.per_seed")
+            for seed, metrics in validation_seeds.items():
+                if not isinstance(metrics, Mapping):
+                    missing.append(f"validation_seed_{seed}")
+                    continue
+                inflow = metrics.get("inflow_mae")
+                count = metrics.get("sample_count")
+                per_seed[str(seed)] = {
+                    "inflow_mae": None if inflow is None else float(inflow),
+                    "sample_count": None if count is None else int(count),
+                }
+                if inflow is None:
+                    missing.append(f"validation_seed_{seed}_inflow_mae")
+                if count is None:
+                    missing.append(f"validation_seed_{seed}_sample_count")
+                else:
+                    total_windows += int(count)
+                    counted_seeds += 1
         state_mae = {}
         for name in self.run.channel_names:
             key = f"val_{name}_mae"
@@ -1044,10 +1282,9 @@ class RunMonitor:
             "val_seconds": float(val_seconds),
             "train_samples": int(train_samples),
             "train_windows_per_sec": None if train_seconds <= 0 else float(train_samples) / float(train_seconds),
-            "val_sample_count_per_seed": val_metrics.get("sample_count"),
-            "val_windows_per_sec": None
-            if val_seconds <= 0 or val_metrics.get("sample_count") is None
-            else float(val_metrics["sample_count"]) * max(len(per_seed), 1) / float(val_seconds),
+            "val_windows": total_windows,
+            "val_seed_count": counted_seeds,
+            "val_windows_per_sec": None if val_seconds <= 0 or counted_seeds == 0 else float(total_windows) / float(val_seconds),
             "selection_value": row.get("selection_value"),
             "val_state_mae": state_mae,
             "val_inflow_mae_per_seed": per_seed,
@@ -1195,7 +1432,7 @@ class RunMonitor:
             handle.remove()
         self._hooks = []
 
-    def _probe_pass(self, epoch_index: int | None, phase: str) -> dict[str, Any]:
+    def _probe_pass(self, epoch_index: int | None, phase: str, *, mechanisms: bool = False) -> dict[str, Any]:
         started = self._clock()
         was_training = self.model.training
         self._install_hooks()
@@ -1206,7 +1443,7 @@ class RunMonitor:
             probes.extend((probe, "train") for probe in self.probes.get("train", []))
             with torch.no_grad():
                 for probe, _split in probes:
-                    details.append(self._one_probe(probe))
+                    details.append(self._one_probe(probe, mechanisms=mechanisms))
         finally:
             self._remove_hooks()
             self.model.train(was_training)
@@ -1231,7 +1468,7 @@ class RunMonitor:
         self.monitor_seconds += self._clock() - started
         return {"phase": phase, "epoch_index": epoch_index, "probes": details, "activations": activations, "channels": channels}
 
-    def _one_probe(self, probe: Mapping[str, Any], *, return_arrays: bool = False) -> dict[str, Any]:
+    def _one_probe(self, probe: Mapping[str, Any], *, return_arrays: bool = False, mechanisms: bool = False) -> dict[str, Any]:
         batch = self._probe_batch(probe)
         device = self._device()
         moved = {key: value.to(device) for key, value in batch.items()}
@@ -1262,20 +1499,26 @@ class RunMonitor:
             "date": probe["date"],
             "sample_index": probe["sample_index"],
             "target_slot": probe["target_slot"],
-            "temporal": _temporal_attention(block.temporal, temporal_in, self.road_index),
-            "spatial": _spatial_attention(block.spatial, spatial_in, self.road_index, QUERY_TIMES),
-            "gate": self._gate_report(moved, outputs),
-            "projection": self._projection_report(moved, outputs),
-            "response": self._response_report(ffn_in, moved),
         }
+        if mechanisms or return_arrays:
+            detail.update(
+                temporal=_temporal_attention(block.temporal, temporal_in, self.road_index),
+                spatial=_spatial_attention(block.spatial, spatial_in, self.road_index, QUERY_TIMES),
+                gate=self._gate_report(moved, outputs),
+                projection=self._projection_report(moved, outputs),
+                response=self._response_report(ffn_in, moved),
+            )
         if return_arrays:
             final = self.run.criterion.denormalize(outputs["final_pred"]).detach()
             raw_physical = self.run.criterion.denormalize(outputs["raw_pred"]).detach()
             observed = moved["x_raw"][:, -1].detach()
             gate_mean = None
+            gate_abs_deviation = None
             gate = getattr(self.model.embedding, "auxiliary_gate", None)
             if gate is not None and int(moved["x"].shape[-1]) >= 6:
-                gate_mean = gate(moved["x"][:, -1, :, 4:6]).mean(dim=-1)[0].detach().float().cpu().numpy()
+                gate_values = gate(moved["x"][:, -1, :, 4:6]).detach().float().cpu().numpy()[0]
+                gate_mean = gate_values.mean(axis=-1)
+                gate_abs_deviation = np.abs(gate_values - 1.0).mean(axis=-1)
             detail["_arrays"] = {
                 "pred": final[0].float().cpu().numpy(),
                 "true": moved["y_raw"][:, -1].detach().float().cpu().numpy(),
@@ -1283,6 +1526,7 @@ class RunMonitor:
                 "count": None if observed.shape[-1] < 6 else observed[0, :, 5].float().cpu().numpy(),
                 "speed": None if observed.shape[-1] < 6 else observed[0, :, 4].float().cpu().numpy(),
                 "gate_mean": gate_mean,
+                "gate_abs_deviation": gate_abs_deviation,
             }
         return detail
 
@@ -1328,8 +1572,12 @@ class RunMonitor:
         }
 
     def _projection_report(self, batch, outputs) -> dict[str, Any]:
-        if self.model.projection is None or "correction_weights" not in outputs:
-            return {"applicable": False, "reason": "conservation projection is not in this model"}
+        if self.model.projection is None or "correction_weights" not in outputs or tuple(self.run.channel_names) != STATE_CHANNELS:
+            return {
+                "applicable": False,
+                "reason": "four-state conservation projection is not in this model",
+                "output_channels": list(self.run.channel_names),
+            }
         raw = self.run.criterion.denormalize(outputs["raw_pred"])
         final = self.run.criterion.denormalize(outputs["final_pred"])
         truth = batch["y_raw"][:, -1].float()
@@ -1386,7 +1634,7 @@ class RunMonitor:
                 self.model.eval()
                 with torch.no_grad():
                     for probe in self.probes.get("validation", []) + self.probes.get("train", []):
-                        details.append(self._one_probe(probe))
+                        details.append(self._one_probe(probe, mechanisms=True))
             finally:
                 self.model.train(was_training)
         train_probe = self.probes.get("train", [None])[0]
@@ -1409,6 +1657,13 @@ class RunMonitor:
         self.monitor_seconds += self._clock() - started
 
     def _task_gradient(self, probe: Mapping[str, Any]) -> dict[str, Any]:
+        channels = tuple(self.run.channel_names)
+        if channels != STATE_CHANNELS:
+            return {
+                "applicable": False,
+                "reason": "four-task gradient comparison applies only to the four output states",
+                "output_channels": list(channels),
+            }
         name = "blocks.0.ffn.w_out.weight"
         params = dict(self.model.named_parameters())
         if name not in params:
@@ -1483,22 +1738,41 @@ class RunMonitor:
         directory = self.directory / "associations"
         directory.mkdir(parents=True, exist_ok=True)
         full = {}
+        partial = self.run.config.get("max_eval_batches") is not None
         for split in ("validation", "test"):
-            per_seed = {}
+            per_seed_tables = {}
+            coverage = {}
             for seed in self.run.config.get("evaluation_sampling_seeds", [42, 43, 44, 45, 46]):
                 path = Path(self.run.run_dir) / "predictions" / f"seed_{int(seed)}" / f"{split}.npz"
-                per_seed[int(seed)] = self._associate_seed(int(seed), split, path)
-            averaged = _average_seed_tables(per_seed)
+                associated = self._associate_seed(int(seed), split, path, partial=partial)
+                per_seed_tables[int(seed)] = associated["tables"]
+                coverage[str(seed)] = associated["coverage"]
+                atomic_write_json(
+                    directory / f"{split}_seed_{int(seed)}.json",
+                    _py({"scope": "per_seed", "split": split, "sampling_seed": int(seed), **associated}),
+                )
+            averaged = _average_seed_tables(per_seed_tables)
             averaged.update(
                 {
-                    "scope": "full_predictions",
+                    "scope": "full_predictions" if not partial else "partial_predictions",
+                    "partial": partial,
                     "split": split,
                     "dataset_id": self.run.config.get("dataset_id"),
-                    "note": "gate and projection corrections are not in the official prediction archive",
+                    "per_seed_coverage": coverage,
+                    "note": (
+                        "Per-seed tables are written beside this aggregate. "
+                        "Gate values are not in the official prediction archive. "
+                        "pred_raw is the final physical prediction; raw_pred_physical, when saved, is the pre-projection physical head output."
+                    ),
                 }
             )
             atomic_write_json(directory / f"{split}_full.json", _py(averaged))
-            full[split] = {"n_seeds": averaged["n_seeds_expected"], "tables": list(averaged["tables"])}
+            full[split] = {
+                "n_seeds": averaged["n_seeds_expected"],
+                "tables": list(averaged["tables"]),
+                "partial": partial,
+                "coverage": coverage,
+            }
         probe_report = self._replay_probe_associations(model)
         atomic_write_json(directory / "probe_replay.json", _py(probe_report))
         atomic_write_json(
@@ -1511,6 +1785,8 @@ class RunMonitor:
                         "validation_sampling_seed": VAL_PROBE_SEED,
                         "test_sampling_seed": VAL_PROBE_SEED,
                         "probe_count": probe_report.get("probe_count"),
+                        "validation_probe_count": probe_report.get("validation", {}).get("probe_count"),
+                        "test_probe_count": probe_report.get("test", {}).get("probe_count"),
                     },
                     "comparison_note": (
                         "Full-prediction tables pool every official window. "
@@ -1521,7 +1797,7 @@ class RunMonitor:
         )
         self.monitor_seconds += self._clock() - started
 
-    def _associate_seed(self, seed: int, split: str, path: Path) -> dict[str, dict[str, dict[str, Any]]]:
+    def _associate_seed(self, seed: int, split: str, path: Path, *, partial: bool = False) -> dict[str, Any]:
         from data_root import sampling_root_from_window, sampling_window_root
 
         packed = _load_prediction(path)
@@ -1535,7 +1811,9 @@ class RunMonitor:
         window = sampling_window_root(sampling_root_from_window(self.run.data_root), seed)
         spans = _day_spans(window, self.run.rate, split, self.run.task.target_type)
         tables: dict[str, dict[str, _Bucket]] = {}
-        seen = 0
+        channels = tuple(self.run.channel_names)
+        matched: list[int] = []
+        known: set[int] = set()
         for span in spans:
             incoming = window / self.run.rate / split / span["date"] / f"{self.run.task.input_type}.npz"
             with np.load(incoming, mmap_mode="r") as payload:
@@ -1545,34 +1823,67 @@ class RunMonitor:
                     else None
                 )
             global_index = span["start"] + np.arange(span["count"], dtype=np.int64)
-            try:
-                rows = np.asarray([position[int(item)] for item in global_index.tolist()], dtype=np.int64)
-            except KeyError as exc:
-                raise RuntimeError(f"{split} seed {seed} {span['date']} sample is missing from predictions") from exc
-            if not np.array_equal(target_slot[rows], span["target_slot"]):
+            known.update(int(item) for item in global_index.tolist())
+            present = [int(item) for item in global_index.tolist() if int(item) in position]
+            if not partial and len(present) != int(span["count"]):
+                raise RuntimeError(f"{split} seed {seed} {span['date']} is missing prediction rows")
+            if not present:
+                continue
+            rows = np.asarray([position[item] for item in present], dtype=np.int64)
+            expected_slots = span["target_slot"][np.asarray(present, dtype=np.int64) - int(span["start"])]
+            if not np.array_equal(target_slot[rows], expected_slots):
                 raise RuntimeError(f"{split} seed {seed} {span['date']} target_slot does not match predictions")
+            local = np.asarray(present, dtype=np.int64) - int(span["start"])
             pred_day = pred[rows]
             true_day = true[rows]
             nodes = int(pred_day.shape[1])
-            window_ids = np.repeat(global_index[:, None], nodes, axis=1)
+            if int(pred_day.shape[-1]) != len(channels):
+                raise RuntimeError(
+                    f"{split} seed {seed} prediction channels {pred_day.shape[-1]} != {list(channels)}"
+                )
+            present_index = np.asarray(present, dtype=np.int64)
+            window_ids = np.repeat(present_index[:, None], nodes, axis=1)
+            identities = [
+                (split, int(seed), int(sample))
+                for sample in present
+                for _node in range(nodes)
+            ]
+            matched.extend(present)
             road_names = np.asarray(
                 [self.node_ids[index] if index < len(self.node_ids) else str(index) for index in range(nodes)],
                 dtype=object,
             )
+            kept = len(present)
             groups = {
-                "by_date": np.full((span["count"], nodes), span["date"], dtype=object),
-                "by_hour": np.broadcast_to((span["target_slot"] // 12).astype(str)[:, None], (span["count"], nodes)),
-                "by_road": np.broadcast_to(road_names, (span["count"], nodes)),
+                "by_date": np.full((kept, nodes), span["date"], dtype=object),
+                "by_hour": np.broadcast_to((span["target_slot"][local] // 12).astype(str)[:, None], (kept, nodes)),
+                "by_road": np.broadcast_to(road_names, (kept, nodes)),
             }
             if observed is not None:
-                groups["by_count"] = _count_key(observed[..., 1])
-                groups["by_speed"] = _speed_key(observed[..., 0], observed[..., 1])
-            _accumulate_into(tables, pred_day, true_day, groups, window_ids)
-            seen += span["count"]
+                kept_observed = observed[local]
+                groups["by_count"] = _count_key(kept_observed[..., 1])
+                groups["by_speed"] = _speed_key(kept_observed[..., 0], kept_observed[..., 1])
+            _accumulate_into(
+                tables, pred_day, true_day, groups, window_ids,
+                channels=channels, identities=identities,
+            )
             del observed, pred_day, true_day, groups
-        if seen != int(pred.shape[0]):
-            raise RuntimeError(f"{split} seed {seed} day windows {seen} != predictions {pred.shape[0]}")
-        return _export_tables(tables)
+        unknown = [int(item) for item in sample_index.tolist() if int(item) not in known]
+        if unknown:
+            raise RuntimeError(f"{split} seed {seed} prediction sample_index values are outside the split: {unknown[:5]}")
+        expected = len(known)
+        coverage = {
+            "partial": bool(partial),
+            "expected_windows": expected,
+            "matched_windows": len(matched),
+            "prediction_rows": int(sample_index.shape[0]),
+            "coverage": f"{len(matched)}/{expected}",
+        }
+        if not partial and (len(matched) != expected or len(matched) != int(sample_index.shape[0])):
+            raise RuntimeError(
+                f"{split} seed {seed} day windows {expected} != predictions {int(sample_index.shape[0])}"
+            )
+        return {"tables": _export_tables(tables), "coverage": coverage}
 
     def _replay_probe_associations(self, model: nn.Module) -> dict[str, Any]:
         from data_root import sampling_root_from_window, sampling_window_root
@@ -1582,8 +1893,9 @@ class RunMonitor:
         test_probes = _choose_probes(test_spans, self.probe_size, split="test", sampling_seed=VAL_PROBE_SEED)
         selected = list(self.probes.get("validation", [])) + test_probes
         was_training = model.training
-        rows = []
-        tables: dict[str, dict[str, _Bucket]] = {}
+        rows = {"validation": [], "test": []}
+        tables = {"validation": {}, "test": {}}
+        channels = tuple(self.run.channel_names)
         try:
             model.eval()
             with torch.no_grad():
@@ -1592,21 +1904,30 @@ class RunMonitor:
                     if probe["split"] == "test":
                         self._val_root = test_root
                     try:
-                        detail = self._one_probe(probe, return_arrays=True)
+                        detail = self._one_probe(probe, return_arrays=True, mechanisms=True)
                     finally:
                         if probe["split"] == "test":
                             self._val_root = saved_root
                     arrays = detail.pop("_arrays")
-                    rows.append(
+                    split = str(probe["split"])
+                    rows.setdefault(split, []).append(
                         {
-                            "probe": {key: probe[key] for key in ("probe_id", "split", "sampling_seed", "date", "sample_index", "target_slot")},
-                            "gate": detail["gate"],
-                            "projection": detail["projection"],
+                            "probe": {
+                                key: probe[key]
+                                for key in ("probe_id", "split", "sampling_seed", "date", "sample_index", "target_slot")
+                            },
+                            "road_index": [
+                                {"index": index, "edge_id": self.node_ids[index] if index < len(self.node_ids) else None}
+                                for index in self.road_index
+                            ],
+                            "gate": detail.get("gate"),
+                            "projection": detail.get("projection"),
                         }
                     )
                     pred = arrays["pred"]
                     nodes = int(pred.shape[0])
                     window_ids = np.full(nodes, int(probe["sample_index"]), dtype=np.int64)
+                    identities = [(split, int(probe["sampling_seed"]), int(probe["sample_index"]))] * nodes
                     road_names = np.asarray(
                         [self.node_ids[index] if index < len(self.node_ids) else str(index) for index in range(nodes)],
                         dtype=object,
@@ -1619,40 +1940,56 @@ class RunMonitor:
                     if arrays["count"] is not None:
                         groups["by_count"] = _count_key(arrays["count"])
                         groups["by_speed"] = _speed_key(arrays["speed"], arrays["count"])
+                    correction = arrays["correction"] if arrays["correction"].shape[-1] == len(channels) else None
                     _accumulate_into(
-                        tables,
+                        tables.setdefault(split, {}),
                         pred,
                         arrays["true"],
                         groups,
                         window_ids,
                         arrays["gate_mean"],
-                        arrays["correction"],
+                        arrays.get("gate_abs_deviation"),
+                        correction,
+                        channels=channels,
+                        identities=identities,
                     )
         finally:
             model.train(was_training)
         return {
             "scope": "probe_subsample",
-            "probe_count": len(rows),
             "sampling_seed": VAL_PROBE_SEED,
-            "tables": _export_tables(tables),
-            "records": rows,
-            "note": "fixed validation and test subsample of sampling seed 42; not the full-prediction aggregate",
+            "validation": {
+                "tables": _export_tables(tables.get("validation", {})),
+                "records": rows.get("validation", []),
+                "probe_count": len(rows.get("validation", [])),
+            },
+            "test": {
+                "tables": _export_tables(tables.get("test", {})),
+                "records": rows.get("test", []),
+                "probe_count": len(rows.get("test", [])),
+            },
+            "probe_count": len(rows.get("validation", [])) + len(rows.get("test", [])),
+            "note": (
+                "Validation and test probes are separate tables. sample_index is only unique inside one split and sampling seed. "
+                "Gate values come from replaying the best checkpoint on this fixed subsample, not from the full prediction archive."
+            ),
         }
 
-    def _summary(self, status: str) -> None:
+    def _summary(self, status: str, *, replay: bool = False) -> None:
         if not self.active():
             return
+        self._reload_coverage()
         payload = {
             "status": status,
             "run_id": self._run_id(),
             "monitor_level": self.level,
-            "health_epochs": self.health_epochs,
-            "module_epochs": self.module_epochs,
-            "mechanism_epoch_indexes": self.mechanism_epochs_done,
+            "health_epochs": list(self.health_epochs),
+            "module_epochs": list(self.module_epochs),
+            "mechanism_epoch_indexes": list(self.mechanism_epochs_done),
             "associations_written": self.associations_written,
             "monitor_seconds": self.monitor_seconds,
             "rss_mb": _rss_mb(),
-            "anomalies": self.anomalies,
+            "anomalies": list(self.anomalies),
             "outputs": {
                 "manifest": (self.directory / "manifest.json").is_file(),
                 "health": (self.directory / "health.jsonl").is_file(),
@@ -1661,6 +1998,22 @@ class RunMonitor:
                 "associations": (self.directory / "associations" / "summary.json").is_file(),
             },
         }
+        if replay:
+            prior = getattr(self, "_preserved_summary", None) or {}
+            payload["health_epochs"] = list(prior.get("health_epochs", payload["health_epochs"]))
+            payload["module_epochs"] = list(prior.get("module_epochs", payload["module_epochs"]))
+            payload["mechanism_epoch_indexes"] = list(prior.get("mechanism_epoch_indexes", payload["mechanism_epoch_indexes"]))
+            payload["monitor_seconds"] = prior.get("monitor_seconds", payload["monitor_seconds"])
+            payload["anomalies"] = list(prior.get("anomalies") or [])
+            for item in self.anomalies:
+                if item not in payload["anomalies"]:
+                    payload["anomalies"].append(item)
+            payload["replay"] = {
+                "code_version": CODE_VERSION,
+                "git_revision": _git_revision(),
+                "monitor_seconds": self.monitor_seconds,
+            }
+            payload["status"] = "completed" if self.associations_written else "monitor_pending"
         from reimplementation.common.experiment_protocol import peak_memory_mb
 
         payload.update(peak_memory_mb(self._device()))
@@ -1696,7 +2049,24 @@ def replay_level4(run_dir: Path, *, device: str | None = None) -> dict[str, Any]
     model.load_state_dict(checkpoint["model_state_dict"])
     monitor = RunMonitor(run, model, train_data_sha256=checkpoint.get("data_file_sha256"))
     monitor.level = max(monitor.level, 4)
-    monitor.prepare(snapshot_init=False)
+    manifest_path = run_dir / "monitoring" / "manifest.json"
+    summary_path = run_dir / "monitoring" / "summary.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        monitor.probes = manifest.get("probes") or {}
+        roads = manifest.get("query_roads") or []
+        monitor.road_index = [int(item["index"]) for item in roads]
+        mapping = run.package.get("node_mapping")
+        monitor.node_ids = _read_node_ids(Path(mapping)) if mapping else [
+            str(item.get("edge_id") if item.get("edge_id") is not None else item["index"]) for item in roads
+        ]
+        from data_root import sampling_root_from_window, sampling_window_root
+
+        monitor._val_root = sampling_window_root(sampling_root_from_window(run.data_root), VAL_PROBE_SEED)
+    else:
+        monitor.prepare(snapshot_init=False)
+    if summary_path.is_file():
+        monitor._preserved_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     monitor.on_predictions_ready(model)
-    monitor.finish()
+    monitor.finish(replay=True)
     return json.loads((monitor.directory / "summary.json").read_text(encoding="utf-8"))
