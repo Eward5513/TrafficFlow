@@ -74,35 +74,12 @@ class RawScaleLoss(nn.Module):
         return name if self.channel_balance == "none" else f"{name}__balance_{self.channel_balance}"
 
 
-def _projected_inflow_only_objective(criterion: RawScaleLoss, outputs, target_raw, config):
-    """Projected inflow MAE plus the pre-projection conservation residual. No other state MAE."""
-    if criterion.kind != "mae_raw" or criterion.channel_balance != "none":
-        raise ValueError("inflow_only projection loss requires unbalanced raw-scale MAE")
-    if float(config.get("projection_raw_loss_weight", 0.5)) != 0.0:
-        raise ValueError("inflow_only projection loss does not add raw MAE; projection_raw_loss_weight must be 0")
-    final_physical = criterion.denormalize(outputs["final_pred"])
-    raw_physical = criterion.denormalize(outputs["raw_pred"])
-    target = target_raw.float()
-    if final_physical.shape != target.shape or raw_physical.shape != target.shape or int(target.shape[-1]) != 4:
-        raise ValueError("inflow_only projection loss expects four-state raw and final predictions matching the target")
-    inflow_final_mae = (final_physical[..., 0] - target[..., 0]).abs().mean()
-    raw_conservation_mae = conservation_residual(raw_physical).abs().mean()
-    total = inflow_final_mae + float(config.get("projection_consistency_weight", 0.0)) * raw_conservation_mae
-    return total, {
-        "inflow_final_mae": inflow_final_mae,
-        "raw_conservation_mae": raw_conservation_mae,
-        "total_loss": total,
-    }
-
-
 def conservation_objective(criterion: RawScaleLoss, outputs, target_raw, config):
     """All components remain tensors on the training device until after backward."""
     mode = config.get("conservation_mode", "none")
     supervision = str(config.get("projection_supervision", "all"))
-    if mode == "projected" and supervision == "inflow_only":
-        return _projected_inflow_only_objective(criterion, outputs, target_raw, config)
-    if supervision not in ("all", "inflow_only"):
-        raise ValueError(f"unknown projection_supervision {supervision!r}")
+    if supervision != "all":
+        raise ValueError(f"projection_supervision must be 'all', got {supervision!r}")
     supervised = criterion(outputs["final_pred"], target_raw)
     total = supervised
     parts = {"supervised_mae": supervised}
@@ -122,93 +99,13 @@ def conservation_objective(criterion: RawScaleLoss, outputs, target_raw, config)
     return total, parts
 
 
-def temporal_aux_terms(criterion: RawScaleLoss, outputs, target_seq, config):
-    """Physical MAE of the supervised auxiliary tensor.
-
-    ``history_except_last`` uses steps 0..10. ``all_steps`` uses the full 12-step
-    tensor. Each scope averages every element in its own slice once.
-    """
-    if not bool(config.get("temporal_aux_enabled", False)):
-        raise ValueError("temporal_aux_terms requires temporal_aux_enabled")
-    scope = str(config.get("temporal_aux_scope", "history_except_last"))
-    prediction = outputs["temporal_aux_pred"]
-    target = target_seq
-    if prediction.ndim != 4 or target.ndim != 4 or prediction.shape != target.shape:
-        raise ValueError(
-            f"temporal aux prediction {tuple(prediction.shape)} != sequence target {tuple(target.shape)}"
-        )
-    if int(prediction.shape[1]) != 12:
-        raise ValueError(f"temporal aux prediction must have 12 steps, got {prediction.shape[1]}")
-    if scope == "history_except_last":
-        aux = criterion(prediction[:, :11], target[:, :11])
-    elif scope == "all_steps":
-        aux = criterion(prediction, target)
-    else:
-        raise ValueError(f"unsupported temporal_aux_scope {scope!r}")
-    weight = float(config.get("temporal_aux_weight", 0.5))
-    weighted = aux * weight
-    return aux, weighted
-
-
-def add_dual_path_terms(criterion: RawScaleLoss, outputs, target_raw, target_seq, config, loss, parts):
-    """Add the two branch MAEs and the existing 11-step auxiliary MAE. One returned total."""
-    if str(config.get("history_fusion_mode", "none")) != "dual_path_history_tsf":
-        raise ValueError("add_dual_path_terms requires history_fusion_mode='dual_path_history_tsf'")
-    for key in ("branch_a_pred", "branch_b_pred", "branch_gate"):
-        if key not in outputs:
-            raise ValueError(f"dual path outputs are missing {key}")
-    branch_a = criterion(outputs["branch_a_pred"], target_raw)
-    branch_b = criterion(outputs["branch_b_pred"], target_raw)
-    weight_a = float(config.get("branch_a_loss_weight", 0.25))
-    weight_b = float(config.get("branch_b_loss_weight", 0.25))
-    weighted_a = branch_a * weight_a
-    weighted_b = branch_b * weight_b
-    aux, weighted_aux = temporal_aux_terms(criterion, outputs, target_seq, config)
-    total = loss + weighted_a + weighted_b + weighted_aux
-    updated = dict(parts)
-    updated["final_mae"] = updated.get("supervised_mae", updated.get("inflow_final_mae"))
-    updated["branch_a_mae"] = branch_a
-    updated["branch_b_mae"] = branch_b
-    updated["weighted_branch_a_loss"] = weighted_a
-    updated["weighted_branch_b_loss"] = weighted_b
-    updated["temporal_aux_mae"] = aux
-    updated["weighted_temporal_aux_loss"] = weighted_aux
-    gate = outputs["branch_gate"].detach()
-    gate_mean = gate.float().mean(dim=tuple(range(gate.ndim - 1)))
-    from MSTT.config import STATE_CHANNELS
-
-    if int(gate_mean.numel()) != len(STATE_CHANNELS):
-        raise ValueError(f"branch gate has {int(gate_mean.numel())} states, expected {len(STATE_CHANNELS)}")
-    for name, value in zip(STATE_CHANNELS, gate_mean):
-        updated[f"gate_{name}_mean"] = value
-    updated["total_loss"] = total
-    return total, updated
-
-
 def objective_description(criterion: RawScaleLoss, config) -> str:
-    if str(config.get("history_fusion_mode", "none")) == "two_stage_projected_tsf":
-        weight = float(config.get("temporal_aux_weight", 0.5))
-        return f"final_mae_raw + {weight:g} * stage1_projected_mae[0:12]"
     mode = config.get("conservation_mode", "none")
     if mode == "soft":
-        text = f"mae_raw + {float(config.get('conservation_lambda', .1)):g} * conservation_mae"
-    elif mode == "projected" and str(config.get("projection_supervision", "all")) == "inflow_only":
-        text = (f"inflow_final_mae + {float(config.get('projection_consistency_weight', 0.)):g}"
-                " * raw_conservation_mae")
-    elif mode == "projected":
-        text = (f"final_mae_raw + {float(config.get('projection_raw_loss_weight', .5)):g} * raw_mae_raw"
-                f" + {float(config.get('projection_consistency_weight', 0.)):g} * raw_conservation_mae")
-    else:
-        text = criterion.describe()
-    if str(config.get("history_fusion_mode", "none")) == "dual_path_history_tsf":
-        text += (
-            f" + {float(config.get('branch_a_loss_weight', 0.25)):g} * branch_a_mae"
-            f" + {float(config.get('branch_b_loss_weight', 0.25)):g} * branch_b_mae"
+        return f"mae_raw + {float(config.get('conservation_lambda', .1)):g} * conservation_mae"
+    if mode == "projected":
+        return (
+            f"final_mae_raw + {float(config.get('projection_raw_loss_weight', .5)):g} * raw_mae_raw"
+            f" + {float(config.get('projection_consistency_weight', 0.)):g} * raw_conservation_mae"
         )
-    if bool(config.get("temporal_aux_enabled", False)):
-        scope = str(config.get("temporal_aux_scope", "history_except_last"))
-        if scope == "all_steps":
-            text += f" + {float(config.get('temporal_aux_weight', 0.5)):g} * temporal_aux_mae[0:12]"
-        else:
-            text += f" + {float(config.get('temporal_aux_weight', 0.5)):g} * temporal_aux_mae[0:11]"
-    return text
+    return criterion.describe()

@@ -40,9 +40,6 @@ from MSTT.config import (
     model_config_from_saved,
     conservation_settings,
     conservation_output_root,
-    temporal_aux_settings,
-    validate_history_fusion_task,
-    validate_temporal_aux_task,
 )
 from MSTT.data.dataset import (
     build_loader,
@@ -57,10 +54,8 @@ from MSTT.model import MSTT, MSTTConfig
 from MSTT.utils.device import resolve_device
 from MSTT.utils.losses import (
     RawScaleLoss,
-    add_dual_path_terms,
     conservation_objective,
     objective_description,
-    temporal_aux_terms,
 )
 from MSTT.utils.conservation_evaluation import collect_conservation_predictions, save_mstt_predictions
 from MSTT.utils.metrics import CORE, flat_core, raw_metrics
@@ -85,7 +80,7 @@ def selects_inflow_mae(task: TaskSpec) -> bool:
 
 
 BATCH_KEYS = (
-    "x", "y", "y_raw", "y_seq_raw", "day_index", "window_start_slot", "target_slot", "sample_index",
+    "x", "y", "y_raw", "day_index", "window_start_slot", "target_slot", "sample_index",
 )
 REQUIRED_OUTPUTS = ("best_checkpoint.pt", "last_checkpoint.pt", "training_history.json", "validation_sampling_metrics.json", "test_sampling_metrics.json")
 
@@ -127,21 +122,6 @@ def is_smoke(config: Mapping[str, Any]) -> bool:
     return config.get("max_train_batches") is not None or config.get("max_eval_batches") is not None
 
 
-def attach_temporal_history_if_loaded(datasets: dict, enabled: bool):
-    """Mount 12-step train labels only when that split is already open.
-
-    ``evaluate.py --splits test`` does not load the train split. Training still
-    audits ``y_seq_raw`` against the last-step label.
-    """
-    if not enabled or "train" not in datasets:
-        return None
-    from MSTT.data.temporal_aux import attach_temporal_history_labels
-
-    wrapped, audit = attach_temporal_history_labels(datasets["train"])
-    datasets["train"] = wrapped
-    return audit
-
-
 def model_reports(model: MSTT) -> dict[str, Any]:
     """Summaries written into the resolved config. Independent runs record channel order."""
     architecture = model.architecture_summary()
@@ -168,8 +148,6 @@ def model_config(config: Mapping[str, Any], task: TaskSpec) -> MSTTConfig:
     validate_conservation_task(config, task)
     validate_backbone_task(config, task)
     validate_value_embedding_task(config, task)
-    validate_temporal_aux_task(config, task)
-    validate_history_fusion_task(config, task)
     d_model = int(config["d_model"])
     ffn_width = d_model
     if str(config.get("backbone_mode", "shared")) == "state_independent":
@@ -186,35 +164,20 @@ def model_config(config: Mapping[str, Any], task: TaskSpec) -> MSTTConfig:
 
 
 _CONCAT_WIDTH_KEYS = ("value_embedding_dim", "node_embedding_dim", "tod_embedding_dim", "dow_embedding_dim")
-_FUSION_IDENTITY_KEYS = (
-    "fusion_token_dim",
-    "fusion_num_heads",
-    "fusion_ffn_hidden_dim",
-    "fusion_chunk_size",
-    "fusion_checkpoint",
-)
 
 
 def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     """``add`` fusion ignores the concat widths, so they do not distinguish two ``add`` runs.
 
     ``value_embedding_mode`` stays in the compared dict. ``joint_linear``,
-    ``separate_mlp``, ``state_aux_gate``, and ``state_aux_gate_split_mlp`` build
-    different value modules, so a run directory or checkpoint from one cannot
-    be reused for another.
-    Missing values are filled with ``joint_linear`` by ``with_legacy_defaults``
-    before this compare. ``fusion_mlp_hidden_dim`` is inactive for flatten/last
-    and for ``state_token_transformer``. The fusion token width, head count,
-    FFN width, chunk size, and activation checkpoint are compared only for
-    ``state_token_transformer``. Older heads ignore those fields, including
-    when a checkpoint predates them and legacy defaults fill them in.
+    ``separate_mlp``, and ``state_aux_gate`` build different value modules, so
+    a run directory or checkpoint from one cannot be reused for another.
+    ``fusion_mlp_hidden_dim`` is compared only for ``flatten_mlp``.
     ``projection_mlp_hidden_dim`` is inactive unless conservation is projected.
     ``state_context_sharing`` stays in the comparison. Old checkpoints omit it
-    and are restored as ``independent``. A shared-context run does not resume
-    an independent-context run. On ``backbone_mode=shared`` the field is an
-    unused placeholder and remains ``independent``. ``state_node_sharing`` is
-    compared the same way. Old checkpoints omit it and keep a private road
-    table on each branch.
+    and are restored as ``independent``. On ``backbone_mode=shared`` the field
+    is an unused placeholder and remains ``independent``. ``state_node_sharing``
+    is compared the same way.
     """
     result = dict(payload)
     if result.get("conservation_mode", "none") != "projected":
@@ -222,12 +185,8 @@ def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     if result.get("embedding_fusion") == "add":
         for key in _CONCAT_WIDTH_KEYS:
             result.pop(key, None)
-    head = str(result.get("head_type", "flatten"))
-    if head != "flatten_mlp":
+    if str(result.get("head_type", "flatten")) != "flatten_mlp":
         result.pop("fusion_mlp_hidden_dim", None)
-    if head != "state_token_transformer":
-        for key in _FUSION_IDENTITY_KEYS:
-            result.pop(key, None)
     return result
 
 
@@ -255,10 +214,6 @@ def assert_run_dir_matches(run_dir: Path, config: Mapping[str, Any], task: TaskS
         for key, value in conservation_settings(config).items():
             if conservation_settings(stored)[key] != value:
                 diff[key] = (conservation_settings(stored)[key], value)
-    for key, value in temporal_aux_settings(config).items():
-        stored_value = temporal_aux_settings(stored)[key]
-        if stored_value != value:
-            diff[key] = (stored_value, value)
     if diff:
         raise ReimplementationError(
             f"{run_dir} holds a run with a different config (stored, requested): {diff}; "
@@ -313,20 +268,11 @@ def predict(model: MSTT, batch: Mapping[str, torch.Tensor], *, amp: str, device:
 
 
 def predict_with_aux(model, batch, *, amp, device):
+    """Projected and raw predictions with a step axis, matching ``batch['y']``."""
     tod, dow = time_features(batch, model.config.input_window, steps_per_day=model.config.steps_per_day)
     with autocast_context(device, amp):
         outputs = model.forward_with_aux(batch["x"], tod, dow)
-    packed = {}
-    for key, value in outputs.items():
-        value = value.float()
-        # The 12-step auxiliary head is already [B, 12, N, 4]. raw_pred is the
-        # pre-projection normalized prediction, including the history residual
-        # when history fusion is on. final_pred is the projected prediction.
-        # Attention weights stay out of this dict. Every older field gains the step axis.
-        if key != "temporal_aux_pred":
-            value = value.unsqueeze(1)
-        packed[key] = value
-    return packed
+    return {key: value.float().unsqueeze(1) for key, value in outputs.items()}
 
 
 def assert_conservation_checkpoint(payload, config, *, normalization_sha256=None):
@@ -353,47 +299,6 @@ def assert_conservation_checkpoint(payload, config, *, normalization_sha256=None
     if saved_value_mode != requested_value_mode:
         raise ReimplementationError(
             f"checkpoint value_embedding_mode={saved_value_mode} != requested {requested_value_mode}"
-        )
-
-
-def _audit_identity(audit: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(audit, Mapping):
-        return {}
-    keys = (
-        "full_raw_content_sha256",
-        "file_content_sha256",
-        "physical_definition_version",
-        "node_order_sha256",
-        "target_mean",
-        "target_std",
-        "slice",
-        "train_days",
-    )
-    return {key: audit.get(key) for key in keys}
-
-
-def assert_temporal_aux_checkpoint(payload: Mapping[str, Any], config: Mapping[str, Any], audit: Mapping[str, Any] | None) -> None:
-    """Refuse a resume whose auxiliary weight, scope, or sequence labels differ."""
-    saved_config = payload.get("config") if isinstance(payload.get("config"), Mapping) else {}
-    saved = temporal_aux_settings(saved_config)
-    requested = temporal_aux_settings(config)
-    if saved != requested:
-        raise ReimplementationError(
-            f"checkpoint temporal aux settings {saved} != requested {requested}"
-        )
-    if not requested["temporal_aux_enabled"]:
-        return
-    saved_audit = payload.get("temporal_aux_label_audit")
-    if not isinstance(saved_audit, Mapping):
-        saved_audit = saved_config.get("temporal_aux_label_audit") if isinstance(saved_config, Mapping) else None
-    if not isinstance(saved_audit, Mapping):
-        raise ReimplementationError("temporal aux checkpoint has no sequence-label audit")
-    current = _audit_identity(audit)
-    previous = _audit_identity(saved_audit)
-    if current != previous:
-        raise ReimplementationError(
-            "temporal aux sequence labels differ from the checkpoint audit; "
-            f"stored={previous} requested={current}"
         )
 
 
@@ -447,8 +352,6 @@ class TaskRun:
         validate_conservation_task(config, task_spec(task))
         validate_backbone_task(config, task_spec(task))
         validate_value_embedding_task(config, task_spec(task))
-        validate_temporal_aux_task(config, task_spec(task))
-        validate_history_fusion_task(config, task_spec(task))
         self.config = dict(config)
         self.config["output_root"] = Path(output_root).as_posix()
         self.task = task_spec(task)
@@ -481,9 +384,6 @@ class TaskRun:
             num_nodes=self.num_nodes,
             sample_counts=self.package["sample_counts"],
             splits=tuple(splits),
-        )
-        self.temporal_aux_audit = attach_temporal_history_if_loaded(
-            self.datasets, bool(config.get("temporal_aux_enabled", False))
         )
         self.loaders = {
             split: build_loader(
@@ -536,17 +436,9 @@ class TaskRun:
         amp = str(self.config["amp"])
         mean, std = self.scaler_args()
         diagnostics = {}
-        branch_totals: dict[str, Any] = {}
         if self.task.name in {"All2All", "AllSpC2All"}:
-            history_mode = str(self.config.get("history_fusion_mode", "none"))
-
             def _predict(batch):
-                outputs = predict_with_aux(model, batch, amp=amp, device=self.device)
-                if history_mode == "two_stage_projected_tsf":
-                    _stream_two_stage_inflow(outputs, batch, self.criterion, branch_totals)
-                else:
-                    _stream_branch_inflow(outputs, batch, self.criterion, branch_totals)
-                return outputs
+                return predict_with_aux(model, batch, amp=amp, device=self.device)
 
             packed, diagnostics = collect_conservation_predictions(
                 _limited(loader, limit),
@@ -571,20 +463,6 @@ class TaskRun:
         metrics["loss_name"] = self.criterion.describe()
         metrics["sample_count"] = int(packed["pred_raw"].shape[0])
         metrics["split"] = split
-        if branch_totals.get("stage1_last_count"):
-            metrics["stage1_last_inflow_mae"] = branch_totals["stage1_last"] / branch_totals["stage1_last_count"]
-            metrics["raw_inflow_mae"] = branch_totals["raw"] / branch_totals["raw_count"]
-            streamed_final = branch_totals["final"] / branch_totals["final_count"]
-            if "inflow_mae" in metrics and abs(streamed_final - float(metrics["inflow_mae"])) > 1e-4:
-                raise ReimplementationError(
-                    f"streamed final inflow MAE {streamed_final} != inflow_mae {metrics['inflow_mae']}"
-                )
-        elif branch_totals.get("branch_a_count"):
-            metrics["branch_a_inflow_mae"] = branch_totals["branch_a"] / branch_totals["branch_a_count"]
-            metrics["branch_b_inflow_mae"] = branch_totals["branch_b"] / branch_totals["branch_b_count"]
-            metrics["raw_inflow_mae"] = branch_totals["raw"] / branch_totals["raw_count"]
-            for index, name in enumerate(STATE_CHANNELS):
-                metrics[f"gate_{name}_mean"] = float(branch_totals["gate_sum"][index] / branch_totals["gate_count"])
         return metrics, packed
 
     def selection_value(self, metrics: Mapping[str, Any]) -> float:
@@ -623,57 +501,6 @@ def _restore_rng(state: Mapping[str, Any], loader) -> None:
         torch.cuda.set_rng_state_all(state["cuda"])
 
 
-def _stream_two_stage_inflow(outputs, batch, criterion, totals: dict[str, Any]) -> None:
-    """Sum inflow absolute errors for stage-1 last, residual raw, and final projection.
-
-    The divisor is the element count, not the mean of batch means. ``inflow_mae``
-    stays the existing final metric; this check only confirms the same sum.
-    """
-    if "temporal_aux_pred" not in outputs or "raw_pred" not in outputs or "final_pred" not in outputs:
-        raise ReimplementationError("two_stage evaluation is missing stage predictions")
-    target = batch["y_raw"].float()
-    stage1_last = outputs["temporal_aux_pred"][:, -1:]
-    if (
-        stage1_last.shape != target.shape
-        or outputs["raw_pred"].shape != target.shape
-        or outputs["final_pred"].shape != target.shape
-    ):
-        raise ReimplementationError(
-            "two_stage inflow shapes "
-            f"stage1={tuple(stage1_last.shape)} raw={tuple(outputs['raw_pred'].shape)} "
-            f"final={tuple(outputs['final_pred'].shape)} target={tuple(target.shape)}"
-        )
-    for slot, prediction in (
-        ("stage1_last", stage1_last),
-        ("raw", outputs["raw_pred"]),
-        ("final", outputs["final_pred"]),
-    ):
-        error = (criterion.denormalize(prediction)[..., 0] - target[..., 0]).abs()
-        totals[slot] = float(totals.get(slot, 0.0)) + float(error.detach().double().sum())
-        totals[slot + "_count"] = float(totals.get(slot + "_count", 0.0)) + float(error.numel())
-
-
-def _stream_branch_inflow(outputs, batch, criterion, totals: dict[str, Any]) -> None:
-    """Sum inflow absolute errors and gate values. The prediction NPZ does not store these tensors."""
-    if "branch_a_pred" not in outputs:
-        return
-    target = batch["y_raw"].float()
-    for key, slot in (
-        ("branch_a_pred", "branch_a"),
-        ("branch_b_pred", "branch_b"),
-        ("raw_pred", "raw"),
-        ("final_pred", "final"),
-    ):
-        error = (criterion.denormalize(outputs[key])[..., 0] - target[..., 0]).abs()
-        totals[slot] = float(totals.get(slot, 0.0)) + float(error.detach().sum())
-        totals[slot + "_count"] = float(totals.get(slot + "_count", 0.0)) + float(error.numel())
-    gate = outputs["branch_gate"].detach().float()
-    summed = gate.sum(dim=tuple(range(gate.ndim - 1))).cpu()
-    previous = totals.get("gate_sum")
-    totals["gate_sum"] = summed if previous is None else previous + summed
-    totals["gate_count"] = float(totals.get("gate_count", 0.0)) + float(gate.numel() // int(gate.shape[-1]))
-
-
 def gradient_report(model: torch.nn.Module) -> dict[str, Any]:
     missing, nonfinite, zero = [], [], []
     for name, param in model.named_parameters():
@@ -699,58 +526,15 @@ def train_step(
 ) -> tuple[float, float]:
     """One optimizer step; returns (loss, pre-clip grad norm or 0.0 without clipping)."""
     batch = move_batch(batch, run.device)
-    aux_on = bool(run.config.get("temporal_aux_enabled", False))
     mode = run.config.get("conservation_mode", "none")
-    outputs = None
-    if mode == "none" and not aux_on:
+    if mode == "none":
         prediction = predict(model, batch, amp=amp, device=run.device)
         loss = run.criterion(prediction, batch["y_raw"])
         supervised_name = "supervised_mae" if run.criterion.describe() == "mae_raw" else "supervised_loss"
         parts = {supervised_name: loss, "total_loss": loss}
     else:
         outputs = predict_with_aux(model, batch, amp=amp, device=run.device)
-        if mode == "none":
-            loss = run.criterion(outputs["final_pred"], batch["y_raw"])
-            supervised_name = "supervised_mae" if run.criterion.describe() == "mae_raw" else "supervised_loss"
-            parts = {supervised_name: loss, "total_loss": loss}
-        else:
-            loss, parts = conservation_objective(run.criterion, outputs, batch["y_raw"], run.config)
-            if mode == "projected" and str(run.config.get("projection_supervision", "all")) == "inflow_only":
-                required = ("inflow_final_mae", "raw_conservation_mae", "total_loss")
-                missing = [key for key in required if key not in parts]
-                unexpected = [key for key in ("supervised_mae", "raw_mae", "conservation_loss") if key in parts]
-                if missing or unexpected or loss is not parts["total_loss"]:
-                    raise ReimplementationError(
-                        "inflow_only backward must use inflow_final_mae + raw_conservation_mae "
-                        f"(missing={missing}, unexpected={unexpected})"
-                    )
-    history_mode = str(run.config.get("history_fusion_mode", "none"))
-    if history_mode == "two_stage_projected_tsf":
-        if outputs is None or "y_seq_raw" not in batch:
-            raise ReimplementationError("two-stage training requires auxiliary outputs and y_seq_raw")
-        last = batch["y_seq_raw"][:, -1:]
-        if last.shape != batch["y_raw"].shape or not torch.equal(last, batch["y_raw"]):
-            raise ReimplementationError("y_seq_raw[:, -1:] does not match y_raw")
-    if history_mode == "dual_path_history_tsf":
-        if outputs is None:
-            raise ReimplementationError("dual path history TSF requires auxiliary model outputs")
-        if "y_seq_raw" not in batch:
-            raise ReimplementationError("dual path history TSF training requires y_seq_raw on the training batch")
-        loss, parts = add_dual_path_terms(
-            run.criterion, outputs, batch["y_raw"], batch["y_seq_raw"], run.config, loss, parts
-        )
-    elif aux_on:
-        if "temporal_aux_pred" not in outputs:
-            raise ReimplementationError("temporal_aux_enabled but the model returned no temporal_aux_pred")
-        if "y_seq_raw" not in batch:
-            raise ReimplementationError("temporal aux training requires y_seq_raw on the training batch")
-        aux, weighted = temporal_aux_terms(run.criterion, outputs, batch["y_seq_raw"], run.config)
-        loss = loss + weighted
-        parts = dict(parts)
-        parts["final_mae"] = parts.get("supervised_mae", parts.get("inflow_final_mae"))
-        parts["temporal_aux_mae"] = aux
-        parts["weighted_temporal_aux_loss"] = weighted
-        parts["total_loss"] = loss
+        loss, parts = conservation_objective(run.criterion, outputs, batch["y_raw"], run.config)
     if not torch.isfinite(loss):
         raise ReimplementationError(f"non-finite training loss at epoch {epoch}: {float(loss)}")
     optimizer.zero_grad(set_to_none=True)
@@ -838,8 +622,6 @@ def train_task(
     validate_conservation_task(config, task_spec(task))
     validate_backbone_task(config, task_spec(task))
     validate_value_embedding_task(config, task_spec(task))
-    validate_temporal_aux_task(config, task_spec(task))
-    validate_history_fusion_task(config, task_spec(task))
     output_root = conservation_output_root(config, output_root)
     planned_dir = run_directory(output_root, rate, task_spec(task).name, int(config["seed"]), config)
     from reimplementation.common.data.sampling_seeds import protect_historical_results
@@ -879,10 +661,7 @@ def train_task(
         "model_config": run.model_config.to_dict(),
         **model_reports(model),
         "smoke": smoke,
-        **temporal_aux_settings(cfg),
     }
-    if run.temporal_aux_audit is not None:
-        saved_config["temporal_aux_label_audit"] = run.temporal_aux_audit
     optimizer = build_optimizer(model, cfg)
     scheduler = build_scheduler(optimizer, cfg)
     amp = str(cfg["amp"])
@@ -896,7 +675,6 @@ def train_task(
     if resume_path is not None:
         payload = load_checkpoint(Path(resume_path), map_location="cpu")
         assert_conservation_checkpoint(payload, cfg, normalization_sha256=run.package["state_normalization_sha256"])
-        assert_temporal_aux_checkpoint(payload, cfg, run.temporal_aux_audit)
         assert_checkpoint_compatible(
             payload,
             penetration_rate=run.rate,
@@ -956,7 +734,6 @@ def train_task(
             "normalization_sha256": run.package["state_normalization_sha256"],
             "physical_definition_version": cfg.get("physical_definition_version"),
             "code_version": CODE_VERSION,
-            "temporal_aux_label_audit": run.temporal_aux_audit,
         }
 
     reset_peak_memory(run.device)
@@ -1028,16 +805,6 @@ def train_task(
             logger.log({"stage": "epoch", "task": run.task.name, "rate": run.rate, **row})
             inflow_text = f" val_inflow={row['val_inflow_mae']:.5f}" if "val_inflow_mae" in row else ""
             temporal_text = ""
-            if "train_temporal_aux_mae" in row and "train_total_loss" in row:
-                temporal_text = (
-                    f" temporal_aux_mae={row['train_temporal_aux_mae']:.5f}"
-                    f" total_loss={row['train_total_loss']:.5f}"
-                )
-            if "train_branch_a_mae" in row and "train_branch_b_mae" in row:
-                temporal_text += (
-                    f" branch_a_mae={row['train_branch_a_mae']:.5f}"
-                    f" branch_b_mae={row['train_branch_b_mae']:.5f}"
-                )
             aux_text = ""
             if "train_inflow_final_mae" in row and "train_raw_conservation_mae" in row and "train_total_loss" in row:
                 aux_text = (
@@ -1113,8 +880,6 @@ def train_task(
                 "amp": amp,
                 "batch_size": int(cfg["batch_size"]),
                 **conservation_settings(cfg),
-                **temporal_aux_settings(cfg),
-                "temporal_aux_label_audit": run.temporal_aux_audit,
                 "selection_prediction": "final",
                 "effective_selection_metric": (
                     "val_inflow_mae" if selects_inflow_mae(run.task)

@@ -238,7 +238,7 @@ datasets/variable_1h_p10_p20/physical_independent_fcd_v1/dcrnn/
 
 叶子里的文件就是上一棵树列出的那些。五种子平均在 `validation_sampling_metrics.json` 和 `test_sampling_metrics.json`。随机森林的四份启动汇总在 `reports/RF/<run_id>/`，run id 是 `20261109T225358_ffe1a013`（30 分钟）、`f03af6f8`（1 小时）、`0cc4c3ec`（2 小时）、`80a226ab`（全天）。
 
-MSTT 单独跑 A2A，实验号 `conservation_projected`，配置是 `MSTT/configs/conservation_best_backbone/projected.json`。它不进上面的 144 条队列。四个周期都已写出 `test_sampling_metrics.json`：
+MSTT 单独跑 A2A，实验号 `conservation_projected`。它不进上面的 144 条队列。四个周期都已写出 `test_sampling_metrics.json`，数字在 [MSTT/TRAINING_RESULTS.md](MSTT/TRAINING_RESULTS.md)：
 
 ```text
 datasets/variable_30min_p10_p20/.../seed_42/20261110T132316_29bc19aa/

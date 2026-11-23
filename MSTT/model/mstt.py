@@ -14,17 +14,13 @@ from torch import nn
 
 from MSTT.model.adaptive_embedding import AdaptiveEmbedding
 from MSTT.model.embedding import InputEmbedding, resolve_embedding_dims
-from MSTT.model.dual_history_tsf import DualPathHistoryTSF
 from MSTT.model.graph import SpatialGraph
 from MSTT.model.ffn import SwiGLU
 from MSTT.model.head import PredictionHead
-from MSTT.model.history_fusion import HistoryPredictionFusion
-from MSTT.model.joint_attention import JointSTAttention
 from MSTT.model.conservation import ConservationProjection
 from MSTT.model.state_branch import StateTSFBranch
 from MSTT.model.state_context import SharedStateContextEmbedding
-from MSTT.model.state_fusion_head import StateTokenTransformerHead
-from MSTT.model.transformer_block import JointSTBlock, build_factorized_block
+from MSTT.model.transformer_block import build_factorized_block
 
 STATE_BRANCH_COUNT = 4
 _DIVISIBLE_WIDTHS = (
@@ -78,10 +74,6 @@ class MSTTConfig:
     ffn_placement: str = "after_spatial"
     attention_order: str = "TS"
     attention_layout: str = "factorized_ts"
-    joint_temporal_window: int = 3
-    joint_temporal_alignment: str = "centered"
-    joint_query_chunk: int = 256
-    joint_checkpoint: bool = True
     steps_per_day: int = 288
     norm_eps: float = 1e-6
     head_type: str = "flatten"
@@ -91,15 +83,6 @@ class MSTTConfig:
     state_context_sharing: str = "independent"
     state_node_sharing: str = "independent"
     fusion_mlp_hidden_dim: int = 128
-    fusion_token_dim: int = 128
-    fusion_num_heads: int = 4
-    fusion_ffn_hidden_dim: int = 176
-    fusion_chunk_size: int | None = None
-    fusion_checkpoint: bool = False
-    # Off by default so an older checkpoint has no extra parameters and consumes no extra RNG.
-    temporal_aux_enabled: bool = False
-    # Off by default. Older auxiliary runs load as ``none`` and keep their parameter set.
-    history_fusion_mode: str = "none"
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any], **overrides: Any) -> "MSTTConfig":
@@ -127,7 +110,7 @@ def validate_independent_backbone(config: MSTTConfig | Mapping[str, Any]) -> Non
     the per-head size.
     """
     mode = str(_cfg_get(config, "value_embedding_mode", "joint_linear"))
-    if mode in {"state_aux_gate", "state_aux_gate_split_mlp"}:
+    if mode == "state_aux_gate":
         raise ValueError(f"backbone_mode=state_independent cannot use value_embedding_mode={mode}")
     if mode != "separate_mlp":
         raise ValueError(f"backbone_mode=state_independent requires value_embedding_mode='separate_mlp', got {mode!r}")
@@ -202,112 +185,6 @@ def validate_independent_backbone(config: MSTTConfig | Mapping[str, Any]) -> Non
                 f"RoPE needs an even {label} head_dim on each state branch, got {head_dim} "
                 f"(branch d_model={branch_d}, heads={heads})"
             )
-
-
-_HISTORY_FUSION_MODES = (
-    "none",
-    "gated_cross_attention",
-    "dual_path_history_tsf",
-    "two_stage_projected_tsf",
-)
-_FLATTEN_HISTORY_MODES = ("gated_cross_attention", "dual_path_history_tsf")
-
-
-def validate_history_fusion(config: MSTTConfig | Mapping[str, Any]) -> None:
-    """Active history modes keep the observed encoder at width 128.
-
-    ``gated_cross_attention`` and ``dual_path_history_tsf`` read the 11-step
-    auxiliary head and require ``head_type='flatten'``.
-    ``two_stage_projected_tsf`` rebuilds all 12 steps, runs a second TSF on
-    those projected values, and requires ``head_type='last'``.
-    ``none`` builds no extra parameters.
-    """
-    mode = str(_cfg_get(config, "history_fusion_mode", "none"))
-    if mode not in _HISTORY_FUSION_MODES:
-        raise ValueError(
-            "history_fusion_mode must be 'none', 'gated_cross_attention', "
-            "'dual_path_history_tsf', or 'two_stage_projected_tsf', "
-            f"got {mode!r}"
-        )
-    if mode == "none":
-        return
-    if not bool(_cfg_get(config, "temporal_aux_enabled", False)):
-        raise ValueError(f"history_fusion_mode={mode!r} requires temporal_aux_enabled")
-    window = _cfg_get(config, "input_window", None)
-    if window is None or int(window) != 12:
-        raise ValueError(f"history_fusion_mode={mode!r} requires input_window=12")
-    out_channels = _cfg_get(config, "out_channels", None)
-    if out_channels is not None and int(out_channels) != 4:
-        raise ValueError(
-            f"history_fusion_mode={mode!r} requires 4 output states, got out_channels={out_channels}"
-        )
-    if str(_cfg_get(config, "backbone_mode", "shared")) != "shared":
-        raise ValueError(f"history_fusion_mode={mode!r} requires backbone_mode='shared'")
-    if str(_cfg_get(config, "conservation_mode", "none")) != "projected":
-        raise ValueError(f"history_fusion_mode={mode!r} requires conservation_mode='projected'")
-    d_model = _cfg_get(config, "d_model", None)
-    if d_model is None or int(d_model) != 128:
-        raise ValueError(f"history_fusion_mode={mode!r} requires d_model=128")
-    head = str(_cfg_get(config, "head_type", "flatten"))
-    if mode in _FLATTEN_HISTORY_MODES:
-        if head != "flatten":
-            raise ValueError(f"history_fusion_mode={mode!r} requires head_type='flatten'")
-        return
-    if head != "last":
-        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires head_type='last'")
-    layers = _cfg_get(config, "num_layers", None)
-    if layers is None or int(layers) != 1:
-        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires num_layers=1")
-    if str(_cfg_get(config, "attention_layout", "factorized_ts")) != "factorized_ts":
-        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires attention_layout='factorized_ts'")
-    if str(_cfg_get(config, "value_embedding_mode", "joint_linear")) != "separate_mlp":
-        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires value_embedding_mode='separate_mlp'")
-    if not bool(_cfg_get(config, "use_adaptive_embedding", False)):
-        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires use_adaptive_embedding")
-
-
-def validate_state_token_transformer(config: MSTTConfig | Mapping[str, Any]) -> None:
-    """The 48-token fusion head is only the four-state Node16-style TSF stack.
-
-    ``fusion_token_dim`` is the fusion width. It does not replace backbone
-    ``d_model``. QK-Norm stays on and this head does not use RoPE; the TSF
-    blocks keep their own RoPE setting.
-    """
-    head = str(_cfg_get(config, "head_type", "flatten"))
-    if head != "state_token_transformer":
-        return
-    backbone = str(_cfg_get(config, "backbone_mode", "shared"))
-    if backbone != "state_independent":
-        raise ValueError("head_type='state_token_transformer' requires backbone_mode='state_independent'")
-    mode = str(_cfg_get(config, "value_embedding_mode", "joint_linear"))
-    if mode != "separate_mlp":
-        raise ValueError(
-            "head_type='state_token_transformer' requires value_embedding_mode='separate_mlp', "
-            f"got {mode!r}"
-        )
-    window = _cfg_get(config, "input_window", None)
-    if window is not None and int(window) != 12:
-        raise ValueError("head_type='state_token_transformer' requires input_window=12")
-    for key in ("in_channels", "out_channels"):
-        actual = _cfg_get(config, key, None)
-        if actual is not None and int(actual) != STATE_BRANCH_COUNT:
-            raise ValueError(
-                f"head_type='state_token_transformer' requires {key}={STATE_BRANCH_COUNT}, got {actual}"
-            )
-    token_dim = int(_cfg_get(config, "fusion_token_dim", 0) or 0)
-    heads = int(_cfg_get(config, "fusion_num_heads", 0) or 0)
-    ffn = int(_cfg_get(config, "fusion_ffn_hidden_dim", 0) or 0)
-    if token_dim < 1 or heads < 1 or token_dim % heads != 0:
-        raise ValueError(
-            f"fusion_token_dim={token_dim} must be a positive multiple of fusion_num_heads={heads}"
-        )
-    if ffn < 1:
-        raise ValueError(f"fusion_ffn_hidden_dim must be positive, got {ffn}")
-    if not bool(_cfg_get(config, "use_qk_norm", False)):
-        raise ValueError("head_type='state_token_transformer' keeps fusion QK-Norm on")
-    chunk = _cfg_get(config, "fusion_chunk_size", None)
-    if chunk is not None and int(chunk) < 1:
-        raise ValueError("fusion_chunk_size must be a positive integer or null")
 
 
 def validate_state_node_sharing(config: MSTTConfig | Mapping[str, Any]) -> None:
@@ -393,20 +270,18 @@ class MSTT(nn.Module):
         if config.num_layers != 1:
             raise ValueError("MSTT has exactly one block")
         layout = str(config.attention_layout)
-        if layout == "factorized_ts":
-            if config.attention_order != "TS" or config.ffn_placement != "after_spatial":
-                raise ValueError("factorized_ts requires one T→S→FFN block")
-        elif layout == "joint_st":
-            if config.joint_temporal_alignment != "centered" or int(config.joint_temporal_window) % 2 != 1:
-                raise ValueError("joint_st requires a centered odd temporal window")
-        else:
-            raise ValueError(f"unknown attention_layout {layout!r}")
+        if layout != "factorized_ts":
+            raise ValueError(
+                "attention_layout must be factorized_ts; joint_st was removed, "
+                f"got {layout!r}"
+            )
+        if config.attention_order != "TS" or config.ffn_placement != "after_spatial":
+            raise ValueError("factorized_ts requires one T→S→FFN block")
         mode = str(config.backbone_mode)
         if mode not in ("shared", "state_independent"):
             raise ValueError(f"unknown backbone_mode {mode!r}")
         validate_state_context_sharing(config)
         validate_state_node_sharing(config)
-        validate_state_token_transformer(config)
         if mode == "state_independent":
             validate_independent_backbone(config)
             branch_cfg = replace(
@@ -444,7 +319,6 @@ class MSTT(nn.Module):
                 )
                 _assert_parameters_disjoint(self.shared_state_context, self.branches)
         else:
-            temporal_heads = config.num_heads if config.temporal_num_heads is None else int(config.temporal_num_heads)
             self.embedding = InputEmbedding(
                 in_channels=config.in_channels,
                 d_model=base_dim,
@@ -461,57 +335,20 @@ class MSTT(nn.Module):
                 tod_dim=config.tod_embedding_dim,
                 dow_dim=config.dow_embedding_dim,
             )
-            if layout == "factorized_ts":
-                block = build_factorized_block(config, graph)
-            else:
-                block = JointSTBlock(
-                    config.d_model,
-                    joint=JointSTAttention(
-                        config.d_model,
-                        temporal_heads,
-                        window=int(config.joint_temporal_window),
-                        alignment=str(config.joint_temporal_alignment),
-                        query_chunk=int(config.joint_query_chunk),
-                        use_checkpoint=bool(config.joint_checkpoint),
-                        attention_dropout=config.attention_dropout,
-                        use_qk_norm=config.use_qk_norm,
-                        use_rope=config.use_rope,
-                        rope_base=config.rope_base,
-                        use_gated_attention=config.use_gated_attention,
-                        norm_eps=config.norm_eps,
-                        head_dim=config.attention_head_dim,
-                    ),
-                    ffn=SwiGLU(config.d_model, config.ffn_hidden_dim),
-                    dropout=config.dropout,
-                    norm_eps=config.norm_eps,
-                )
-            self.blocks = nn.ModuleList([block])
-        if config.head_type == "state_token_transformer":
-            self.head = StateTokenTransformerHead(
-                config.d_model // STATE_BRANCH_COUNT,
-                config.input_window,
-                config.out_channels,
-                token_dim=int(config.fusion_token_dim),
-                num_heads=int(config.fusion_num_heads),
-                ffn_hidden_dim=int(config.fusion_ffn_hidden_dim),
-                dropout=float(config.dropout),
-                attention_dropout=float(config.attention_dropout),
-                use_qk_norm=bool(config.use_qk_norm),
-                norm_eps=float(config.norm_eps),
-                chunk_size=None if config.fusion_chunk_size is None else int(config.fusion_chunk_size),
-                use_checkpoint=bool(config.fusion_checkpoint),
+            self.blocks = nn.ModuleList([build_factorized_block(config, graph)])
+        if config.head_type not in ("flatten", "flatten_mlp"):
+            raise ValueError(
+                "head_type must be flatten or flatten_mlp; last and state_token_transformer were removed, "
+                f"got {config.head_type!r}"
             )
-        elif config.head_type in ("flatten", "last", "flatten_mlp"):
-            self.head = PredictionHead(
-                config.d_model,
-                config.input_window,
-                config.out_channels,
-                head_type=config.head_type,
-                norm_eps=config.norm_eps,
-                fusion_mlp_hidden_dim=config.fusion_mlp_hidden_dim,
-            )
-        else:
-            raise ValueError(f"unknown head_type {config.head_type!r}")
+        self.head = PredictionHead(
+            config.d_model,
+            config.input_window,
+            config.out_channels,
+            head_type=config.head_type,
+            norm_eps=config.norm_eps,
+            fusion_mlp_hidden_dim=config.fusion_mlp_hidden_dim,
+        )
         if mode == "shared":
             # After the head so a shared run keeps embedding → block → head → adaptive.
             self.adaptive = (
@@ -527,36 +364,6 @@ class MSTT(nn.Module):
             self.projection = ConservationProjection(
                 config.d_model, config.projection_mlp_hidden_dim, target_mean, target_std,
             )
-        # After every existing module, so the same seed keeps the main-path initialization.
-        self.temporal_aux_head = None
-        if bool(config.temporal_aux_enabled):
-            if int(config.out_channels) != 4 or int(config.input_window) != 12:
-                raise ValueError("temporal_aux_enabled requires 12 input steps and 4 output states")
-            self.temporal_aux_head = nn.Linear(int(config.d_model), 4)
-        # After the auxiliary head, so a shared seed still matches every older parameter.
-        self.history_fusion = None
-        self.dual_history = None
-        self.stage2_block = None
-        self.stage1_projection = None
-        validate_history_fusion(config)
-        if self.temporal_aux_head is None or self.projection is None:
-            if str(config.history_fusion_mode) != "none":
-                raise ValueError("history fusion requires the temporal auxiliary head and projected conservation")
-        elif str(config.history_fusion_mode) == "gated_cross_attention":
-            self.history_fusion = HistoryPredictionFusion()
-        elif str(config.history_fusion_mode) == "dual_path_history_tsf":
-            self.dual_history = DualPathHistoryTSF(config, graph)
-        elif str(config.history_fusion_mode) == "two_stage_projected_tsf":
-            if not isinstance(self.head, PredictionHead) or self.head.head_type != "last":
-                raise ValueError("two_stage_projected_tsf uses the last-step head as its residual readout")
-            nn.init.zeros_(self.head.proj.weight)
-            nn.init.zeros_(self.head.proj.bias)
-            self.stage2_block = build_factorized_block(config, graph)
-            self.stage1_projection = ConservationProjection(
-                config.d_model, config.projection_mlp_hidden_dim, target_mean, target_std,
-            )
-            _assert_parameters_disjoint(self.stage2_block, self.blocks)
-            _assert_parameters_disjoint(self.stage1_projection, [self.projection])
 
     def forward(
         self,
@@ -569,35 +376,16 @@ class MSTT(nn.Module):
         return self.head(self._encode(x, time_of_day, day_of_week))
 
     def forward_with_aux(self, x, time_of_day=None, day_of_week=None) -> dict[str, torch.Tensor]:
-        if self.stage2_block is not None:
-            return self._forward_two_stage(x, time_of_day, day_of_week)
+        """Last-step head, then the conservation projection when it is enabled.
+
+        ``final_pred`` is the tensor ``forward`` returns. ``raw_pred`` is that
+        head output before projection. Both are ``[B, N, C_out]``.
+        """
         hidden = self._encode(x, time_of_day, day_of_week)
-        base = self.head(hidden)
-        temporal_aux = None if self.temporal_aux_head is None else self.temporal_aux_head(hidden)
-        raw = base
-        branches = None
-        if self.history_fusion is not None:
-            if temporal_aux is None:
-                raise RuntimeError("history fusion requires temporal_aux_pred from this forward")
-            # Standardized history, earliest first. The 12th auxiliary step is not a key.
-            history = temporal_aux[:, :-1].permute(0, 2, 1, 3).contiguous()
-            raw = base + self.history_fusion(hidden[:, -1], history)
-        elif self.dual_history is not None:
-            if temporal_aux is None:
-                raise RuntimeError("dual path history TSF requires temporal_aux_pred from this forward")
-            branches = self.dual_history(hidden, temporal_aux, base)
-            raw = branches["raw_pred"]
+        raw = self.head(hidden)
         if self.projection is None:
-            outputs = {"raw_pred": raw, "final_pred": raw}
-        else:
-            outputs = self.projection(hidden, raw)
-        if temporal_aux is not None:
-            outputs["temporal_aux_pred"] = temporal_aux
-        if branches is not None:
-            outputs["branch_a_pred"] = branches["branch_a_pred"]
-            outputs["branch_b_pred"] = branches["branch_b_pred"]
-            outputs["branch_gate"] = branches["branch_gate"]
-        return outputs
+            return {"raw_pred": raw, "final_pred": raw}
+        return self.projection(hidden, raw)
 
     def _embed_shared(self, values, time_of_day=None, day_of_week=None) -> torch.Tensor:
         """One embedding call: value MLP, road, TOD, DOW, then adaptive."""
@@ -605,22 +393,6 @@ class MSTT(nn.Module):
         if self.adaptive is not None:
             hidden = self.adaptive(hidden)
         return hidden
-
-    def _forward_two_stage(self, x, time_of_day=None, day_of_week=None) -> dict[str, torch.Tensor]:
-        """Rebuild 12 projected steps, then correct only the last step."""
-        if self.temporal_aux_head is None or self.stage1_projection is None or self.projection is None:
-            raise RuntimeError("two-stage forward requires the step head and both projections")
-        if self.stage2_block is None:
-            raise RuntimeError("two-stage forward requires an independent second TSF")
-        hidden = self._encode(x, time_of_day, day_of_week)
-        raw_steps = self.temporal_aux_head(hidden)
-        stage1 = self.stage1_projection.project_aligned(hidden, raw_steps)
-        projected = stage1["final_pred"]
-        second = self.stage2_block(self._embed_shared(projected, time_of_day, day_of_week))
-        raw2 = projected[:, -1] + self.head(second)
-        outputs = self.projection(second, raw2)
-        outputs["temporal_aux_pred"] = projected
-        return outputs
 
     def _encode(self, x, time_of_day=None, day_of_week=None) -> torch.Tensor:
         if x.ndim != 4:
@@ -656,44 +428,19 @@ class MSTT(nn.Module):
         return int(sum(param.numel() for param in self.parameters() if param.requires_grad))
 
     def architecture_summary(self) -> dict[str, Any]:
-        fusion_ids = set()
-        if isinstance(self.head, StateTokenTransformerHead):
-            fusion_ids = {id(module) for module in self.head.modules() if isinstance(module, SwiGLU)}
-        history_ffn_ids = set()
-        if self.dual_history is not None:
-            history_ffn_ids = {id(module) for module in self.dual_history.modules() if isinstance(module, SwiGLU)}
-        stage2_ffn_ids = set()
-        if self.stage2_block is not None:
-            stage2_ffn_ids = {id(module) for module in self.stage2_block.modules() if isinstance(module, SwiGLU)}
-        excluded_ffn_ids = fusion_ids | history_ffn_ids | stage2_ffn_ids
-        backbone_ffns = [
-            module for module in self.modules() if isinstance(module, SwiGLU) and id(module) not in excluded_ffn_ids
-        ]
-        fusion_ffns = [module for module in self.modules() if isinstance(module, SwiGLU) and id(module) in fusion_ids]
-        layout = str(self.config.attention_layout)
+        backbone_ffns = [module for module in self.modules() if isinstance(module, SwiGLU)]
         summary = {
             "backbone_mode": self.config.backbone_mode,
             "embedding": self.embedding_summary(),
             "head": self.head.describe(),
-            "attention_layout": layout,
+            "attention_layout": str(self.config.attention_layout),
             "d_model": int(self.config.d_model),
             "temporal_causal_mask": False,
             "independent_ffn_count": len(backbone_ffns),
             "backbone_ffn_count": len(backbone_ffns),
-            "fusion_ffn_count": len(fusion_ffns),
             "ffn_hidden_dims": [int(ffn.w_gate.out_features) for ffn in backbone_ffns],
-            "fusion_ffn_hidden_dims": [int(ffn.w_gate.out_features) for ffn in fusion_ffns],
             "total_parameters": self.parameter_count(),
         }
-        if isinstance(self.head, StateTokenTransformerHead):
-            summary.update(
-                branch_d_model=int(self.config.d_model) // STATE_BRANCH_COUNT,
-                fusion_token_dim=int(self.head.token_dim),
-                fusion_tokens=int(self.head.num_tokens),
-                fusion_num_heads=int(self.head.num_heads),
-                fusion_head_dim=int(self.head.head_dim),
-                projection_condition_dim=int(self.config.d_model),
-            )
         if self.projection is not None:
             first, last = self.projection.mlp[0], self.projection.mlp[-1]
             summary["projection_mlp"] = {
@@ -701,34 +448,6 @@ class MSTT(nn.Module):
                 "hidden_dim": int(first.out_features),
                 "output_dim": int(last.out_features),
             }
-        if self.temporal_aux_head is None:
-            summary["temporal_aux_head"] = {"enabled": False}
-        else:
-            layer = self.temporal_aux_head
-            supervised = "0..11" if self.stage2_block is not None else "0..10"
-            summary["temporal_aux_head"] = {
-                "enabled": True,
-                "in_features": int(layer.in_features),
-                "out_features": int(layer.out_features),
-                "shared_across_time_and_roads": True,
-                "parameters": int(layer.weight.numel() + layer.bias.numel()),
-                "supervised_steps": supervised,
-                "supervised_values": "projected_12step_target_zscore" if self.stage2_block is not None else "auxiliary_head",
-            }
-        if self.dual_history is not None:
-            summary["history_fusion"] = {
-                "enabled": False,
-                "mode": "dual_path_history_tsf",
-                "parameters": 0,
-                "replaced_by": "history_tsf",
-            }
-            history = self.dual_history.describe()
-            history["branch_a_head"] = self.head.describe()
-            summary["history_tsf"] = history
-        elif self.history_fusion is None:
-            summary["history_fusion"] = {"enabled": False, "mode": "none", "parameters": 0}
-        else:
-            summary["history_fusion"] = self.history_fusion.describe()
         if self.config.backbone_mode == "state_independent":
             branches = [branch.summary() for branch in self.branches]
             embedding = summary["embedding"]
@@ -747,23 +466,6 @@ class MSTT(nn.Module):
                 block_order=["T", "S", "FFN"],
             )
             return summary
-        if layout == "joint_st":
-            joint = self.blocks[0].joint
-            summary.update(
-                branch_count=1,
-                joint_attention_count=1,
-                temporal_attention_count=0,
-                spatial_attention_count=0,
-                joint_num_heads=int(joint.num_heads),
-                joint_head_dim=int(joint.head_dim),
-                attention_inner_dim=int(joint.inner_dim),
-                joint_temporal_window=int(joint.window),
-                joint_temporal_alignment=str(joint.alignment),
-                joint_boundary="crop_valid_times_no_token_repeat",
-                joint_spatial_scope="all_nodes_including_self",
-                block_order=["JointST", "FFN"],
-            )
-            return summary
         summary.update(
             branch_count=1,
             joint_attention_count=0,
@@ -776,63 +478,11 @@ class MSTT(nn.Module):
             attention_inner_dim=int(self.blocks[0].temporal.inner_dim),
             block_order=["T", "S", "FFN"],
         )
-        if self.stage2_block is not None and self.stage1_projection is not None:
-            stage2_ffns = [module for module in self.stage2_block.modules() if isinstance(module, SwiGLU)]
-            first, last = self.stage1_projection.mlp[0], self.stage1_projection.mlp[-1]
-            summary.update(
-                temporal_attention_count=2,
-                spatial_attention_count=2,
-                stage2_ffn_count=len(stage2_ffns),
-                stage2_ffn_hidden_dims=[int(ffn.w_gate.out_features) for ffn in stage2_ffns],
-                readout=(
-                    "stage1 linear head on every step, stage1 conservation projection, "
-                    "stage2 TSF on the projected values, zero-initialized last-step residual "
-                    "added to the projected last step, then the stage2 conservation projection"
-                ),
-            )
-            summary["two_stage"] = {
-                "mode": "two_stage_projected_tsf",
-                "stage1_input": "partial_observation",
-                "stage2_input": "projected_12step_target_zscore",
-                "shared_embedding": True,
-                "shared_value_mlps": True,
-                "stage1_blocks": len(self.blocks),
-                "stage2_blocks": 1,
-                "backbone_ffn_count": summary["backbone_ffn_count"],
-                "stage2_ffn_count": len(stage2_ffns),
-                "stage1_projection_mlp": {
-                    "input_dim": int(first.in_features),
-                    "hidden_dim": int(first.out_features),
-                    "output_dim": int(last.out_features),
-                },
-                "stage2_projection_mlp": summary.get("projection_mlp"),
-                "residual_head": self.head.describe(),
-                "residual_head_input_width": int(self.head.proj.in_features),
-                "aux_supervised_steps": "0..11",
-                "total_parameters": summary["total_parameters"],
-            }
         return summary
 
     def spatial_summary(self) -> dict[str, Any]:
         """Which attention mixes roads, and what restricts its keys."""
         branch_count = STATE_BRANCH_COUNT if self.config.backbone_mode == "state_independent" else 1
-        if str(self.config.attention_layout) == "joint_st":
-            joint = self.blocks[0].joint
-            return {
-                "type": "joint_st",
-                "branch_count": branch_count,
-                "graph_mask": False,
-                "keys_per_query": "N times the valid centered window",
-                "time_window": int(joint.window),
-                "alignment": str(joint.alignment),
-                "boundary": "crop_valid_times_no_token_repeat",
-                "spatial_scope": "all_nodes_including_self",
-                "includes_self": True,
-                "causal_mask": False,
-                "query_chunk": int(joint.query_chunk),
-                "checkpoint": bool(joint.use_checkpoint),
-                "stored_spatial_attention_used": False,
-            }
         name = self.config.spatial_attention
         if name == "global":
             summary = {
@@ -860,9 +510,6 @@ class MSTT(nn.Module):
             summary["independent_copies"] = (
                 f"{branch_count} independent {name} spatial attentions, one per state channel"
             )
-        if self.stage2_block is not None:
-            summary["stage_copies"] = 2
-            summary["stage2"] = "independent second TSF; same spatial attention settings, separate parameters"
         return summary
 
     def _context_table_summary(self) -> dict[str, Any]:

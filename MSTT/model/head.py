@@ -1,10 +1,9 @@
 """Reconstruction head: ``[B, T, N, D] -> [B, N, C_out]`` for the last observed slot.
 
 ``flatten`` reads every history step (``Linear(T * D, C_out)``, like
-STAEformer's mixed projection). ``last`` reads only step ``T-1``.
+STAEformer's mixed projection) and keeps a single ``Linear`` at ``proj``.
 ``flatten_mlp`` uses the same flattened history and a shared two-layer map
-``Linear(T * D, H) -> SiLU -> Linear(H, C_out)``. ``flatten`` and ``last``
-keep a single ``Linear`` at ``proj`` so older checkpoints still load strictly.
+``Linear(T * D, H) -> SiLU -> Linear(H, C_out)``.
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-_HEAD_TYPES = ("flatten", "last", "flatten_mlp")
+_HEAD_TYPES = ("flatten", "flatten_mlp")
 
 
 class PredictionHead(nn.Module):
@@ -50,8 +49,6 @@ class PredictionHead(nn.Module):
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         batch, steps, nodes, width = hidden.shape
         hidden = self.norm(hidden)
-        if self.head_type == "last":
-            return self.proj(hidden[:, -1])
         if steps != self.input_window:
             raise ValueError(f"{self.head_type} head expects T={self.input_window}, got {steps}")
         flat = hidden.permute(0, 2, 1, 3).reshape(batch, nodes, steps * width)

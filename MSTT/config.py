@@ -136,10 +136,6 @@ MODEL_DEFAULTS: dict[str, Any] = {
     "ffn_placement": "after_spatial",
     "attention_order": "TS",
     "attention_layout": "factorized_ts",
-    "joint_temporal_window": 3,
-    "joint_temporal_alignment": "centered",
-    "joint_query_chunk": 256,
-    "joint_checkpoint": True,
     "steps_per_day": 288,
     "norm_eps": 1e-6,
     "head_type": "flatten",
@@ -150,15 +146,6 @@ MODEL_DEFAULTS: dict[str, Any] = {
     # A missing road-table switch keeps one private node embedding on each branch.
     "state_node_sharing": "independent",
     "fusion_mlp_hidden_dim": 128,
-    # Inactive unless head_type is state_token_transformer.
-    "fusion_token_dim": 128,
-    "fusion_num_heads": 4,
-    "fusion_ffn_hidden_dim": 176,
-    "fusion_chunk_size": None,
-    "fusion_checkpoint": False,
-    "temporal_aux_enabled": False,
-    # ``none`` keeps the auxiliary head out of the last-step prediction.
-    "history_fusion_mode": "none",
 }
 
 # Meaning of keys that older run directories never stored: v0.1 predates
@@ -169,10 +156,6 @@ MODEL_DEFAULTS: dict[str, Any] = {
 LEGACY_DEFAULTS: dict[str, Any] = {
     "attention_order": "TS",
     "attention_layout": "factorized_ts",
-    "joint_temporal_window": 3,
-    "joint_temporal_alignment": "centered",
-    "joint_query_chunk": 256,
-    "joint_checkpoint": True,
     "temporal_num_heads": None, "spatial_num_heads": None,
     "attention_head_dim": None,
     "base_embedding_dim": None, "adaptive_embedding_dim": None,
@@ -186,30 +169,13 @@ LEGACY_DEFAULTS: dict[str, Any] = {
     # Runs saved before this field keep a private road table on each branch.
     "state_node_sharing": "independent",
     "fusion_mlp_hidden_dim": 128,
-    # Runs saved before the 48-token head did not use these. Old heads ignore them.
-    "fusion_token_dim": 128,
-    "fusion_num_heads": 4,
-    "fusion_ffn_hidden_dim": 176,
-    "fusion_chunk_size": None,
-    "fusion_checkpoint": False,
-    # Checkpoints written before the temporal auxiliary head did not have one.
-    "temporal_aux_enabled": False,
-    # Checkpoints written before history fusion did not correct the last step with it.
-    "history_fusion_mode": "none",
 }
 
 TRAIN_DEFAULTS: dict[str, Any] = {
     "conservation_lambda": 0.1,
     "projection_raw_loss_weight": 0.5,
     "projection_consistency_weight": 0.0,
-    # "all" is original C. "inflow_only" supervises projected inflow plus the raw residual.
     "projection_supervision": "all",
-    # Inactive unless temporal_aux_enabled. The first experiment uses the first 11 steps at weight 0.5.
-    "temporal_aux_weight": 0.5,
-    "temporal_aux_scope": "history_except_last",
-    # Inactive unless history_fusion_mode is dual_path_history_tsf. Old runs omit them.
-    "branch_a_loss_weight": 0.25,
-    "branch_b_loss_weight": 0.25,
     "seed": 42,
     "device": "auto",
     "batch_size": 16,
@@ -289,26 +255,22 @@ def _parse_optional_int(text: str) -> int | None:
 
 _OPTIONAL_INT_KEYS = {"ffn_hidden_dim", "max_train_batches", "max_eval_batches", "early_stop_patience",
                       "base_embedding_dim", "adaptive_embedding_dim",
-                      "temporal_num_heads", "spatial_num_heads", "attention_head_dim",
-                      "fusion_chunk_size"}
+                      "temporal_num_heads", "spatial_num_heads", "attention_head_dim"}
 _CHOICES = {
     "attention_order": ("TS",),
-    "attention_layout": ("factorized_ts", "joint_st"),
-    "joint_temporal_alignment": ("centered",),
+    "attention_layout": ("factorized_ts",),
     "adaptive_embedding_fusion": ("add", "concat"),
     "ffn_placement": ("after_spatial",),
     "conservation_mode": ("none", "soft", "projected"),
-    "projection_supervision": ("all", "inflow_only"),
-    "temporal_aux_scope": ("history_except_last", "all_steps"),
-    "history_fusion_mode": ("none", "gated_cross_attention", "dual_path_history_tsf", "two_stage_projected_tsf"),
+    "projection_supervision": ("all",),
     "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
-    "head_type": ("flatten", "last", "flatten_mlp", "state_token_transformer"),
+    "head_type": ("flatten", "flatten_mlp"),
     "backbone_mode": ("shared", "state_independent"),
     "state_context_sharing": ("independent", "shared"),
     "state_node_sharing": ("independent", "shared"),
     "embedding_fusion": ("add", "concat"),
-    "value_embedding_mode": ("joint_linear", "separate_mlp", "state_aux_gate", "state_aux_gate_split_mlp"),
+    "value_embedding_mode": ("joint_linear", "separate_mlp", "state_aux_gate"),
     "loss": ("mae_raw", "huber_raw", "mse_raw"),
     "channel_balance": ("none", "target_std"),
     "selection_metric": ("mean_validation_mae",),
@@ -365,17 +327,10 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if int(config["num_layers"]) != 1:
         raise ValueError("MSTT has exactly one block")
     layout = str(config.get("attention_layout", "factorized_ts"))
-    if layout == "factorized_ts":
-        if config["attention_order"] != "TS" or config["ffn_placement"] != "after_spatial":
-            raise ValueError("factorized_ts requires attention_order=TS and ffn_placement=after_spatial")
-    elif layout == "joint_st":
-        window = int(config["joint_temporal_window"])
-        if window < 1 or window % 2 == 0:
-            raise ValueError("joint_temporal_window must be a positive odd integer")
-        if int(config["joint_query_chunk"]) < 1:
-            raise ValueError("joint_query_chunk must be positive")
-        if str(config["joint_temporal_alignment"]) != "centered":
-            raise ValueError("joint_temporal_alignment must be centered")
+    if layout != "factorized_ts":
+        raise ValueError(f"attention_layout must be factorized_ts, got {layout!r}")
+    if config["attention_order"] != "TS" or config["ffn_placement"] != "after_spatial":
+        raise ValueError("factorized_ts requires attention_order=TS and ffn_placement=after_spatial")
     for key, choices in _CHOICES.items():
         if str(config.get(key, MODEL_DEFAULTS.get(key))) not in choices:
             raise ValueError(f"{key}={config[key]!r} not in {choices}")
@@ -398,36 +353,6 @@ def validate_config(config: Mapping[str, Any]) -> None:
             raise ValueError("soft/projected spatial attention must be sparse or global")
         if config["use_adaptive_embedding"] and config.get("adaptive_embedding_fusion") != "concat":
             raise ValueError("soft/projected adaptive embedding must be concatenated, not added")
-    supervision = str(config.get("projection_supervision", "all"))
-    if supervision == "inflow_only":
-        if config.get("conservation_mode", "none") != "projected":
-            raise ValueError("projection_supervision=inflow_only requires conservation_mode=projected")
-        raw_weight = float(config.get("projection_raw_loss_weight", TRAIN_DEFAULTS["projection_raw_loss_weight"]))
-        if raw_weight != 0.0:
-            raise ValueError(
-                "projection_supervision=inflow_only does not add raw MAE; set projection_raw_loss_weight to 0"
-            )
-    aux_weight = float(config.get("temporal_aux_weight", TRAIN_DEFAULTS["temporal_aux_weight"]))
-    if not math.isfinite(aux_weight) or aux_weight < 0:
-        raise ValueError("temporal_aux_weight must be finite and non-negative")
-    aux_scope = str(config.get("temporal_aux_scope", TRAIN_DEFAULTS["temporal_aux_scope"]))
-    if aux_scope not in _CHOICES["temporal_aux_scope"]:
-        raise ValueError(f"temporal_aux_scope={aux_scope!r} not in {_CHOICES['temporal_aux_scope']}")
-    if bool(config.get("temporal_aux_enabled", False)) and int(config["input_window"]) != 12:
-        raise ValueError("temporal_aux_enabled requires input_window=12")
-    from MSTT.model.mstt import validate_history_fusion
-
-    validate_history_fusion(config)
-    validate_two_stage_training(config)
-    if str(config.get("history_fusion_mode", "none")) == "dual_path_history_tsf":
-        if float(config.get("projection_raw_loss_weight", TRAIN_DEFAULTS["projection_raw_loss_weight"])) != 0.0:
-            raise ValueError("history_fusion_mode='dual_path_history_tsf' requires projection_raw_loss_weight=0")
-        if float(config.get("projection_consistency_weight", TRAIN_DEFAULTS["projection_consistency_weight"])) != 0.0:
-            raise ValueError("history_fusion_mode='dual_path_history_tsf' requires projection_consistency_weight=0")
-        for key in ("branch_a_loss_weight", "branch_b_loss_weight"):
-            value = float(config.get(key, TRAIN_DEFAULTS[key]))
-            if not math.isfinite(value) or value < 0:
-                raise ValueError(f"{key} must be finite and non-negative")
     if str(config["target_mode"]) != "last-observed-step":
         raise ValueError("MSTT reconstructs the last observed slot; target_mode must be last-observed-step")
     backbone = str(config.get("backbone_mode", "shared"))
@@ -435,12 +360,10 @@ def validate_config(config: Mapping[str, Any]) -> None:
         validate_independent_backbone,
         validate_state_context_sharing,
         validate_state_node_sharing,
-        validate_state_token_transformer,
     )
 
     validate_state_context_sharing(config)
     validate_state_node_sharing(config)
-    validate_state_token_transformer(config)
     if backbone == "state_independent":
         validate_independent_backbone(config)
     else:
@@ -470,7 +393,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
         value_dim = int(config.get("value_embedding_dim", 0))
         if value_dim < 1:
             raise ValueError("value_embedding_mode=separate_mlp requires a positive value_embedding_dim")
-    elif value_mode in {"state_aux_gate", "state_aux_gate_split_mlp"}:
+    elif value_mode == "state_aux_gate":
         if str(config.get("embedding_fusion", "add")) != "concat":
             raise ValueError(f"value_embedding_mode={value_mode} requires embedding_fusion=concat")
         if int(config.get("value_embedding_dim", 0)) != 32:
@@ -516,70 +439,6 @@ def with_legacy_defaults(saved: Mapping[str, Any]) -> dict[str, Any]:
 _CONSERVATION_TASKS = frozenset({"All2All", "AllSpC2All"})
 
 
-def validate_two_stage_training(config: Mapping[str, Any]) -> None:
-    """Loss constraints for the two-stage readout. Other modes keep their own scope."""
-    mode = str(config.get("history_fusion_mode", "none"))
-    scope = str(config.get("temporal_aux_scope", TRAIN_DEFAULTS["temporal_aux_scope"]))
-    if scope == "all_steps" and mode != "two_stage_projected_tsf":
-        raise ValueError(
-            "temporal_aux_scope='all_steps' requires history_fusion_mode='two_stage_projected_tsf'"
-        )
-    if mode != "two_stage_projected_tsf":
-        return
-    if scope != "all_steps":
-        raise ValueError(
-            "history_fusion_mode='two_stage_projected_tsf' requires temporal_aux_scope='all_steps'"
-        )
-    weight = float(config.get("temporal_aux_weight", TRAIN_DEFAULTS["temporal_aux_weight"]))
-    if weight != 0.5:
-        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires temporal_aux_weight=0.5")
-    if str(config.get("projection_supervision", TRAIN_DEFAULTS["projection_supervision"])) != "all":
-        raise ValueError("history_fusion_mode='two_stage_projected_tsf' requires projection_supervision='all'")
-    for key in (
-        "projection_raw_loss_weight",
-        "projection_consistency_weight",
-        "branch_a_loss_weight",
-        "branch_b_loss_weight",
-    ):
-        value = float(config.get(key, TRAIN_DEFAULTS[key]))
-        if value != 0.0:
-            raise ValueError(f"history_fusion_mode='two_stage_projected_tsf' requires {key}=0")
-
-
-def validate_history_fusion_task(config: Mapping[str, Any], task: TaskSpec) -> None:
-    """History modes are four-state last-step paths on top of the auxiliary head."""
-    from MSTT.model.mstt import validate_history_fusion
-
-    validate_history_fusion(config)
-    validate_two_stage_training(config)
-    mode = str(config.get("history_fusion_mode", "none"))
-    if mode == "none":
-        return
-    if task.output_channels != STATE_CHANNELS:
-        raise ValueError(
-            f"history_fusion_mode={mode!r} requires output channels "
-            f"{list(STATE_CHANNELS)} in that order, got task {task.name} {list(task.output_channels)}"
-        )
-    if mode == "two_stage_projected_tsf" and task.input_channels != STATE_CHANNELS:
-        raise ValueError(
-            "history_fusion_mode='two_stage_projected_tsf' requires input channels "
-            f"{list(STATE_CHANNELS)} in that order, got task {task.name} {list(task.input_channels)}"
-        )
-
-
-def validate_temporal_aux_task(config: Mapping[str, Any], task: TaskSpec) -> None:
-    """The auxiliary head supervises four states. It stays off unless the config asks for it."""
-    if not bool(config.get("temporal_aux_enabled", False)):
-        return
-    if task.output_channels != STATE_CHANNELS:
-        raise ValueError(
-            "temporal_aux_enabled requires output channels "
-            f"{list(STATE_CHANNELS)} in that order, got task {task.name} {list(task.output_channels)}"
-        )
-    if int(config.get("input_window", 0)) != 12:
-        raise ValueError("temporal_aux_enabled requires input_window=12")
-
-
 def validate_conservation_task(config: Mapping[str, Any], task: TaskSpec) -> None:
     mode = config.get("conservation_mode", "none")
     if mode == "none":
@@ -598,7 +457,7 @@ def validate_conservation_task(config: Mapping[str, Any], task: TaskSpec) -> Non
 def validate_value_embedding_task(config: Mapping[str, Any], task: TaskSpec) -> None:
     """Channel count and order are known once the task is. Fusion stays in ``validate_config``."""
     mode = str(config.get("value_embedding_mode", "joint_linear"))
-    if mode in {"state_aux_gate", "state_aux_gate_split_mlp"}:
+    if mode == "state_aux_gate":
         if task.input_channels != ALL_SP_C_CHANNELS:
             raise ValueError(
                 f"value_embedding_mode={mode} requires input channels "
@@ -638,7 +497,7 @@ def validate_backbone_task(config: Mapping[str, Any], task: TaskSpec) -> None:
     if mode != "state_independent":
         raise ValueError(f"unknown backbone_mode {mode!r}")
     value_mode = str(config.get("value_embedding_mode", "joint_linear"))
-    if value_mode in {"state_aux_gate", "state_aux_gate_split_mlp"}:
+    if value_mode == "state_aux_gate":
         raise ValueError(f"backbone_mode=state_independent cannot use value_embedding_mode={value_mode}")
     if value_mode != "separate_mlp":
         raise ValueError(
@@ -673,6 +532,7 @@ def model_config_from_saved(saved: Mapping[str, Any]) -> dict[str, Any]:
     """
     from MSTT.model.mstt import MSTTConfig
 
+    reject_retired_config(saved)
     names = set(MSTTConfig.__dataclass_fields__)
     raw_model = saved.get("model_config")
     if isinstance(raw_model, Mapping):
@@ -731,19 +591,45 @@ def conservation_settings(config: Mapping[str, Any]) -> dict[str, Any]:
     )}
 
 
-def temporal_aux_settings(config: Mapping[str, Any]) -> dict[str, Any]:
-    """Auxiliary-loss identity. A checkpoint that predates either switch is recorded as off."""
-    defaults = default_config()
-    settings = {
-        "temporal_aux_enabled": bool(config.get("temporal_aux_enabled", defaults["temporal_aux_enabled"])),
-        "temporal_aux_weight": float(config.get("temporal_aux_weight", defaults["temporal_aux_weight"])),
-        "temporal_aux_scope": str(config.get("temporal_aux_scope", defaults["temporal_aux_scope"])),
-        "history_fusion_mode": str(config.get("history_fusion_mode", defaults["history_fusion_mode"])),
-    }
-    if settings["history_fusion_mode"] in {"dual_path_history_tsf", "two_stage_projected_tsf"}:
-        settings["branch_a_loss_weight"] = float(config.get("branch_a_loss_weight", defaults["branch_a_loss_weight"]))
-        settings["branch_b_loss_weight"] = float(config.get("branch_b_loss_weight", defaults["branch_b_loss_weight"]))
-    return settings
+def reject_retired_config(saved: Mapping[str, Any]) -> None:
+    """Refuse a saved run that explicitly selected a removed structure.
+
+    Inert leftovers on a live checkpoint are ignored: ``history_fusion_mode``
+    ``none``, ``temporal_aux_enabled`` false, and the old joint-attention
+    defaults while ``attention_layout`` stays ``factorized_ts``. A config that
+    names a removed structure is not loaded as the current model.
+    """
+    sources: list[Mapping[str, Any]] = [saved]
+    for key in ("model_config", "config"):
+        nested = saved.get(key)
+        if isinstance(nested, Mapping):
+            sources.append(nested)
+            inner = nested.get("model_config") if isinstance(nested, Mapping) else None
+            if isinstance(inner, Mapping):
+                sources.append(inner)
+    for source in sources:
+        layout = source.get("attention_layout")
+        if layout is not None and str(layout) != "factorized_ts":
+            raise ValueError(
+                f"attention_layout={layout!r} was removed; refusing to load it as factorized_ts"
+            )
+        history = source.get("history_fusion_mode")
+        if history is not None and str(history) != "none":
+            raise ValueError(f"history_fusion_mode={history!r} was removed")
+        if source.get("temporal_aux_enabled") is True:
+            raise ValueError("temporal_aux_enabled was removed")
+        scope = source.get("temporal_aux_scope")
+        if scope is not None and str(scope) != "history_except_last":
+            raise ValueError(f"temporal_aux_scope={scope!r} was removed")
+        value_mode = source.get("value_embedding_mode")
+        if value_mode is not None and str(value_mode) == "state_aux_gate_split_mlp":
+            raise ValueError("value_embedding_mode='state_aux_gate_split_mlp' was removed")
+        head = source.get("head_type")
+        if head is not None and str(head) not in {"flatten", "flatten_mlp"}:
+            raise ValueError(f"head_type={head!r} was removed")
+        supervision = source.get("projection_supervision")
+        if supervision is not None and str(supervision) != "all":
+            raise ValueError(f"projection_supervision={supervision!r} was removed")
 
 
 def conservation_output_root(config: Mapping[str, Any], root: Path, *, explicit: bool = False) -> Path:
