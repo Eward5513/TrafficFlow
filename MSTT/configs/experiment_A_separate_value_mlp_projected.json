@@ -1,5 +1,6 @@
 {
   "output_root": "/data5/tzhang174/TrafficFlow/xuancheng26/training_results_3s/MSTT/experiment_A_separate_value_mlp_projected",
+  "experiment_id": "separate_value_mlp_projected",
   "num_nodes": 1406,
   "target_mode": "last-observed-step",
   "d_model": 128,

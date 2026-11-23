@@ -19,17 +19,6 @@ features. ``AuxiliaryStateGate`` maps them to 32 coefficients,
 the road, TOD, and DOW parts are concatenated. The gate's last linear layer
 is zero-initialized, so ``g`` starts at 1. Forward does not store the gate.
 
-``external_calendar_embeddings=True`` keeps concat fusion and the configured
-TOD/DOW widths, but this module does not create those parameter tables.
-``forward`` then requires ``tod_features`` and ``dow_features`` shaped
-``[B, T, 1, width]``. Disabling ``use_tod`` or ``use_dow`` is not that mode:
-a disabled part is still zero-filled to its width.
-
-``external_node_embedding=True`` is the same contract for the road table.
-``use_node_embedding`` stays true, this module allocates no ``node_embedding``,
-and ``forward`` requires ``node_features`` shaped ``[1, 1, N, width]``. A
-missing table is not zero-filled in that mode.
-
 ``fusion="add"`` (v0.1): every part maps to ``d_model`` and the parts are
 summed. ``fusion="concat"`` (v0.2 default): each part has its own width,
 is broadcast to ``[B, T, N, d_i]``, and the parts are concatenated in the
@@ -86,30 +75,10 @@ class InputEmbedding(nn.Module):
         node_dim: int | None = None,
         tod_dim: int | None = None,
         dow_dim: int | None = None,
-        external_calendar_embeddings: bool = False,
-        external_node_embedding: bool = False,
     ) -> None:
         super().__init__()
         if fusion not in FUSION_MODES:
             raise ValueError(f"embedding fusion {fusion!r} not in {FUSION_MODES}")
-        self.external_calendar_embeddings = bool(external_calendar_embeddings)
-        self.external_node_embedding = bool(external_node_embedding)
-        if self.external_calendar_embeddings:
-            if fusion != "concat":
-                raise ValueError("external calendar embeddings require fusion='concat'")
-            if not use_tod or not use_dow:
-                raise ValueError(
-                    "external calendar embeddings require use_tod and use_dow; "
-                    "disabling a calendar table zero-fills that width and is not an external table"
-                )
-        if self.external_node_embedding:
-            if fusion != "concat":
-                raise ValueError("external node embeddings require fusion='concat'")
-            if not use_node_embedding:
-                raise ValueError(
-                    "external node embeddings require use_node_embedding=True; "
-                    "disabling the node table zero-fills that width and is not an external table"
-                )
         self.fusion = fusion
         self.in_channels = int(in_channels)
         self.num_nodes = int(num_nodes)
@@ -128,16 +97,9 @@ class InputEmbedding(nn.Module):
             self.auxiliary_gate = AuxiliaryStateGate()
         else:
             self.value_projection = nn.Linear(self.in_channels, self.widths["value"])
-        if self.external_node_embedding:
-            self.node_embedding = None
-        else:
-            self.node_embedding = nn.Embedding(self.num_nodes, self.widths["node"]) if use_node_embedding else None
-        if self.external_calendar_embeddings:
-            self.tod_embedding = None
-            self.dow_embedding = None
-        else:
-            self.tod_embedding = nn.Embedding(self.steps_per_day, self.widths["tod"]) if use_tod else None
-            self.dow_embedding = nn.Embedding(7, self.widths["dow"]) if use_dow else None
+        self.node_embedding = nn.Embedding(self.num_nodes, self.widths["node"]) if use_node_embedding else None
+        self.tod_embedding = nn.Embedding(self.steps_per_day, self.widths["tod"]) if use_tod else None
+        self.dow_embedding = nn.Embedding(7, self.widths["dow"]) if use_dow else None
         self.dropout = nn.Dropout(dropout)
         for table in (self.node_embedding, self.tod_embedding, self.dow_embedding):
             if table is not None:
@@ -148,25 +110,11 @@ class InputEmbedding(nn.Module):
         x: torch.Tensor,
         time_of_day: torch.Tensor | None = None,
         day_of_week: torch.Tensor | None = None,
-        *,
-        tod_features: torch.Tensor | None = None,
-        dow_features: torch.Tensor | None = None,
-        node_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """``x`` [B, T, N, C_in]; ``time_of_day``/``day_of_week`` [B, T] long -> [B, T, N, D]."""
         if x.ndim != 4 or int(x.shape[-1]) != self.in_channels:
             raise ValueError(f"expected [B, T, N, {self.in_channels}], got {tuple(x.shape)}")
         batch, steps, nodes = int(x.shape[0]), int(x.shape[1]), int(x.shape[2])
-        if self.external_calendar_embeddings:
-            if tod_features is None or dow_features is None:
-                raise ValueError("external calendar embeddings require tod_features and dow_features")
-        elif tod_features is not None or dow_features is not None:
-            raise ValueError("external tod_features/dow_features were passed to an embedding that owns its calendar tables")
-        if self.external_node_embedding:
-            if node_features is None:
-                raise ValueError("external node embedding requires node_features")
-        elif node_features is not None:
-            raise ValueError("external node_features were passed to an embedding that owns its node table")
         if self.value_embedding_mode == "joint_linear":
             value = self.value_projection(x)
         elif self.value_embedding_mode == "separate_mlp":
@@ -187,21 +135,14 @@ class InputEmbedding(nn.Module):
         else:
             raise ValueError(f"unknown value_embedding_mode {self.value_embedding_mode!r}")
         node = tod = dow = None
-        if self.external_node_embedding or self.node_embedding is not None:
+        if self.node_embedding is not None:
             if nodes != self.num_nodes:
                 raise ValueError(f"node axis {nodes} != embedding table {self.num_nodes}")
-        if self.external_node_embedding:
-            node = self._external_node(node_features, x)
-        elif self.node_embedding is not None:
             node = self.node_embedding.weight[None, None, :, :]
-        if self.external_calendar_embeddings:
-            tod = self._external_calendar(tod_features, "tod", batch, steps, x)
-            dow = self._external_calendar(dow_features, "dow", batch, steps, x)
-        else:
-            if self.tod_embedding is not None:
-                tod = self.tod_embedding(_check_index(time_of_day, "time_of_day", batch, steps, self.steps_per_day))[:, :, None, :]
-            if self.dow_embedding is not None:
-                dow = self.dow_embedding(_check_index(day_of_week, "day_of_week", batch, steps, 7))[:, :, None, :]
+        if self.tod_embedding is not None:
+            tod = self.tod_embedding(_check_index(time_of_day, "time_of_day", batch, steps, self.steps_per_day))[:, :, None, :]
+        if self.dow_embedding is not None:
+            dow = self.dow_embedding(_check_index(day_of_week, "day_of_week", batch, steps, 7))[:, :, None, :]
         if self.fusion == "add":
             hidden = value
             for part in (node, tod, dow):
@@ -216,94 +157,6 @@ class InputEmbedding(nn.Module):
             else:
                 parts.append(part.expand(*shape, self.widths[name]))
         return self.dropout(torch.cat(parts, dim=-1))
-
-    def _external_calendar(
-        self,
-        features: torch.Tensor | None,
-        name: str,
-        batch: int,
-        steps: int,
-        reference: torch.Tensor,
-    ) -> torch.Tensor:
-        """Check an external ``[B, T, 1, width]`` vector. Concat broadcasts it over N."""
-        width = int(self.widths[name])
-        expected = (batch, steps, 1, width)
-        if features is None or not torch.is_tensor(features):
-            raise ValueError(f"{name} features are required when calendar embeddings are supplied externally")
-        if tuple(features.shape) != expected:
-            raise ValueError(f"{name} features must be [B, T, 1, {width}]={expected}, got {tuple(features.shape)}")
-        if features.device != reference.device:
-            raise ValueError(f"{name} features are on {features.device}, input is on {reference.device}")
-        if not features.is_floating_point() or features.dtype != reference.dtype:
-            raise ValueError(f"{name} features must be {reference.dtype}, got {features.dtype}")
-        return features
-
-    def _external_node(self, features: torch.Tensor | None, reference: torch.Tensor) -> torch.Tensor:
-        """Check an external ``[1, 1, N, width]`` road table. Concat broadcasts it over B and T."""
-        width = int(self.widths["node"])
-        expected = (1, 1, self.num_nodes, width)
-        if features is None or not torch.is_tensor(features):
-            raise ValueError("node features are required when the node embedding is supplied externally")
-        if tuple(features.shape) != expected:
-            raise ValueError(f"node features must be [1, 1, N, {width}]={expected}, got {tuple(features.shape)}")
-        if features.device != reference.device:
-            raise ValueError(f"node features are on {features.device}, input is on {reference.device}")
-        if not features.is_floating_point() or features.dtype != reference.dtype:
-            raise ValueError(f"node features must be {reference.dtype}, got {features.dtype}")
-        return features
-
-    def node_summary(self) -> dict[str, object]:
-        """Whether the road table is enabled, and whether this module owns it."""
-        width = int(self.widths["node"])
-        if self.external_node_embedding:
-            return {
-                "enabled": True,
-                "source": "external",
-                "width": width,
-                "parameter_shape": None,
-                "parameters": 0,
-            }
-        if self.node_embedding is None:
-            return {
-                "enabled": False,
-                "source": "disabled",
-                "width": width,
-                "parameter_shape": None,
-                "parameters": 0,
-            }
-        shape = [int(size) for size in self.node_embedding.weight.shape]
-        return {
-            "enabled": True,
-            "source": "parameter",
-            "width": width,
-            "parameter_shape": shape,
-            "parameters": int(self.node_embedding.weight.numel()),
-        }
-
-    def calendar_summary(self) -> dict[str, object]:
-        """Whether TOD/DOW are enabled, and whether this module owns the tables."""
-
-        def one(name: str, table: nn.Embedding | None) -> dict[str, object]:
-            if self.external_calendar_embeddings:
-                source = "external"
-                enabled = True
-                shape = None
-            elif table is None:
-                source = "disabled"
-                enabled = False
-                shape = None
-            else:
-                source = "parameter"
-                enabled = True
-                shape = [int(size) for size in table.weight.shape]
-            return {
-                "enabled": enabled,
-                "source": source,
-                "width": int(self.widths[name]),
-                "parameter_shape": shape,
-            }
-
-        return {"tod": one("tod", self.tod_embedding), "dow": one("dow", self.dow_embedding)}
 
     def _require_state_aux_gate(self) -> None:
         """Six real inputs, four state branches, and a 32-d value. ``in_channels`` stays 6."""

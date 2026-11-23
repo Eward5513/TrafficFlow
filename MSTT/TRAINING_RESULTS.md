@@ -325,7 +325,7 @@ checkpoint 按一次验证 MAE 选取。这一组跑满 100 个 epoch。
 
 目录是 `datasets/variable_<period>_p5_p15/physical_independent_fcd_v1/MSTT/in_all__out_all/p5_p15/state_independent_full_context_shared_tsf_mlp_projected/seed_42/<run_id>/`。`<period>` 分别是 `30min`、`1h`、`2h`、`day`。
 
-四套上下文表的 `state_independent_full_context_independent_tsf_mlp_projected` 没有写完。2026-11-23 核对时，30 分钟停在 epoch 63（run `20261116T091258_4fda2d99`），1 小时停在 epoch 40（`20261116T105758_ccd855bc`），2 小时停在 epoch 38（`20261116T110402_96574c09`），全天停在 epoch 28（`20261116T122444_0fb8f0a8`）。配置里的 epoch 数是 100。四个目录都有 `best_checkpoint.pt` 和 `last_checkpoint.pt`，都没有 `test_sampling_metrics.json`。没有对应的调度进程。
+四套上下文表的 `state_independent_full_context_independent_tsf_mlp_projected` 没有写完。2026-11-23 核对时，30 分钟停在 epoch 63（run `20261116T091258_4fda2d99`），1 小时停在 epoch 40（`20261116T105758_ccd855bc`），2 小时停在 epoch 38（`20261116T110402_96574c09`），全天停在 epoch 28（`20261116T122444_0fb8f0a8`）。配置里的 epoch 数是 100。四个目录都有 `best_checkpoint.pt` 和 `last_checkpoint.pt`，都没有 `test_sampling_metrics.json`。没有对应的调度进程。这次停止是这组的最终状态，不再续跑。
 
 ### 四路全上下文共享 TSF，道路宽度 16，5%–15%
 

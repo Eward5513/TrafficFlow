@@ -35,7 +35,6 @@ from MSTT.config import (
     with_legacy_defaults,
     validate_conservation_task,
     validate_value_embedding_task,
-    validate_backbone_task,
     model_values_equal,
     model_config_from_saved,
     conservation_settings,
@@ -123,11 +122,8 @@ def is_smoke(config: Mapping[str, Any]) -> bool:
 
 
 def model_reports(model: MSTT) -> dict[str, Any]:
-    """Summaries written into the resolved config. Independent runs record channel order."""
+    """Summaries written into the resolved config."""
     architecture = model.architecture_summary()
-    if model.config.backbone_mode == "state_independent":
-        architecture = dict(architecture)
-        architecture["state_channels"] = list(STATE_CHANNELS)
     return {
         "embedding": model.embedding_summary(),
         "spatial": model.spatial_summary(),
@@ -146,20 +142,13 @@ def run_is_complete(run_dir: Path) -> bool:
 
 def model_config(config: Mapping[str, Any], task: TaskSpec) -> MSTTConfig:
     validate_conservation_task(config, task)
-    validate_backbone_task(config, task)
     validate_value_embedding_task(config, task)
-    d_model = int(config["d_model"])
-    ffn_width = d_model
-    if str(config.get("backbone_mode", "shared")) == "state_independent":
-        if d_model % 4 != 0:
-            raise ValueError(f"state_independent d_model={d_model} must be divisible by 4")
-        ffn_width = d_model // 4
     return MSTTConfig.from_mapping(
         config,
         num_nodes=int(config["num_nodes"]),
         in_channels=task.in_channels,
         out_channels=task.out_channels,
-        ffn_hidden_dim=resolve_ffn_hidden_dim(ffn_width, config.get("ffn_hidden_dim")),
+        ffn_hidden_dim=resolve_ffn_hidden_dim(int(config["d_model"]), config.get("ffn_hidden_dim")),
     )
 
 
@@ -172,12 +161,7 @@ def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     ``value_embedding_mode`` stays in the compared dict. ``joint_linear``,
     ``separate_mlp``, and ``state_aux_gate`` build different value modules, so
     a run directory or checkpoint from one cannot be reused for another.
-    ``fusion_mlp_hidden_dim`` is compared only for ``flatten_mlp``.
     ``projection_mlp_hidden_dim`` is inactive unless conservation is projected.
-    ``state_context_sharing`` stays in the comparison. Old checkpoints omit it
-    and are restored as ``independent``. On ``backbone_mode=shared`` the field
-    is an unused placeholder and remains ``independent``. ``state_node_sharing``
-    is compared the same way.
     """
     result = dict(payload)
     if result.get("conservation_mode", "none") != "projected":
@@ -185,8 +169,6 @@ def _effective_model_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     if result.get("embedding_fusion") == "add":
         for key in _CONCAT_WIDTH_KEYS:
             result.pop(key, None)
-    if str(result.get("head_type", "flatten")) != "flatten_mlp":
-        result.pop("fusion_mlp_hidden_dim", None)
     return result
 
 
@@ -350,7 +332,6 @@ class TaskRun:
         config = configure_sampling(config)
         validate_config(config)
         validate_conservation_task(config, task_spec(task))
-        validate_backbone_task(config, task_spec(task))
         validate_value_embedding_task(config, task_spec(task))
         self.config = dict(config)
         self.config["output_root"] = Path(output_root).as_posix()
@@ -620,7 +601,6 @@ def train_task(
 ) -> dict[str, Any]:
     validate_config(config)
     validate_conservation_task(config, task_spec(task))
-    validate_backbone_task(config, task_spec(task))
     validate_value_embedding_task(config, task_spec(task))
     output_root = conservation_output_root(config, output_root)
     planned_dir = run_directory(output_root, rate, task_spec(task).name, int(config["seed"]), config)

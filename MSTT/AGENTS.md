@@ -9,8 +9,10 @@ Finished experiments that are no longer a training path are recorded in
 back in order to reload an old checkpoint. A saved config that explicitly
 selects a removed structure must fail. Inert leftover fields on a live
 checkpoint (`history_fusion_mode=none`, `temporal_aux_enabled=false`, joint
-attention defaults while `attention_layout` stays `factorized_ts`) are dropped
-at read time. Live weights still load with `strict=True`.
+attention defaults while `attention_layout` stays `factorized_ts`,
+`backbone_mode=shared`, `state_context_sharing=independent`,
+`state_node_sharing=independent`, and `fusion_mlp_hidden_dim` on a flatten
+head) are dropped at read time. Live weights still load with `strict=True`.
 
 ## Current paths
 
@@ -50,7 +52,8 @@ from `d_model`.
 
 The default value embedding is one `Linear(C_in, 32)`. The four-state
 control and the gate use one `Linear(1, 8) → SiLU → Linear(8, 8)` per state,
-concatenated to 32. The gate reads `all_sp_c`: the four states plus uncapped
+concatenated to 32. The four-state control's experiment id is
+`separate_value_mlp_projected`. The gate reads `all_sp_c`: the four states plus uncapped
 `average_speed_raw` (km/h) and `speed_observation_count`. Those two channels
 are not value features. They produce
 
@@ -78,15 +81,14 @@ Conservation in their own files. A new spatial attention registers in
 `SPATIAL_ATTENTION` and is selected with `spatial_attention`. Do not fold a
 new traffic input into `mstt.py`; add it beside `InputEmbedding`.
 
-## Unfinished four-TSF run
+## Retired experiments
 
-`backbone_mode=state_independent` is still loadable. One p5_p15 run,
-`state_independent_full_context_independent_tsf_mlp_projected`, stopped on
-2026-11-16 before any test metrics: epochs 63, 40, 38, and 28 of 100, with
-checkpoints and no scheduler. The finished four-TSF, shared-context, and
-Node16 runs use that same module, so their configs stay with it. The
-48-token head does not. Do not start a new four-TSF experiment from those
-configs. Their finished numbers are in `TRAINING_RESULTS.md`.
+Four independent TSFs, the shared-TSF MLP head, history fusion, temporal
+auxiliary losses, and the other finished branches are not training paths.
+Their datasets, frequencies, metrics, and run ids are in `TRAINING_RESULTS.md`.
+The road-width-4 full-context independent TSF stopped on 2026-11-16 at epochs
+63, 40, 38, and 28 with no test metrics and no queued continuation. That stop
+is its final record.
 
 ## Data and outputs
 

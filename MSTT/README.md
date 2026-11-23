@@ -91,10 +91,7 @@ python MSTT/evaluate.py --run-dir <run directory> --splits validation test
 `--max-train-batches` and `--max-eval-batches` write a smoke run under a
 `_smoke` segment. Do not point that at an official experiment directory.
 
-## Unfinished four-TSF run
-
-`backbone_mode=state_independent` is still in the tree because
-`state_independent_full_context_independent_tsf_mlp_projected` stopped on
-2026-11-16 without test metrics. The finished four-TSF configs stay with
-that module. Their numbers, and every removed experiment, are in
-[TRAINING_RESULTS.md](TRAINING_RESULTS.md).
+The four-state All2All config sets `experiment_id` to
+`separate_value_mlp_projected`. `--experiment-id` still overrides that name.
+Finished and retired runs, including the four-TSF family and the shared-TSF
+MLP head, are recorded in [TRAINING_RESULTS.md](TRAINING_RESULTS.md).

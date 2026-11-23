@@ -2,16 +2,12 @@
 
 ``flatten`` reads every history step (``Linear(T * D, C_out)``, like
 STAEformer's mixed projection) and keeps a single ``Linear`` at ``proj``.
-``flatten_mlp`` uses the same flattened history and a shared two-layer map
-``Linear(T * D, H) -> SiLU -> Linear(H, C_out)``.
 """
 
 from __future__ import annotations
 
 import torch
 from torch import nn
-
-_HEAD_TYPES = ("flatten", "flatten_mlp")
 
 
 class PredictionHead(nn.Module):
@@ -23,28 +19,17 @@ class PredictionHead(nn.Module):
         *,
         head_type: str = "flatten",
         norm_eps: float = 1e-6,
-        fusion_mlp_hidden_dim: int = 128,
     ) -> None:
         super().__init__()
-        if head_type not in _HEAD_TYPES:
-            raise ValueError(f"head_type {head_type!r} not in {_HEAD_TYPES}")
+        if head_type != "flatten":
+            raise ValueError(
+                "head_type must be flatten; flatten_mlp, last, and state_token_transformer were removed, "
+                f"got {head_type!r}"
+            )
         self.head_type = head_type
         self.input_window = int(input_window)
-        self.fusion_mlp_hidden_dim = int(fusion_mlp_hidden_dim)
         self.norm = nn.RMSNorm(d_model, eps=norm_eps)
-        if head_type == "flatten_mlp":
-            if self.fusion_mlp_hidden_dim < 1:
-                raise ValueError("fusion_mlp_hidden_dim must be positive")
-            flat_dim = int(d_model) * self.input_window
-            # Indexes 0 and 2 are the checkpoint contract: proj.0.* and proj.2.*.
-            self.proj = nn.Sequential(
-                nn.Linear(flat_dim, self.fusion_mlp_hidden_dim),
-                nn.SiLU(),
-                nn.Linear(self.fusion_mlp_hidden_dim, int(out_channels)),
-            )
-        else:
-            width = d_model * self.input_window if head_type == "flatten" else d_model
-            self.proj = nn.Linear(width, int(out_channels))
+        self.proj = nn.Linear(int(d_model) * self.input_window, int(out_channels))
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         batch, steps, nodes, width = hidden.shape
@@ -55,21 +40,9 @@ class PredictionHead(nn.Module):
         return self.proj(flat)
 
     def describe(self) -> dict[str, object]:
-        if self.head_type != "flatten_mlp":
-            return {
-                "type": self.head_type,
-                "norm": "RMSNorm",
-                "in_features": int(self.proj.in_features),
-                "out_features": int(self.proj.out_features),
-            }
-        first, second = self.proj[0], self.proj[2]
         return {
-            "type": "flatten_mlp",
+            "type": self.head_type,
             "norm": "RMSNorm",
-            "input_dim": int(first.in_features),
-            "hidden_dim": int(first.out_features),
-            "output_dim": int(second.out_features),
-            "activation": "SiLU",
-            "dropout": False,
-            "shared_across_roads": True,
+            "in_features": int(self.proj.in_features),
+            "out_features": int(self.proj.out_features),
         }

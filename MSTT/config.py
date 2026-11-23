@@ -141,11 +141,6 @@ MODEL_DEFAULTS: dict[str, Any] = {
     "head_type": "flatten",
     "conservation_mode": "none",
     "projection_mlp_hidden_dim": 32,
-    "backbone_mode": "shared",
-    "state_context_sharing": "independent",
-    # A missing road-table switch keeps one private node embedding on each branch.
-    "state_node_sharing": "independent",
-    "fusion_mlp_hidden_dim": 128,
 }
 
 # Meaning of keys that older run directories never stored: v0.1 predates
@@ -163,12 +158,6 @@ LEGACY_DEFAULTS: dict[str, Any] = {
     "embedding_fusion": "add", "use_adaptive_embedding": False,
     "value_embedding_mode": "joint_linear",
     "conservation_mode": "none", "projection_mlp_hidden_dim": 32,
-    "backbone_mode": "shared",
-    # Runs saved before this field keep a private TOD/DOW/adaptive table on each branch.
-    "state_context_sharing": "independent",
-    # Runs saved before this field keep a private road table on each branch.
-    "state_node_sharing": "independent",
-    "fusion_mlp_hidden_dim": 128,
 }
 
 TRAIN_DEFAULTS: dict[str, Any] = {
@@ -233,6 +222,7 @@ def load_config(path: Path | None) -> dict[str, Any]:
     config = default_config()
     if path is not None:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        reject_retired_config(payload)
         unknown = sorted(set(payload) - set(config))
         if unknown:
             raise ValueError(f"unknown config keys in {path}: {unknown}")
@@ -265,10 +255,7 @@ _CHOICES = {
     "projection_supervision": ("all",),
     "spatial_attention": ("sparse", "global"),
     "spatial_direction": ("forward", "backward", "bidirectional"),
-    "head_type": ("flatten", "flatten_mlp"),
-    "backbone_mode": ("shared", "state_independent"),
-    "state_context_sharing": ("independent", "shared"),
-    "state_node_sharing": ("independent", "shared"),
+    "head_type": ("flatten",),
     "embedding_fusion": ("add", "concat"),
     "value_embedding_mode": ("joint_linear", "separate_mlp", "state_aux_gate"),
     "loss": ("mae_raw", "huber_raw", "mse_raw"),
@@ -324,6 +311,7 @@ def resolve_ffn_hidden_dim(d_model: int, value: int | None) -> int:
 
 
 def validate_config(config: Mapping[str, Any]) -> None:
+    reject_retired_config(config)
     if int(config["num_layers"]) != 1:
         raise ValueError("MSTT has exactly one block")
     layout = str(config.get("attention_layout", "factorized_ts"))
@@ -340,8 +328,6 @@ def validate_config(config: Mapping[str, Any]) -> None:
             raise ValueError(f"{key} must be finite and non-negative")
     if int(config.get("projection_mlp_hidden_dim", 32)) < 1:
         raise ValueError("projection_mlp_hidden_dim must be positive")
-    if int(config.get("fusion_mlp_hidden_dim", MODEL_DEFAULTS["fusion_mlp_hidden_dim"])) < 1:
-        raise ValueError("fusion_mlp_hidden_dim must be positive")
     if config.get("conservation_mode", "none") != "none":
         if config["loss"] != "mae_raw" or config["channel_balance"] != "none":
             raise ValueError("soft/projected requires unbalanced raw-scale MAE (mae_raw, channel_balance=none)")
@@ -355,33 +341,21 @@ def validate_config(config: Mapping[str, Any]) -> None:
             raise ValueError("soft/projected adaptive embedding must be concatenated, not added")
     if str(config["target_mode"]) != "last-observed-step":
         raise ValueError("MSTT reconstructs the last observed slot; target_mode must be last-observed-step")
-    backbone = str(config.get("backbone_mode", "shared"))
-    from MSTT.model.mstt import (
-        validate_independent_backbone,
-        validate_state_context_sharing,
-        validate_state_node_sharing,
-    )
-
-    validate_state_context_sharing(config)
-    validate_state_node_sharing(config)
-    if backbone == "state_independent":
-        validate_independent_backbone(config)
-    else:
-        if int(config["d_model"]) % int(config["num_heads"]) != 0:
-            raise ValueError("d_model must be divisible by num_heads")
-        if bool(config["use_rope"]) and (int(config["d_model"]) // int(config["num_heads"])) % 2 != 0:
-            raise ValueError("RoPE needs an even head dimension")
-        for key in ("temporal_num_heads", "spatial_num_heads"):
-            heads = attention_head_count(config, key)
-            if heads < 1 or int(config["d_model"]) % heads != 0:
-                raise ValueError(f"{key}={heads} must be a positive divisor of d_model={config['d_model']}")
-        temporal_heads = attention_head_count(config, "temporal_num_heads")
-        head_dim = config.get("attention_head_dim")
-        if head_dim is not None and int(head_dim) < 1:
-            raise ValueError("attention_head_dim must be positive")
-        resolved_head_dim = int(config["d_model"]) // temporal_heads if head_dim is None else int(head_dim)
-        if bool(config["use_rope"]) and resolved_head_dim % 2 != 0:
-            raise ValueError("RoPE needs an even temporal head dimension")
+    if int(config["d_model"]) % int(config["num_heads"]) != 0:
+        raise ValueError("d_model must be divisible by num_heads")
+    if bool(config["use_rope"]) and (int(config["d_model"]) // int(config["num_heads"])) % 2 != 0:
+        raise ValueError("RoPE needs an even head dimension")
+    for key in ("temporal_num_heads", "spatial_num_heads"):
+        heads = attention_head_count(config, key)
+        if heads < 1 or int(config["d_model"]) % heads != 0:
+            raise ValueError(f"{key}={heads} must be a positive divisor of d_model={config['d_model']}")
+    temporal_heads = attention_head_count(config, "temporal_num_heads")
+    head_dim = config.get("attention_head_dim")
+    if head_dim is not None and int(head_dim) < 1:
+        raise ValueError("attention_head_dim must be positive")
+    resolved_head_dim = int(config["d_model"]) // temporal_heads if head_dim is None else int(head_dim)
+    if bool(config["use_rope"]) and resolved_head_dim % 2 != 0:
+        raise ValueError("RoPE needs an even temporal head dimension")
     if int(config["input_window"]) < 1 or int(config["num_layers"]) < 1:
         raise ValueError("input_window and num_layers must be positive")
     if str(config["spatial_attention"]) == "global" and bool(config["use_edge_type_bias"]):
@@ -481,38 +455,6 @@ def validate_value_embedding_task(config: Mapping[str, Any], task: TaskSpec) -> 
         )
 
 
-def validate_backbone_task(config: Mapping[str, Any], task: TaskSpec) -> None:
-    """Task constraints for ``state_independent``. Shared runs are unchanged."""
-    from MSTT.model.mstt import (
-        validate_independent_backbone,
-        validate_state_context_sharing,
-        validate_state_node_sharing,
-    )
-
-    validate_state_context_sharing(config)
-    validate_state_node_sharing(config)
-    mode = str(config.get("backbone_mode", "shared"))
-    if mode == "shared":
-        return
-    if mode != "state_independent":
-        raise ValueError(f"unknown backbone_mode {mode!r}")
-    value_mode = str(config.get("value_embedding_mode", "joint_linear"))
-    if value_mode == "state_aux_gate":
-        raise ValueError(f"backbone_mode=state_independent cannot use value_embedding_mode={value_mode}")
-    if value_mode != "separate_mlp":
-        raise ValueError(
-            "backbone_mode=state_independent requires value_embedding_mode='separate_mlp', "
-            f"got {value_mode!r}"
-        )
-    if task.input_channels != STATE_CHANNELS or task.output_channels != STATE_CHANNELS:
-        raise ValueError(
-            "backbone_mode=state_independent requires input and output channels "
-            f"{list(STATE_CHANNELS)} in that order, got task {task.name} "
-            f"in={list(task.input_channels)} out={list(task.output_channels)}"
-        )
-    validate_independent_backbone(config)
-
-
 def model_values_equal(left: Any, right: Any) -> bool:
     """Equal for checkpoint identity, including ``176`` and ``176.0``."""
     if isinstance(left, bool) or isinstance(right, bool):
@@ -562,12 +504,7 @@ def model_config_from_saved(saved: Mapping[str, Any]) -> dict[str, Any]:
         if key in names:
             model.setdefault(key, value)
     if model.get("ffn_hidden_dim") is None and model.get("d_model") is not None:
-        width = int(model["d_model"])
-        if str(model.get("backbone_mode", "shared")) == "state_independent":
-            if width % 4 != 0:
-                raise ValueError(f"state_independent d_model={width} is not divisible by 4")
-            width //= 4
-        model["ffn_hidden_dim"] = resolve_ffn_hidden_dim(width, None)
+        model["ffn_hidden_dim"] = resolve_ffn_hidden_dim(int(model["d_model"]), None)
     missing = [key for key in sorted(names) if key not in model]
     if missing:
         raise ValueError(
@@ -595,8 +532,10 @@ def reject_retired_config(saved: Mapping[str, Any]) -> None:
     """Refuse a saved run that explicitly selected a removed structure.
 
     Inert leftovers on a live checkpoint are ignored: ``history_fusion_mode``
-    ``none``, ``temporal_aux_enabled`` false, and the old joint-attention
-    defaults while ``attention_layout`` stays ``factorized_ts``. A config that
+    ``none``, ``temporal_aux_enabled`` false, joint-attention defaults while
+    ``attention_layout`` stays ``factorized_ts``, ``backbone_mode=shared``,
+    ``state_context_sharing=independent``, ``state_node_sharing=independent``,
+    and ``fusion_mlp_hidden_dim`` beside ``head_type=flatten``. A config that
     names a removed structure is not loaded as the current model.
     """
     sources: list[Mapping[str, Any]] = [saved]
@@ -624,8 +563,17 @@ def reject_retired_config(saved: Mapping[str, Any]) -> None:
         value_mode = source.get("value_embedding_mode")
         if value_mode is not None and str(value_mode) == "state_aux_gate_split_mlp":
             raise ValueError("value_embedding_mode='state_aux_gate_split_mlp' was removed")
+        backbone = source.get("backbone_mode")
+        if backbone is not None and str(backbone) != "shared":
+            raise ValueError(f"backbone_mode={backbone!r} was removed")
+        context_sharing = source.get("state_context_sharing")
+        if context_sharing is not None and str(context_sharing) != "independent":
+            raise ValueError(f"state_context_sharing={context_sharing!r} was removed")
+        node_sharing = source.get("state_node_sharing")
+        if node_sharing is not None and str(node_sharing) != "independent":
+            raise ValueError(f"state_node_sharing={node_sharing!r} was removed")
         head = source.get("head_type")
-        if head is not None and str(head) not in {"flatten", "flatten_mlp"}:
+        if head is not None and str(head) != "flatten":
             raise ValueError(f"head_type={head!r} was removed")
         supervision = source.get("projection_supervision")
         if supervision is not None and str(supervision) != "all":
