@@ -154,8 +154,11 @@ def collect_smoke_data_info(
     project_root: Path,
 ) -> dict[str, Any]:
     from reimplementation.common.data.sampling_seeds import validate_sampling_package
-    info = validate_sampling_package(data_root, n_his=int(config.get("n_his", 12)),
-                                     num_nodes=int(config["num_nodes"]), rates=["p70"], splits=("train",))
+    info = validate_sampling_package(
+        data_root, n_his=int(config.get("n_his", 12)),
+        num_nodes=int(config["num_nodes"]), rates=["p70"], splits=("train",),
+        input_type=str(config.get("input_type") or "inflow"),
+    )
     info = finalize_state_scaler(info, config, data_root)
     info["all_days"] = load_json(data_root / "split_manifest.json").get("all_days", [])
     info["did_not_read_validation_or_test"] = True
@@ -176,6 +179,7 @@ def collect_data_info(
         n_his=int(config.get("n_his", 12)),
         num_nodes=int(config["num_nodes"]),
         rates=[rate_tag(item) for item in config["rates"]],
+        input_type=str(config.get("input_type") or "inflow"),
     )
     graph = _graph_payload(config, project_root=project_root)
     assert_feature_order(list(data_info["node_ids"]), graph["node_ids"])

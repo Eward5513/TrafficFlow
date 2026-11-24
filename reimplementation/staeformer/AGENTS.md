@@ -56,9 +56,11 @@ This is last-observed-step reconstruction, not future forecasting.
 
 A single traffic state keeps official `input_dim=3`: one traffic channel,
 then time-of-day and day-of-week. `all` input uses `input_dim=6`: the four
-traffic states, then the same two time channels. `input_proj` maps that
-width to `input_embedding_dim`. Attention width stays `model_dim`.
-`all` targets set `output_dim=4`; a single target stays `output_dim=1`.
+traffic states, then the same two time channels. `all_sp_c` uses
+`input_dim=8`: those six traffic channels, then the same two time channels.
+`input_proj` maps that width to `input_embedding_dim`. Attention width stays
+`model_dim`. `all` targets set `output_dim=4`; a single target stays
+`output_dim=1`.
 
 Time-of-day is constructed for every history step. Day-of-week follows
 the original PeMS npz script `(day_index % 7)` as an integer 0..6,

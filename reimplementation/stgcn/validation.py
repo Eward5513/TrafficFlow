@@ -55,9 +55,12 @@ def validate_prepared_data(
     n_his: int,
     num_nodes: int,
     rates: list[str],
+    input_type: str | None = None,
 ) -> dict[str, Any]:
     from reimplementation.common.data.sampling_seeds import validate_sampling_package
-    return validate_sampling_package(Path(data_root), n_his=n_his, num_nodes=num_nodes, rates=rates)
+    return validate_sampling_package(
+        Path(data_root), n_his=n_his, num_nodes=num_nodes, rates=rates, input_type=input_type,
+    )
 
 
 def validate_graph(

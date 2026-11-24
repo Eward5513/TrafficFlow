@@ -106,7 +106,7 @@ seed_42/
 
 单通道 `inflow.npz` 的 `x` 是 `(277, 12, 1406, 1)`。`all.npz` 最后一维是 4。
 
-已发布 `all_sp_c` 的可变数据集，在自己的观测键下另有 `model_prepared/traffic_observations/<observation_key>/YYYY_MM_DD.npz`，以及同级窗口 `window_data/<observation_key>/{train,validation,test}/YYYY_MM_DD/all_sp_c.npz`。`p10_p20` 四个频率已经有这两份文件。`p5_p15` 四个频率用同一布局，键名是 `p5_p15`，不写成 `p05_p15`，也不引用 `p10_p20` 的车辆名单或 scaler。`all_sp_c.npz` 的 `x` 和 `x_raw` 是 `(277, 12, 1406, 6)`。固定档和尚未跑过这个生成器的观测区间没有这两份文件。
+已发布 `all_sp_c` 的可变数据集，在自己的观测键下另有 `model_prepared/traffic_observations/<observation_key>/YYYY_MM_DD.npz`，以及同级窗口 `window_data/<observation_key>/{train,validation,test}/YYYY_MM_DD/all_sp_c.npz`。`p10_p20`、`p5_p15` 和 `p5_p35` 四个频率都已经有这两份文件。键名分别是 `p10_p20`、`p5_p15`、`p5_p35`，5% 写成 `p5`，不写成 `p05`。每个区间只用自己的车辆名单和 scaler。`all_sp_c.npz` 的 `x` 和 `x_raw` 是 `(277, 12, 1406, 6)`。固定档和尚未跑过这个生成器的观测区间没有这两份文件。
 
 `all_sp_c` 只作为 MSTT 输入，不是预测目标。通道顺序是 `inflow, outflow, accumulation_start, accumulation_end, average_speed_raw, speed_observation_count`。前四路直接沿用原来的 `all.npz`，不重新计算。后两路来自当天 `traffic_observations/<observation_key>/YYYY_MM_DD.npz`：`average_speed_raw` 是该道路、该 300 秒窗里所有有效 1 秒 FCD 快照速度的均值，单位 km/h，不按限速截断，空窗为 0；`speed_observation_count` 是这些快照的条数，同一辆车出现 30 次计 30，停车速度 0 也计入，不除以 300，也不去重成车辆数。`C=0` 时 `V=0`。日级 `count` 存整数，拼进窗口时转成 float32。
 

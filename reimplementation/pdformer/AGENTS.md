@@ -59,6 +59,12 @@ output_window = 1
 
 This is last-observed-step reconstruction, not future forecasting.
 
+`all_sp_c` is an adapted input. All six traffic channels enter the value
+embedding. Delay patterns and the published pattern keys stay inflow-only
+(`pattern_dim=1`). The head emits 1 or 4 channels. A single traffic channel
+still uses `output_dim=1` and the original weight shapes. Four-state `all`
+input remains rejected.
+
 Time-of-day comes from 5-minute slots. Day-of-week is off by default because
 simulation days have no calendar dates. Do not use `day_index % 7`.
 

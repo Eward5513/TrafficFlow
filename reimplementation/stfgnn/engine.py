@@ -552,8 +552,11 @@ def run_p70_smoke(
 
 def collect_data_info(data_root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     from reimplementation.common.data.sampling_seeds import validate_sampling_package
-    return validate_sampling_package(data_root, n_his=int(config.get("n_his", 12)),
-                                     num_nodes=int(config["num_nodes"]), rates=[rate_tag(r) for r in config["rates"]])
+    return validate_sampling_package(
+        data_root, n_his=int(config.get("n_his", 12)),
+        num_nodes=int(config["num_nodes"]), rates=[rate_tag(r) for r in config["rates"]],
+        input_type=str(config.get("input_type") or "inflow"),
+    )
 
 
 def run_single_rate(
@@ -829,6 +832,7 @@ def run_all_rates(
             n_his=int(config["seq_len"]),
             num_nodes=int(config["num_nodes"]),
             rates=[rate_tag(item) for item in rates],
+            input_type=str(config.get("input_type") or "inflow"),
         )
     else:
         data_info["train_npz"] = validate_train_npz_only(

@@ -6,8 +6,11 @@ sequence models: target bins 11 through 287.
 
 A single state keeps the original seven columns, with that state's partial
 count in column 0. ``all`` input stacks the four partial counts first, then
-the same six context columns. The label is the matching full-count CSV, or
-four full counts when the target is ``all``.
+the same six context columns. ``all_sp_c`` keeps those ten columns and appends
+``average_speed_raw`` and ``speed_observation_count`` from the daily traffic
+observation file. ``fcd_average_speed`` stays the existing RF speed and is not
+that raw mean. The label is the matching full-count CSV, or four full counts
+when the target is ``all``.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from data_root import (
     resolve_xuancheng_dataset,
     rf_observation_feature_path,
     sampling_partial_flow_root,
+    traffic_observation_feature_path,
     xuancheng26_training_3s_root,
 )
 TRAIN_ROOT = Path(os.environ.get("XUANCHENG_RF_TRAINING_ROOT", str(xuancheng26_training_3s_root()))).expanduser().resolve()
@@ -47,8 +51,12 @@ CONTEXT_FEATURES = (
     "hour",
 )
 FEATURE_NAMES = ("fcd_flow",) + CONTEXT_FEATURES
+TRAFFIC_OBSERVATION_FEATURES = ("average_speed_raw", "speed_observation_count")
 SINGLE_INPUT_WIDTH = len(FEATURE_NAMES)
 ALL_INPUT_WIDTH = len(STATES) + len(CONTEXT_FEATURES)
+ALL_SP_C_INPUT = "all_sp_c"
+ALL_SP_C_INPUT_WIDTH = len(STATES) + len(CONTEXT_FEATURES) + len(TRAFFIC_OBSERVATION_FEATURES)
+WIDE_INPUTS = ("all", ALL_SP_C_INPUT)
 
 
 class DataError(RuntimeError):
@@ -64,21 +72,28 @@ def observed_feature_name(state: str) -> str:
 
 
 def validate_task(input_type: str, target_type: str) -> None:
-    """Accept one state predicting itself, or ``all`` predicting one state or all four."""
-    if input_type not in STATES and input_type != "all":
+    """Accept one state predicting itself, or a wide input predicting one state or all four.
+
+    ``all_sp_c`` uses the four partial counts plus the existing six context
+    columns, then the raw FCD mean speed and the snapshot count.
+    """
+    if input_type not in STATES and input_type not in WIDE_INPUTS:
         raise DataError(f"unknown input_type {input_type}")
     if target_type not in STATES and target_type != "all":
         raise DataError(f"unknown target_type {target_type}")
-    if input_type != "all" and input_type != target_type:
+    if input_type not in WIDE_INPUTS and input_type != target_type:
         raise DataError(f"single-state input {input_type} must predict itself, not {target_type}")
-    if target_type == "all" and input_type != "all":
-        raise DataError("target all requires input all")
+    if target_type == "all" and input_type not in WIDE_INPUTS:
+        raise DataError("target all requires input all or all_sp_c")
 
 
 def feature_names_for(input_type: str) -> tuple[str, ...]:
-    validate_task(input_type, input_type if input_type != "all" else "inflow")
+    validate_task(input_type, input_type if input_type not in WIDE_INPUTS else "inflow")
+    observed = tuple(observed_feature_name(state) for state in STATES)
+    if input_type == ALL_SP_C_INPUT:
+        return observed + CONTEXT_FEATURES + TRAFFIC_OBSERVATION_FEATURES
     if input_type == "all":
-        return tuple(observed_feature_name(state) for state in STATES) + CONTEXT_FEATURES
+        return observed + CONTEXT_FEATURES
     return (observed_feature_name(input_type),) + CONTEXT_FEATURES
 
 
@@ -87,7 +102,7 @@ def flow_column_for(input_type: str, target_type: str) -> int:
     validate_task(input_type, target_type)
     if target_type == "all":
         raise DataError("all output has one flow column per state")
-    if input_type != "all":
+    if input_type not in WIDE_INPUTS:
         return 0
     return STATES.index(target_type)
 
@@ -211,6 +226,48 @@ def _load_speed(
     return speed, norm
 
 
+def _load_traffic_observation(
+    path: Path,
+    edges: list[str],
+    penetration: str,
+    day_name: str,
+    *,
+    dataset_id: str | None = None,
+    sampling_seed: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Raw FCD mean km/h and snapshot count. This is not the RF speed cube."""
+    if not path.is_file():
+        raise DataError(f"missing traffic observation {path}")
+    with np.load(path, allow_pickle=False) as payload:
+        if "average_speed_raw" not in payload.files or "speed_observation_count" not in payload.files:
+            raise DataError(f"{path} is missing average_speed_raw or speed_observation_count")
+        speed = np.asarray(payload["average_speed_raw"], dtype=np.float32)
+        count = np.asarray(payload["speed_observation_count"], dtype=np.float32)
+        stored_edges = [str(item) for item in payload["edge_ids"].tolist()]
+        if stored_edges != edges:
+            raise DataError(f"{path} edge order mismatch")
+        if speed.shape != (N_BINS, N_EDGES) or count.shape != speed.shape:
+            raise DataError(f"{path} shape {speed.shape}")
+        if str(payload["date"]) != day_name or str(payload["observation_key"]) != penetration:
+            raise DataError(f"{path} date/observation metadata mismatch")
+        if dataset_id is not None and "dataset_id" in payload.files and str(payload["dataset_id"]) != dataset_id:
+            raise DataError(f"{path} dataset_id {payload['dataset_id']} != {dataset_id}")
+        if sampling_seed is not None and "sampling_seed" in payload.files and int(payload["sampling_seed"]) != int(sampling_seed):
+            raise DataError(f"{path} sampling_seed {payload['sampling_seed']} != {sampling_seed}")
+        if "time_bins" in payload.files and not np.array_equal(payload["time_bins"], np.arange(N_BINS)):
+            raise DataError(f"{path} time bins are not 0..287")
+        channels = tuple(str(item) for item in np.asarray(payload["channels"]).reshape(-1).tolist()) if "channels" in payload.files else ()
+        if channels and channels != TRAFFIC_OBSERVATION_FEATURES:
+            raise DataError(f"{path} channels {channels} != {TRAFFIC_OBSERVATION_FEATURES}")
+    if not np.isfinite(speed).all() or not np.isfinite(count).all():
+        raise DataError(f"{path} contains NaN or Inf")
+    if float(count.min()) < 0:
+        raise DataError(f"{path} has a negative snapshot count")
+    if not np.all(speed[count == 0] == 0):
+        raise DataError(f"{path} has a nonzero raw speed where the snapshot count is zero")
+    return speed, count
+
+
 class XuanchengRFData:
     def __init__(self, sampling_seed: int = 42, dataset_id: str = "fixed_uniform", training_root: Path | None = None) -> None:
         if sampling_seed not in SAMPLING_SEEDS:
@@ -254,8 +311,8 @@ class XuanchengRFData:
         """Return supervised bins 11..287.
 
         Single input is ``X[277, 1406, 7]`` and one ``y[277, 1406]``. ``all``
-        input is ``X[277, 1406, 10]``. ``all`` target adds a last axis of four
-        full counts in ``STATES`` order.
+        input is ``X[277, 1406, 10]``. ``all_sp_c`` is ``X[277, 1406, 12]``.
+        ``all`` target adds a last axis of four full counts in ``STATES`` order.
         """
         validate_task(input_type, target_type)
         names = feature_names_for(input_type)
@@ -266,7 +323,7 @@ class XuanchengRFData:
         )
         if not speed_path.is_file():
             raise DataError(f"missing observation speed {speed_path}")
-        observed_states = STATES if input_type == "all" else (input_type,)
+        observed_states = STATES if input_type in WIDE_INPUTS else (input_type,)
         label_states = STATES if target_type == "all" else (target_type,)
         observed = []
         for state in observed_states:
@@ -296,6 +353,16 @@ class XuanchengRFData:
         features[:, :, context + 4] = np.float32(self.weekday[day_name])
         hours = (np.arange(TARGET_START, N_BINS, dtype=np.int32) // 12).astype(np.float32)
         features[:, :, context + 5] = hours[:, None]
+        if input_type == ALL_SP_C_INPUT:
+            raw_path = traffic_observation_feature_path(
+                self.training_root, self.dataset_id, self.sampling_seed, penetration, day_name,
+            )
+            raw_speed, raw_count = _load_traffic_observation(
+                raw_path, self.edges, penetration, day_name,
+                dataset_id=self.dataset_id, sampling_seed=self.sampling_seed,
+            )
+            features[:, :, context + 6] = raw_speed[sl]
+            features[:, :, context + 7] = raw_count[sl]
         if target_type == "all":
             target = np.stack([label[sl] for label in labels], axis=-1).astype(np.float32, copy=False)
         else:

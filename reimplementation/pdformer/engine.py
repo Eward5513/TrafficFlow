@@ -237,8 +237,11 @@ def build_dataloaders(
 
 def collect_smoke_data_info(data_root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     from reimplementation.common.data.sampling_seeds import validate_sampling_package
-    info = validate_sampling_package(data_root, n_his=int(config.get("n_his", 12)),
-                                     num_nodes=int(config["num_nodes"]), rates=["p70"], splits=("train",))
+    info = validate_sampling_package(
+        data_root, n_his=int(config.get("n_his", 12)),
+        num_nodes=int(config["num_nodes"]), rates=["p70"], splits=("train",),
+        input_type=str(config.get("input_type") or "inflow"),
+    )
     info = finalize_state_scaler(info, config, data_root)
     info["all_days"] = load_json(data_root / "split_manifest.json").get("all_days", [])
     info["did_not_read_validation_or_test"] = True
@@ -253,6 +256,7 @@ def collect_data_info(data_root: Path, config: Mapping[str, Any]) -> dict[str, A
         n_his=n_his,
         num_nodes=int(config["num_nodes"]),
         rates=[rate_tag(item) for item in config["rates"]],
+        input_type=str(config.get("input_type") or "inflow"),
     )
     manifest = load_json(data_root / "split_manifest.json")
     data_info["all_days"] = [day for split in SPLITS for day in manifest[split]]
@@ -283,7 +287,7 @@ def collect_graph_info(
             lape_dim=int(config.get("lape_dim", 8)),
             n_cluster=int(config.get("n_cluster", config.get("pattern_key_count", 16))),
             s_attn_size=int(config.get("s_attn_size", 3)),
-            output_dim=int(config.get("output_dim", 1)),
+            output_dim=int(config.get("pattern_dim", 1)),
             bidir=bool(config.get("bidir", True)),
             seed=int(config.get("seed", 42)),
         )
@@ -513,8 +517,8 @@ def run_single_rate(
             num_nodes=int(config["num_nodes"]),
             n_his=int(config.get("input_window", 12)),
             output_steps=1,
-            input_channels=1,
-            output_channels=1,
+            input_channels=int(config.get("input_channels", 1)),
+            output_channels=int(config.get("output_channels", config.get("output_dim", 1))),
         )
         model.load_state_dict(payload["model_state_dict"])
         optimizer.load_state_dict(payload["optimizer_state_dict"])

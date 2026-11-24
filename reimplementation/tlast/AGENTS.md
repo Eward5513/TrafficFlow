@@ -45,8 +45,9 @@ Public tensors stay `[B, T, N, C]`. The head returns `[B, 1, N, C_out]`.
 directly, and the partial observation does not share the target scaler.
 The encoder skip is unchanged. Setting the flag adds the latest partial
 observation of the predicted channels after converting it with the target
-scaler. All-to-single uses that target channel. The full label is never
-added.
+scaler. All-to-single uses that target channel. `all_sp_c` keeps only the
+four state channels in that residual; raw speed and the snapshot count are
+not added. The full label is never added.
 
 ## Training
 

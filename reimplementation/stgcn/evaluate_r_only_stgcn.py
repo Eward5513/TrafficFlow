@@ -61,6 +61,7 @@ def main() -> None:
         n_his=int(config["n_his"]),
         num_nodes=int(config["num_nodes"]),
         rates=[tag],
+        input_type=str(config.get("input_type") or "inflow"),
     )
     data_info = finalize_state_scaler(data_info, config, data_root)
     graph_info = validate_graph(

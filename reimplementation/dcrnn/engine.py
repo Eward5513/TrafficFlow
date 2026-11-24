@@ -805,6 +805,7 @@ def run_all_rates(
         n_his=int(config["seq_len"]),
         num_nodes=int(config["num_nodes"]),
         rates=rate_list,
+        input_type=str(config.get("input_type") or "inflow"),
     )
     logger.log({"stage": "validating_inputs", "model_name": "dcrnn", "status": "ok"})
     graph_info = validate_dcrnn_graph(

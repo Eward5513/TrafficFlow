@@ -1,8 +1,9 @@
 """PDFormer backbone matching ``reference/PDFormer/libcity/model/.../PDFormer.py``.
 
 Public tensors stay ``[B, T, N, C]``. The output head is the original skip +
-two 1x1 convolutions with ``output_window=1`` and ``output_dim=1`` configured
-at the convolution channel sizes (not a post-hoc slice of a 12-step forecast).
+two 1x1 convolutions. ``output_window=1``. A single traffic channel keeps
+``output_dim=1``. The six-channel ``all_sp_c`` adaptation keeps inflow-only
+pattern keys and may set the final convolution to 1 or 4 outputs.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ CODE_VERSION = "0.1.0"
 def extract_delay_patterns(
     x: torch.Tensor,
     s_attn_size: int,
-    output_dim: int,
+    pattern_dim: int,
 ) -> torch.Tensor:
     """Sliding ``s_attn_size`` windows with front-zero pad.
 
@@ -44,11 +45,11 @@ def extract_delay_patterns(
         raise ReimplementationError(
             f"s_attn_size={s_attn_size} exceeds input_window={time}"
         )
-    if int(output_dim) > int(x.size(-1)):
-        raise ReimplementationError("pattern output_dim exceeds input channels")
+    if int(pattern_dim) > int(x.size(-1)):
+        raise ReimplementationError("pattern width exceeds input channels")
     pieces: list[torch.Tensor] = []
     for index in range(int(s_attn_size)):
-        sliced = x[:, : time + index + 1 - int(s_attn_size), :, : int(output_dim)]
+        sliced = x[:, : time + index + 1 - int(s_attn_size), :, : int(pattern_dim)]
         padded = F.pad(
             sliced,
             (0, 0, 0, 0, int(s_attn_size) - 1 - index, 0),
@@ -57,7 +58,7 @@ def extract_delay_patterns(
         )
         pieces.append(padded.unsqueeze(-2))
     patterns = torch.cat(pieces, dim=-2)
-    expected = (int(x.size(0)), int(time), int(x.size(2)), int(s_attn_size), int(output_dim))
+    expected = (int(x.size(0)), int(time), int(x.size(2)), int(s_attn_size), int(pattern_dim))
     if tuple(patterns.shape) != expected:
         raise ReimplementationError(f"pattern tensor {tuple(patterns.shape)} != {expected}")
     return patterns
@@ -105,12 +106,17 @@ class PDFormer(nn.Module):
         pattern_keys: np.ndarray,
         random_flip: bool = False,
         relations_are_test_only: bool = False,
+        pattern_dim: int = 1,
     ) -> None:
         super().__init__()
         if int(output_window) != 1:
             raise ReimplementationError("R-only PDFormer output_window must be 1")
-        if int(output_dim) != 1:
-            raise ReimplementationError("R-only PDFormer output_dim must be 1")
+        if int(output_dim) not in {1, 4}:
+            raise ReimplementationError("PDFormer output_dim must be 1 or 4")
+        if int(pattern_dim) != 1:
+            raise ReimplementationError(
+                "PDFormer delay patterns stay on the published inflow keys (pattern_dim=1)"
+            )
         if int(s_attn_size) > int(input_window):
             raise ReimplementationError("s_attn_size cannot exceed input_window")
         total_heads, head_dim = assert_head_partition(
@@ -120,6 +126,7 @@ class PDFormer(nn.Module):
         self.input_window = int(input_window)
         self.output_window = int(output_window)
         self.output_dim = int(output_dim)
+        self.pattern_dim = int(pattern_dim)
         self.feature_dim = int(feature_dim)
         self.ext_dim = int(ext_dim)
         self.embed_dim = int(embed_dim)
@@ -154,9 +161,9 @@ class PDFormer(nn.Module):
                 f"laplacian PE {lap.shape} != ({self.num_nodes}, {self.lape_dim})"
             )
         keys = np.asarray(pattern_keys, dtype=np.float32)
-        if keys.ndim != 3 or int(keys.shape[1]) != self.s_attn_size or int(keys.shape[2]) != self.output_dim:
+        if keys.ndim != 3 or int(keys.shape[1]) != self.s_attn_size or int(keys.shape[2]) != self.pattern_dim:
             raise ReimplementationError(
-                f"pattern_keys shape {keys.shape} != (n_cluster, {self.s_attn_size}, {self.output_dim})"
+                f"pattern_keys shape {keys.shape} != (n_cluster, {self.s_attn_size}, {self.pattern_dim})"
             )
 
         self.register_buffer("geo_mask", _as_bool_mask(geo))
@@ -167,12 +174,22 @@ class PDFormer(nn.Module):
         self.register_buffer("dtw_matrix", torch.from_numpy(np.asarray(dtw_matrix, dtype=np.float32)))
 
         traffic_dim = self.feature_dim - self.ext_dim
-        if traffic_dim != self.output_dim:
+        self.traffic_dim = int(traffic_dim)
+        if self.traffic_dim == 1:
+            if self.output_dim != 1:
+                raise ReimplementationError(
+                    "single-channel PDFormer keeps output_dim=1; four outputs are the all_sp_c adaptation"
+                )
+        elif self.traffic_dim == 6:
+            if self.output_dim not in {1, 4}:
+                raise ReimplementationError("all_sp_c PDFormer head must emit 1 or 4 channels")
+        else:
             raise ReimplementationError(
-                f"traffic feature_dim-ext_dim={traffic_dim} != output_dim={self.output_dim}"
+                f"PDFormer traffic width {self.traffic_dim} is not the single-channel path "
+                "or the six-channel all_sp_c path"
             )
         self.pattern_embeddings = nn.ModuleList(
-            [TokenEmbedding(self.s_attn_size, self.embed_dim) for _ in range(self.output_dim)]
+            [TokenEmbedding(self.s_attn_size, self.embed_dim) for _ in range(self.pattern_dim)]
         )
         self.enc_embed_layer = DataEmbedding(
             traffic_dim,
@@ -200,7 +217,7 @@ class PDFormer(nn.Module):
                     act_layer=nn.GELU,
                     norm_layer=partial(nn.LayerNorm, eps=1e-6),
                     type_ln=self.type_ln,
-                    output_dim=self.output_dim,
+                    output_dim=self.pattern_dim,
                 )
                 for index in range(enc_depth)
             ]
@@ -237,10 +254,10 @@ class PDFormer(nn.Module):
         return lap
 
     def encode_patterns(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        patterns = extract_delay_patterns(x, self.s_attn_size, self.output_dim)
+        patterns = extract_delay_patterns(x, self.s_attn_size, self.pattern_dim)
         pattern_list = []
         key_list = []
-        for channel in range(self.output_dim):
+        for channel in range(self.pattern_dim):
             pattern_list.append(self.pattern_embeddings[channel](patterns[..., channel]).unsqueeze(-1))
             key_list.append(self.pattern_embeddings[channel](self.pattern_keys[..., channel]).unsqueeze(-1))
         return torch.cat(pattern_list, dim=-1), torch.cat(key_list, dim=-1)
@@ -295,6 +312,11 @@ class PDFormer(nn.Module):
             "semantic_used": True,
             "pattern_used": True,
             "output_window": self.output_window,
+            "traffic_dim": self.traffic_dim,
+            "pattern_dim": self.pattern_dim,
+            "output_dim": self.output_dim,
+            "pattern_channel": "inflow",
+            "four_output_is_adapted": bool(self.traffic_dim == 6 and self.output_dim == 4),
             "relations_are_test_only": self.relations_are_test_only,
         }
         if attn_trace is not None:
@@ -322,16 +344,18 @@ def build_pdformer_from_config(
     pattern_keys: np.ndarray,
     relations_are_test_only: bool,
 ) -> PDFormer:
-    feature_dim = int(config.get("feature_dim", 1))
-    ext_dim = int(config.get("ext_dim", 0))
     add_time = bool(config.get("add_time_in_day", True))
     add_week = bool(config.get("add_day_in_week", False))
+    traffic_dim = int(config.get("traffic_dim", config.get("input_channels", config.get("feature_dim", 1))))
+    ext_dim = 0
+    feature_dim = traffic_dim
     if add_time:
         ext_dim += 1
         feature_dim += 1
     if add_week:
         ext_dim += 7
         feature_dim += 7
+    pattern_dim = int(config.get("pattern_dim", 1))
     return PDFormer(
         num_nodes=int(config["num_nodes"]),
         input_window=int(config.get("input_window", config.get("n_his", 12))),
@@ -364,6 +388,7 @@ def build_pdformer_from_config(
         pattern_keys=pattern_keys,
         random_flip=bool(config.get("random_flip", False)),
         relations_are_test_only=relations_are_test_only,
+        pattern_dim=pattern_dim,
     )
 
 

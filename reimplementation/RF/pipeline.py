@@ -594,7 +594,16 @@ def train_penetration(config: dict) -> None:
                         "Supervised bins are 11..287.",
                         "The univariate line uses the partial count of the target state.",
                         "all output is four independent single-state estimators.",
-                    ],
+                    ]
+                    + (
+                        [
+                            "all_sp_c appends average_speed_raw and speed_observation_count.",
+                            "fcd_average_speed is the existing RF speed, not the raw FCD mean.",
+                            f"all_sp_c feature_count={len(names)}",
+                        ]
+                        if input_type == "all_sp_c"
+                        else []
+                    ),
                 }
                 (rate_dir / "config.json").write_text(
                     json.dumps(config_payload, indent=2) + "\n",

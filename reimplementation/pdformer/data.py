@@ -140,8 +140,8 @@ def assemble_model_input(
     batch, time, nodes, channels = traffic.shape
     if int(time) != int(n_his):
         raise ReimplementationError(f"x time {time} != n_his {n_his}")
-    if int(channels) != 1:
-        raise ReimplementationError("R-only traffic channel count must be 1")
+    if int(channels) < 1:
+        raise ReimplementationError("PDFormer traffic input needs at least one channel")
     slots = assert_same_day_window(window_start_slot, n_his)
     if slots.shape[0] != batch:
         raise ReimplementationError("window_start_slot batch does not match x")

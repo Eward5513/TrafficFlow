@@ -18,7 +18,8 @@ X = penetrated R-edge inflow[s:s+12]
 Y = full R-edge inflow[s+11]
 target_slot == window_start_slot + 11
 output_steps = 1
-input_channels = 1
+input_channels = 1, 4, or 6 (`all_sp_c`)
+output_channels = 1 or 4
 ```
 
 This is last-observed-step reconstruction. Do not add probe speed. Do not

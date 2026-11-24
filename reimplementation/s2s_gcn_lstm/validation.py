@@ -91,9 +91,13 @@ def assert_task_config(config: dict[str, Any]) -> None:
         raise ReimplementationError("R-only output window must be 1; this is reconstruction, not multi-step forecast")
     in_channels = int(config.get("input_channels", 0))
     out_channels = int(config.get("output_channels", 0))
-    if in_channels not in {1, 4} or out_channels not in {1, 4}:
-        raise ReimplementationError("input_channels and output_channels must be 1 or 4")
-    if (in_channels == 4) != (config.get("input_type") == "all"):
+    if in_channels not in {1, 4, 6} or out_channels not in {1, 4}:
+        raise ReimplementationError("input_channels must be 1, 4, or 6 and output_channels must be 1 or 4")
+    input_type = str(config.get("input_type") or "inflow")
+    if in_channels == 6:
+        if input_type != "all_sp_c":
+            raise ReimplementationError("six input channels require --input-type all_sp_c")
+    elif (in_channels == 4) != (input_type == "all"):
         raise ReimplementationError("four input channels require --input-type all")
     if (out_channels == 4) != (config.get("target_type") == "all"):
         raise ReimplementationError("four output channels require --target-type all")

@@ -8,6 +8,11 @@ Model-specific mathematics stay inside each model directory (`stgcn/`,
 Rules:
 
 - Public tensors are `[B, T, V, C]`. Convert layouts inside the model, not in Dataset.
+- `--input-type all_sp_c` is a six-channel input
+  (`inflow`, `outflow`, `accumulation_start`, `accumulation_end`,
+  `average_speed_raw`, `speed_observation_count`). It is not a target.
+  `--target-type` stays one state or `all`. I2I, A2A, and A2I keep their
+  previous channel counts. The prediction head uses the target width, not 6.
 - Do not overwrite prepared NPZ files, adjacency matrices, or `analysis/` inputs.
 - This tree does not build datasets. The 3-second windows, scalers, and node
   order come from `data_root.sampling_window_root`. Training uses sampling

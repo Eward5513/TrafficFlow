@@ -284,8 +284,17 @@ class STID(nn.Module):
         input_data = history_data[..., : self.input_dim]
         time_in_day_emb = None
         day_in_week_emb = None
+        # Official width 3 keeps time at channels 1 and 2. Wider traffic stacks
+        # append those same channels after the traffic values.
+        time_slots = int(self.if_time_in_day) + int(self.if_day_in_week)
+        traffic_width = self.input_dim - time_slots
+        if traffic_width < 1:
+            raise ReimplementationError(
+                f"input_dim {self.input_dim} cannot hold {time_slots} time channels"
+            )
         if self.if_time_in_day:
-            t_i_d_data = history_data[..., 1] if history_data.size(-1) > 1 else None
+            tod_at = traffic_width
+            t_i_d_data = history_data[..., tod_at] if history_data.size(-1) > tod_at else None
             time_in_day_emb = self._lookup_identity(
                 self.time_in_day_emb,
                 None if t_i_d_data is None else t_i_d_data[:, -1, :],
@@ -295,7 +304,8 @@ class STID(nn.Module):
                 batch=batch,
             )
         if self.if_day_in_week:
-            d_i_w_data = history_data[..., 2] if history_data.size(-1) > 2 else None
+            dow_at = traffic_width + int(self.if_time_in_day)
+            d_i_w_data = history_data[..., dow_at] if history_data.size(-1) > dow_at else None
             day_in_week_emb = self._lookup_identity(
                 self.day_in_week_emb,
                 None if d_i_w_data is None else d_i_w_data[:, -1, :],

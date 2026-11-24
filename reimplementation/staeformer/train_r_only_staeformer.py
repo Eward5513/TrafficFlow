@@ -172,20 +172,18 @@ def _assert_task(config: dict[str, Any]) -> None:
 
 
 def _assert_input_width(config: dict[str, Any]) -> None:
-    """Keep the PeMS04 time channels, and let the traffic stack be 1 or 4.
+    """Keep the PeMS04 time channels after the traffic stack.
 
     ``input_proj`` is ``Linear(input_dim, input_embedding_dim)``. A single
     state stays at official width 3. ``all`` is four traffic channels plus the
-    same time-of-day and day-of-week channels. Attention width stays
-    ``model_dim``.
+    same time-of-day and day-of-week channels. ``all_sp_c`` is six traffic
+    channels plus those time channels, so both embeddings make width 8.
+    Attention width stays ``model_dim``.
     """
+    from reimplementation.common.data.state_windows import channel_count
+
     input_type = str(config.get("input_type") or "inflow")
-    if input_type == "all":
-        traffic = 4
-    elif input_type in {"inflow", "outflow", "accumulation_start", "accumulation_end"}:
-        traffic = 1
-    else:
-        raise ReimplementationError(f"unknown input_type {input_type}")
+    traffic = channel_count(input_type)
     extras = int(int(config.get("tod_embedding_dim", 0)) > 0) + int(int(config.get("dow_embedding_dim", 0)) > 0)
     expected = traffic + extras
     actual = int(config.get("input_dim", expected))

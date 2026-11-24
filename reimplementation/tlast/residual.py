@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from reimplementation.common.data.r_only_npz_dataset import loss_scale
-from reimplementation.common.data.state_windows import CHANNELS
+from reimplementation.common.data.state_windows import ALL_SP_C_CHANNELS, ALL_SP_C_INPUT, CHANNELS
 from reimplementation.common.errors import ReimplementationError
 
 
@@ -42,12 +42,21 @@ def select_latest_observation(
         raise ReimplementationError(f"latest observation must be [B,1,N,C], got {tuple(latest_raw.shape)}")
     channels = int(latest_raw.shape[-1])
     if target_type == "all":
-        if input_type != "all" or channels != 4:
-            raise ReimplementationError("all-to-all residual requires four input channels")
-        return latest_raw
-    if input_type == "all":
-        if channels != 4:
-            raise ReimplementationError("all-to-single residual requires four input channels")
+        if input_type == "all" and channels == 4:
+            return latest_raw
+        if input_type == ALL_SP_C_INPUT and channels == len(ALL_SP_C_CHANNELS):
+            # Speed and the snapshot count are inputs only. The residual is the four states.
+            return latest_raw[..., : len(CHANNELS)]
+        raise ReimplementationError(
+            "all-target residual requires four state channels from input all, "
+            f"or the first four of all_sp_c; got input {input_type} with {channels} channels"
+        )
+    if input_type in {"all", ALL_SP_C_INPUT}:
+        expected = 4 if input_type == "all" else len(ALL_SP_C_CHANNELS)
+        if channels != expected:
+            raise ReimplementationError(
+                f"{input_type}-to-single residual requires {expected} input channels, got {channels}"
+            )
         index = target_channel_index(target_type)
         assert index is not None
         return latest_raw[..., index : index + 1]

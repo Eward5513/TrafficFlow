@@ -180,6 +180,7 @@ def collect_data_info(
         n_his=n_his,
         num_nodes=int(config["num_nodes"]),
         rates=[rate_tag(item) for item in config["rates"]],
+        input_type=str(config.get("input_type") or "inflow"),
     )
     node_ids = validate_node_order(
         r_nodes_path=resolve_path(project_root, config["r_nodes"]),

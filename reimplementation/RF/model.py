@@ -23,6 +23,7 @@ N_CLUSTERS = 50
 N_ESTIMATORS = 50
 FEATURE_COUNT = 7
 ALL_INPUT_WIDTH = 10
+ALL_SP_C_INPUT_WIDTH = 12
 
 
 class ModelError(RuntimeError):
@@ -189,8 +190,8 @@ class RFEstimator:
         target = np.asarray(target, dtype=np.float64)
         width = int(features.shape[1]) if features.ndim == 2 else -1
         column = int(flow_column)
-        if features.ndim != 2 or width not in {FEATURE_COUNT, ALL_INPUT_WIDTH}:
-            raise ModelError(f"expected [N, 7] or [N, 10] features, got {features.shape}")
+        if features.ndim != 2 or width not in {FEATURE_COUNT, ALL_INPUT_WIDTH, ALL_SP_C_INPUT_WIDTH}:
+            raise ModelError(f"expected [N, 7], [N, 10], or [N, 12] features, got {features.shape}")
         if column < 0 or column >= width:
             raise ModelError(f"flow column {column} is outside 0..{width - 1}")
         if feature_names is None:

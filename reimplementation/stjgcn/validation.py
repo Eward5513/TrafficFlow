@@ -51,4 +51,5 @@ def validate_inputs(data_root: Path, config: Mapping[str, Any]) -> dict[str, Any
         n_his=int(config.get("n_his", 12)),
         num_nodes=int(config["num_nodes"]),
         rates=[str(item) for item in config["rates"]],
+        input_type=str(config.get("input_type") or "inflow"),
     )

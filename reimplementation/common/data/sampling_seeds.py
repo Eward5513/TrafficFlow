@@ -139,7 +139,15 @@ def iter_sampling_loaders(loader):
             del other, dataset
 
 
-def validate_sampling_package(root: Path, *, n_his: int, num_nodes: int, rates: list[str], splits=("train", "validation", "test")) -> dict:
+def validate_sampling_package(
+    root: Path,
+    *,
+    n_his: int,
+    num_nodes: int,
+    rates: list[str],
+    splits=("train", "validation", "test"),
+    input_type: str | None = None,
+) -> dict:
     """Validate shared metadata and hash all dated inputs; no flat-NPZ fallback."""
     import numpy as np
     from reimplementation.common.data.state_windows import CHANNELS, read_state_target_scaler
@@ -162,14 +170,28 @@ def validate_sampling_package(root: Path, *, n_his: int, num_nodes: int, rates: 
     if len(nodes) != num_nodes or len(set(nodes)) != num_nodes:
         raise ValueError("invalid node mapping")
     counts = expected_split_counts(manifest)
+    kinds = (*CHANNELS, "all")
+    extra_scaler = None
+    if str(input_type or "") == "all_sp_c":
+        kinds = (*kinds, "all_sp_c")
+        from reimplementation.common.data.state_windows import all_sp_c_normalization_file
+
+        extra_scaler = all_sp_c_normalization_file(root)
+        if not extra_scaler.is_file():
+            raise ValueError(f"missing all_sp_c scaler {extra_scaler}")
     signature = []
     for rate in rates:
         for split in splits:
             for day in manifest[split]:
-                for kind in (*CHANNELS, "all"):
+                for kind in kinds:
                     path = root / rate / split / day / f"{kind}.npz"
+                    if kind == "all_sp_c" and not path.is_file():
+                        raise ValueError(f"missing all_sp_c window {path}")
                     stat = path.stat()
                     signature.append([str(path.relative_to(root)), int(stat.st_size), int(stat.st_mtime_ns)])
+    if extra_scaler is not None:
+        stat = extra_scaler.stat()
+        signature.append(["all_sp_c_normalization.json", int(stat.st_size), int(stat.st_mtime_ns)])
     for name in ("state_normalization.json", "split_manifest.json", "state_window_manifest.json", "validation_summary.json", "node_mapping.csv"):
         path = root / name
         stat = path.stat()
@@ -200,10 +222,13 @@ def validate_sampling_package(root: Path, *, n_his: int, num_nodes: int, rates: 
             for split in splits:
                 digest = hashlib.sha256()
                 for day in manifest[split]:
-                    for kind in (*CHANNELS, "all"):
+                    for kind in kinds:
                         path = root / rate / split / day / f"{kind}.npz"
                         digest.update(f"{day}/{kind}:".encode())
                         digest.update(sha256_file(path).encode())
+                if extra_scaler is not None:
+                    digest.update(b"all_sp_c_normalization:")
+                    digest.update(sha256_file(extra_scaler).encode())
                 # Stable logical key retained in checkpoint metadata, not an input filename.
                 hashes[f"{rate}/{split}.npz"] = digest.hexdigest()
         normalization_sha256 = sha256_file(root / "state_normalization.json")

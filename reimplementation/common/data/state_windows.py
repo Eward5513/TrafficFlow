@@ -30,17 +30,19 @@ STATE_TYPES = (
     "all",
 )
 CHANNELS = STATE_TYPES[:4]
-# MSTT input only. It is intentionally absent from STATE_TYPES so other models'
-# CLI choices do not advertise a six-channel task.
+# Six observed inputs. It is not a prediction target, so it stays out of STATE_TYPES.
 ALL_SP_C_INPUT = "all_sp_c"
 ALL_SP_C_EXTRA_CHANNELS = ("average_speed_raw", "speed_observation_count")
 ALL_SP_C_CHANNELS = CHANNELS + ALL_SP_C_EXTRA_CHANNELS
+INPUT_TYPES = STATE_TYPES + (ALL_SP_C_INPUT,)
+TARGET_TYPES = STATE_TYPES
 _INCOMPATIBLE_ALL = {
     "pdformer": (
-        "PDFormer keeps a one-channel traffic stream: pattern keys were built for "
-        "output_dim=1 and feature_dim - ext_dim must equal output_dim. "
-        "inflow, outflow, accumulation_start, and accumulation_end are accepted. "
-        "`all` is not, because that would require new pattern keys and a different output head."
+        "PDFormer does not take the four-state `all` stream. Pattern keys stay the "
+        "published inflow keys (pattern_dim=1). Single-state inputs keep a one-channel "
+        "value embedding and output_dim=1. The six-channel all_sp_c input is the adapted "
+        "path: all six series enter the value embedding, the delay pattern still reads "
+        "inflow only, and the head may emit 1 or 4 channels."
     ),
 }
 
@@ -65,8 +67,8 @@ def add_state_type_arguments(parser) -> None:
     parser.add_argument("--evaluation-sampling-seeds", type=int, nargs="+", default=[42,43,44,45,46])
     parser.add_argument("--experiment-id", dest="experiment_id", default=None)
     parser.add_argument("--run-id", dest="run_id", default=None)
-    parser.add_argument("--input-type", dest="input_type", choices=STATE_TYPES, default=None)
-    parser.add_argument("--target-type", dest="target_type", choices=STATE_TYPES, default=None)
+    parser.add_argument("--input-type", dest="input_type", choices=INPUT_TYPES, default=None)
+    parser.add_argument("--target-type", dest="target_type", choices=TARGET_TYPES, default=None)
 
 
 def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[str, Any]:
@@ -105,12 +107,19 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
         config["rates"] = list(keys)
     input_type = input_flag or config.get("input_type") or "inflow"
     target_type = target_flag or config.get("target_type") or "inflow"
-    if target_type == ALL_SP_C_INPUT or (input_type == ALL_SP_C_INPUT and model_name != "MSTT"):
+    if input_type not in INPUT_TYPES:
+        raise ReimplementationError(f"unknown input type {input_type}")
+    if target_type not in TARGET_TYPES:
         raise ReimplementationError(
-            "all_sp_c is an MSTT input only. It is not a target and not a shared baseline input."
+            "all_sp_c is an input, not a target. "
+            f"Choose one of {list(TARGET_TYPES)}, not {target_type}."
+            if target_type == ALL_SP_C_INPUT
+            else f"unknown target type {target_type}"
         )
-    if model_name in _INCOMPATIBLE_ALL and (input_type == "all" or target_type == "all"):
-        raise ReimplementationError(_INCOMPATIBLE_ALL[model_name])
+    if model_name == "pdformer" and (
+        input_type == "all" or (target_type == "all" and input_type != ALL_SP_C_INPUT)
+    ):
+        raise ReimplementationError(_INCOMPATIBLE_ALL["pdformer"])
     config["input_type"] = input_type
     config["target_type"] = target_type
     in_channels = channel_count(input_type)
@@ -143,6 +152,15 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
             config["input_dim"] = in_channels
         if "output_dim" in config:
             config["output_dim"] = out_channels
+    if model_name == "pdformer":
+        # Traffic width, inflow pattern width, and the prediction head stay separate.
+        # A four-channel head is the all_sp_c adaptation; pattern keys stay inflow-only.
+        config["traffic_dim"] = in_channels
+        config["pattern_dim"] = 1
+        config["output_dim"] = out_channels
+        config["pdformer_head"] = (
+            "adapted_all_sp_c_inflow_pattern" if input_type == ALL_SP_C_INPUT else "single_channel"
+        )
     # output_root stays the results pointer. sampling_rate_dir adds dataset,
     # physical version, task, observation key, experiment, model seed, and run id once.
     if config.get("rates") is not None:

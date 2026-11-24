@@ -21,6 +21,9 @@ and does not use a GPU or the road adjacency.
 - A single state predicts itself from seven features. Column 0 is that
   state's partial count. `all` input uses ten features: the four partial
   counts, then speed, normalized speed, lanes, speed limit, weekday, and hour.
+  `all_sp_c` keeps those ten columns and appends `average_speed_raw` and
+  `speed_observation_count` from `traffic_observations`. `fcd_average_speed`
+  stays the existing RF speed.
 - The LAD line always uses the partial count of the target state. `all`
   output fits four independent estimators. Do not make one joint 4-D head.
 - Keep the 20/4/5 manifest and supervised bins 11–287.
