@@ -382,4 +382,4 @@ training_results_3s/datasets/<dataset_id>/physical_<version>/<model>/
     seed_<model_seed>/<run_id>/
 ```
 
-固定渗透率的历史运行在 `dataset_id=legacy_unknown`、`physical_legacy_unknown`。10%–20% 训练用 `physical_independent_fcd_v1`、观测标识 `p10_p20`、实验号 `variable_p10_p20_train42_eval5`，144 条都已完成。5%–15% 用同一物理版本、观测标识 `p5_p15`、实验号 `variable_p5_p15_train42_eval5`，144 条都已完成。5%–35% 用同一物理版本、观测标识 `p5_p35`、实验号 `variable_p5_p35_train42_eval5`；2026-11-20 15:12 的队列是 64 条完成、4 条训练中、76 条排队。完成结果的模型和指标见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。A2A 行同时保留四状态总体测试 MAE，并单列 inflow 通道的测试 Inflow MAE。
+固定渗透率的历史运行在 `dataset_id=legacy_unknown`、`physical_legacy_unknown`。10%–20% 训练用 `physical_independent_fcd_v1`、观测标识 `p10_p20`、实验号 `variable_p10_p20_train42_eval5`，144 条都已完成。5%–15% 用同一物理版本、观测标识 `p5_p15`、实验号 `variable_p5_p15_train42_eval5`，144 条都已完成。5%–35% 用同一物理版本、观测标识 `p5_p35`、实验号 `variable_p5_p35_train42_eval5`，144 条都已完成。完成结果的模型和指标见 [TRAINING_RESULTS.md](TRAINING_RESULTS.md)。A2A 行同时保留四状态总体测试 MAE，并单列 inflow 通道的测试 Inflow MAE。

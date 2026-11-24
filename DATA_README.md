@@ -181,7 +181,7 @@ training_results_3s/
 ├── operations/                                    调度和清理记录，没有模型权重
 │   ├── variable_p10_p20_train42_eval5/            144 条任务的 manifest、tasks、完成汇总、scheduler 日志，均已完成
 │   ├── variable_p5_p15_train42_eval5/             同上，144 条都已完成
-│   ├── variable_p5_p35_train42_eval5/             同上；2026-11-20 15:12 为 64 完成、4 训练中、76 排队
+│   ├── variable_p5_p35_train42_eval5/             同上，144 条都已完成
 │   └── cleanup_20261109/                          11 月 9 日迁移清单，以及当时删除的中断 run
 ├── reports/                                       日志和启动汇总，不代替 datasets/ 里的运行
 │   ├── RF/<run_id>/                               随机森林四次运行的 config 和 summary
@@ -249,7 +249,7 @@ datasets/variable_day_p10_p20/.../seed_42/20261110T210053_dceca753/
 
 共同前缀是 `physical_independent_fcd_v1/MSTT/in_all__out_all/p10_p20/conservation_projected/`。日志是 `reports/mstt_variable_projected_a2a.log` 和 `reports/mstt_variable_projected_a2a_1h_2h_day.log`。
 
-指标摘录在代码树的 [dataset/xuancheng26/TRAINING_RESULTS.md](dataset/xuancheng26/TRAINING_RESULTS.md)，MSTT 在 [MSTT/TRAINING_RESULTS.md](MSTT/TRAINING_RESULTS.md)。基线摘录整理到 2026-11-20 15:14。10%–20% 和 5%–15% 各 144 条都已写入。5%–35% 写入了当时已经写出五种子测试指标的 64 条：四个周期的 I2I，30 分钟 A2A 的 11 个模型，以及 1 小时 A2A 的 RF、STGCN、DCRNN、Graph WaveNet、STID。正在训练和尚未启动的任务不在摘录里。上面的 18:18 快照只说明当时的目录，完成数字以摘录和 `campaign_summary.json` 为准。
+指标摘录在代码树的 [dataset/xuancheng26/TRAINING_RESULTS.md](dataset/xuancheng26/TRAINING_RESULTS.md)，MSTT 在 [MSTT/TRAINING_RESULTS.md](MSTT/TRAINING_RESULTS.md)。基线摘录整理到 2026-11-24 14:05。10%–20%、5%–15% 和 5%–35% 各 144 条都已写入。上面的 18:18 快照只说明当时的目录，完成数字以摘录和 `campaign_summary.json` 为准。
 
 ### 历史固定渗透率：`legacy_unknown` / `physical_legacy_unknown`（190G）
 
