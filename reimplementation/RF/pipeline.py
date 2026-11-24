@@ -495,6 +495,26 @@ def _configured_train_sampling_seed(config: dict) -> int:
     return int(config.get("train_sampling_seed", 42))
 
 
+def rf_recorded_identity(config: dict) -> dict:
+    """Identity written into RF resolved config, checkpoint, and run metadata.
+
+    ``model_seed`` stays the forest seed. ``train_sampling_seed`` selects the
+    vehicle sample. Callers that omit it keep 42.
+    """
+    train_sampling_seed = _configured_train_sampling_seed(config)
+    model_seed = int(config.get("model_seed", config.get("seed", 42)))
+    clusters = config.get("n_clusters", 50)
+    return {
+        "model_name": "RF",
+        "model_seed": model_seed,
+        "seed": model_seed,
+        "train_sampling_seed": train_sampling_seed,
+        "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
+        "n_clusters": int(clusters),
+        "checkpoint_selection": "single_fit_no_epoch_selection",
+    }
+
+
 def _rf_data(config: dict, sampling_seed: int | None = None):
     kwargs = {"dataset_id": str(config.get("dataset_id") or "fixed_uniform")}
     if config.get("training_root"):
@@ -537,9 +557,10 @@ def train_penetration(config: dict) -> None:
         **config,
         "model_name": "RF",
         "rates": [penetration],
-        "model_seed": int(config["seed"]),
-        "train_sampling_seed": train_sampling_seed,
+        "model_seed": rf_recorded_identity(config)["model_seed"],
+        "train_sampling_seed": rf_recorded_identity(config)["train_sampling_seed"],
         "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
+        "n_clusters": rf_recorded_identity(config)["n_clusters"],
         "checkpoint_selection": "mean_validation_mae",
     })
     log_path = rate_dir / "logs" / "train.log"
@@ -702,11 +723,10 @@ def train_penetration(config: dict) -> None:
                 target_type,
             )
             import torch
-            checkpoint = {"model_name": "RF", "model_seed": int(config["seed"]),
-                          "train_sampling_seed": train_sampling_seed,
-                          "evaluation_sampling_seeds": list(SAMPLING_SEEDS),
-                          "model_paths": [str(path) for _, path in _head_dirs(rate_dir, multi, heads)],
-                          "checkpoint_selection": "single_fit_no_epoch_selection"}
+            checkpoint = {
+                **rf_recorded_identity(config),
+                "model_paths": [str(path) for _, path in _head_dirs(rate_dir, multi, heads)],
+            }
             torch.save(checkpoint, rate_dir / "best_checkpoint.pt")
             torch.save(checkpoint, rate_dir / "last_checkpoint.pt")
             _write_payload(rate_dir / "training_history.json", [{"fit": 0, "mean_validation_mae": reports["validation"]["mean"]["mae"]}])

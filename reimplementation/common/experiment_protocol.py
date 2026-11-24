@@ -71,16 +71,25 @@ def trainable_parameter_count(model: torch.nn.Module) -> int:
 
 
 def physical_gpu_id() -> int | None:
+    """Physical index recorded for this process.
+
+    ``CUDA_VISIBLE_DEVICES`` may be a UUID so the child is bound to the card
+    the scheduler rechecked. The integer index then comes from
+    ``TRAFFICFLOW_PHYSICAL_GPU_INDEX``. A numeric visible-device list still
+    parses directly. An empty mask means no physical GPU.
+    """
+    recorded = os.environ.get("TRAFFICFLOW_PHYSICAL_GPU_INDEX", "").strip()
+    if recorded.isdigit():
+        return int(recorded)
+    if "CUDA_VISIBLE_DEVICES" not in os.environ:
+        return None
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     if not visible:
         return None
     first = visible.split(",")[0].strip()
-    if first == "":
-        return None
-    try:
+    if first.isdigit():
         return int(first)
-    except ValueError:
-        return None
+    return None
 
 
 def gpu_runtime_info(device: torch.device) -> dict[str, Any]:
@@ -312,6 +321,7 @@ def build_run_metadata(
     penetration: str,
     seed: int,
     device: torch.device,
+    train_sampling_seed: int | None = None,
     parameter_count: int,
     training_loss: str,
     optimizer: str,
@@ -337,7 +347,7 @@ def build_run_metadata(
         "penetration_rate": tag,
         "seed": int(seed),
         "model_seed": int(seed),
-        "train_sampling_seed": 42,
+        "train_sampling_seed": 42 if train_sampling_seed is None else int(train_sampling_seed),
         "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
         "checkpoint_selection": "mean_validation_mae",
         "parameter_count": int(parameter_count),

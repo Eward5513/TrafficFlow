@@ -728,6 +728,7 @@ def run_single_rate(
         model="stfgnn",
         penetration=tag,
         seed=seed,
+        train_sampling_seed=int(config.get("train_sampling_seed", 42)),
         device=device,
         parameter_count=param_count,
         training_loss="huber_delta_1_raw",

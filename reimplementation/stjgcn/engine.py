@@ -429,6 +429,7 @@ def run_single_rate(
         model="stjgcn",
         penetration=tag,
         seed=seed,
+        train_sampling_seed=int(config.get("train_sampling_seed", 42)),
         device=device,
         parameter_count=param_count,
         training_loss="mae_plus_beta_100_mape_raw_mask_zero",

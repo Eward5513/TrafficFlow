@@ -14,8 +14,10 @@ import csv
 import fcntl
 import importlib.util
 import json
+import math
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -289,39 +291,106 @@ def dataset_report(training_root: Path) -> dict[str, dict]:
     return found
 
 
-def _seed_assets(training_root: Path, dataset_id: str, seed: int, observation_key: str) -> dict[str, bool]:
-    root = Path(training_root) / "datasets" / dataset_id / "sampling_seeds" / f"seed_{int(seed)}"
-    window = root / "flow" / "window_data" / observation_key
-    partial = root / "flow" / "partial_flow" / observation_key
-    speed = root / "model_prepared" / "RF" / observation_key
-    traffic = root / "model_prepared" / "traffic_observations" / observation_key
-    train = window / "train"
+def _manifest_dates(training_root: Path, dataset_id: str) -> dict[str, list[str]] | None:
+    path = (
+        Path(training_root) / "datasets" / dataset_id / "sampling_seeds" / "seed_42"
+        / "flow" / "window_data" / "split_manifest.json"
+    )
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {split: [str(day) for day in payload[split]] for split in ("train", "validation", "test")}
+
+
+def _nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+class SeedFiles:
+    """Cached existence checks for one dataset, sampling seed, and observation key."""
+
+    def __init__(self, training_root: Path, dataset_id: str, seed: int, observation_key: str, dates: dict[str, list[str]] | None) -> None:
+        self.root = Path(training_root) / "datasets" / dataset_id / "sampling_seeds" / f"seed_{int(seed)}"
+        self.key = str(observation_key)
+        self.dates = dates
+        self._cache: dict[tuple, bool] = {}
+
+    def windows(self, split: str, kind: str) -> bool:
+        token = ("window", split, kind)
+        if token not in self._cache:
+            days = [] if self.dates is None else self.dates[split]
+            base = self.root / "flow" / "window_data" / self.key / split
+            self._cache[token] = bool(days) and all(_nonempty_file(base / day / f"{kind}.npz") for day in days)
+        return self._cache[token]
+
+    def raw_features(self, split: str, states: tuple[str, ...], *, traffic: bool) -> bool:
+        token = ("raw", split, states, traffic)
+        if token not in self._cache:
+            days = [] if self.dates is None else self.dates[split]
+            partial = self.root / "flow" / "partial_flow" / self.key
+            speed = self.root / "model_prepared" / "RF" / self.key
+            raw = self.root / "model_prepared" / "traffic_observations" / self.key
+            ready = bool(days)
+            for day in days:
+                if not all(_nonempty_file(partial / day / f"{state}.csv") for state in states):
+                    ready = False
+                    break
+                if not _nonempty_file(speed / f"{day}.npz"):
+                    ready = False
+                    break
+                if traffic and not _nonempty_file(raw / f"{day}.npz"):
+                    ready = False
+                    break
+            self._cache[token] = ready
+        return self._cache[token]
+
+
+def load_observation_assets(training_root: Path, dataset_id: str, observation_key: str) -> dict:
+    dates = _manifest_dates(training_root, dataset_id)
+    scaler = _nonempty_file(Path(training_root) / "datasets" / dataset_id / "all_sp_c_normalization.json")
     return {
-        "window": window.is_dir() and train.is_dir(),
-        "asc": train.is_dir() and any(train.glob("*/all_sp_c.npz")),
-        "partial": partial.is_dir() and any(partial.glob("*/*.csv")),
-        "rf_speed": speed.is_dir() and any(speed.glob("*.npz")),
-        "traffic": traffic.is_dir() and any(traffic.glob("*.npz")),
-        "asc_scaler": (Path(training_root) / "datasets" / dataset_id / "all_sp_c_normalization.json").is_file(),
+        "dates": dates,
+        "asc_scaler": scaler,
+        "seeds": {
+            seed: SeedFiles(training_root, dataset_id, seed, observation_key, dates)
+            for seed in EVAL_SEEDS
+        },
     }
 
 
-def data_block(item: dict, training_root: Path, dataset_status: str, assets: dict[str, bool]) -> str | None:
+def data_block(item: dict, dataset_status: str, assets: dict | None) -> str | None:
+    """Block only the files this item will read. One missing ASC file does not block inflow."""
     if dataset_status == "unverified":
         return None
     if dataset_status != "ready":
         return f"dataset {item['dataset_id']} {dataset_status}"
-    if item["input_type"] == "all_sp_c" and not (assets["asc"] and assets["asc_scaler"]):
-        return f"missing all_sp_c windows or scaler for seed {item['train_sampling_seed']}"
-    if not assets["window"]:
-        return f"missing windows for seed {item['train_sampling_seed']}"
+    if not assets or not assets.get("dates"):
+        return f"{item['dataset_id']} split manifest is missing"
+    train_seed = int(item["train_sampling_seed"])
+    seeds = assets["seeds"]
+    train = seeds[train_seed]
+    if not train.windows("train", item["input_type"]) or not train.windows("train", item["target_type"]):
+        return f"missing train windows for seed {train_seed}"
+    if item["input_type"] == "all_sp_c" and not assets["asc_scaler"]:
+        return f"missing all_sp_c scaler for {item['dataset_id']}"
+    for seed in EVAL_SEEDS:
+        view = seeds[seed]
+        for split in ("validation", "test"):
+            if not view.windows(split, item["input_type"]) or not view.windows(split, item["target_type"]):
+                return f"missing {split} {item['input_type']}->{item['target_type']} windows for seed {seed}"
     if item["cpu"]:
-        if not assets["partial"]:
-            return f"missing RF partial flow for seed {item['train_sampling_seed']}"
-        if not assets["rf_speed"]:
-            return f"missing RF speed features for seed {item['train_sampling_seed']}"
-        if item["input_type"] == "all_sp_c" and not assets["traffic"]:
-            return f"missing ASC raw observations for seed {item['train_sampling_seed']}"
+        states = STATES if item["input_type"] in {"all", "all_sp_c"} else (item["input_type"],)
+        traffic = item["input_type"] == "all_sp_c"
+        if not train.raw_features("train", states, traffic=traffic):
+            return f"missing RF train features for seed {train_seed}"
+        for seed in EVAL_SEEDS:
+            view = seeds[seed]
+            for split in ("validation", "test"):
+                if not view.raw_features(split, states, traffic=traffic):
+                    return f"missing RF {split} features for seed {seed}"
     return None
 
 
@@ -359,30 +428,39 @@ def train_seed_evidence(resolved: dict, experiment_id: str) -> tuple[str, int | 
 
 
 def _finite_mae(payload: dict | None) -> bool:
+    """Five finite per-seed MAEs whose mean and sample std match the stored aggregate."""
     if not isinstance(payload, dict):
         return False
     per_seed = payload.get("per_seed")
     if not isinstance(per_seed, dict):
         return False
-    try:
-        seeds = tuple(int(seed) for seed in per_seed)
-    except (TypeError, ValueError):
-        return False
-    if seeds != EVAL_SEEDS:
-        return False
+    values: list[float] = []
+    for seed in EVAL_SEEDS:
+        row = per_seed.get(str(seed))
+        if not isinstance(row, dict) or "mae" not in row:
+            return False
+        try:
+            value = float(row["mae"])
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(value):
+            return False
+        values.append(value)
     mean = payload.get("mean")
     std = payload.get("std")
     if not isinstance(mean, dict) or not isinstance(std, dict):
         return False
     try:
-        mae = float(mean["mae"])
-        spread = float(std["mae"])
+        recorded_mean = float(mean["mae"])
+        recorded_std = float(std["mae"])
     except (KeyError, TypeError, ValueError):
         return False
-    return mae == mae and spread == spread and mae not in (float("inf"), float("-inf")) and spread not in (
-        float("inf"),
-        float("-inf"),
-    )
+    if not math.isfinite(recorded_mean) or not math.isfinite(recorded_std):
+        return False
+    computed_mean = sum(values) / float(len(values))
+    computed_std = math.sqrt(sum((value - computed_mean) ** 2 for value in values) / float(len(values) - 1))
+    tolerance = max(1e-5, 1e-4 * max(1.0, abs(computed_mean)))
+    return abs(recorded_mean - computed_mean) <= tolerance and abs(recorded_std - computed_std) <= tolerance
 
 
 def _metrics_ready(run_dir: Path) -> bool:
@@ -397,17 +475,54 @@ def _metrics_ready(run_dir: Path) -> bool:
     return True
 
 
-def _predictions_ready(run_dir: Path, cpu: bool) -> bool:
-    for seed in EVAL_SEEDS:
-        if cpu:
+def _npz_header(path: Path) -> bool:
+    """Read the ZIP local header only. Inventory does not load prediction arrays."""
+    try:
+        if not path.is_file() or path.stat().st_size < 4:
+            return False
+        with path.open("rb") as handle:
+            return handle.read(4) == b"PK\x03\x04"
+    except OSError:
+        return False
+
+
+def _manifest_test_days(resolved: dict) -> list[str] | None:
+    candidates: list[Path] = []
+    if resolved.get("split_manifest"):
+        candidates.append(Path(str(resolved["split_manifest"])))
+    if resolved.get("data_root"):
+        candidates.append(Path(str(resolved["data_root"])) / "split_manifest.json")
+    dataset_id = resolved.get("dataset_id")
+    training_root = resolved.get("training_root")
+    if dataset_id and training_root:
+        candidates.append(
+            Path(str(training_root)) / "datasets" / str(dataset_id) / "sampling_seeds" / "seed_42"
+            / "flow" / "window_data" / "split_manifest.json"
+        )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        days = payload.get("test")
+        if isinstance(days, list) and days:
+            return [str(day) for day in days]
+    return None
+
+
+def _predictions_ready(run_dir: Path, cpu: bool, resolved: dict) -> bool:
+    if cpu:
+        days = _manifest_test_days(resolved)
+        if not days:
+            return False
+        for seed in EVAL_SEEDS:
             directory = run_dir / "predictions" / f"seed_{seed}" / "test"
-            if not directory.is_dir() or not any(directory.glob("*.npz")):
+            if not all(_npz_header(directory / f"{day}.npz") for day in days):
                 return False
-        else:
-            path = run_dir / "predictions" / f"seed_{seed}" / "test.npz"
-            if not path.is_file() or path.stat().st_size <= 0:
-                return False
-    return True
+        return True
+    return all(_npz_header(run_dir / "predictions" / f"seed_{seed}" / "test.npz") for seed in EVAL_SEEDS)
 
 
 def _rf_retained(run_dir: Path) -> bool:
@@ -424,11 +539,15 @@ def _rf_retained(run_dir: Path) -> bool:
 
 def _smoke_or_debug(run_dir: Path, resolved: dict) -> str | None:
     text = "/".join(run_dir.parts).lower()
-    experiment = str(resolved.get("experiment_id") or run_dir.parent.parent.name)
+    experiment = str(resolved.get("experiment_id") or "")
     run_id = str(resolved.get("run_id") or run_dir.name)
     blob = f"{text} {experiment} {run_id}".lower()
     if "smoke" in blob or "/debug/" in blob or "debug_short" in blob:
         return "smoke or debug path"
+    if resolved.get("protocol_limit") or resolved.get("max_train_batches") or resolved.get("max_eval_batches"):
+        return "protocol_limit"
+    if "protocol_limit" in experiment.lower():
+        return "protocol_limit"
     epochs = resolved.get("epochs")
     if epochs is not None:
         try:
@@ -439,9 +558,59 @@ def _smoke_or_debug(run_dir: Path, resolved: dict) -> str | None:
     return None
 
 
+def _explicit_failure(run_dir: Path) -> str | None:
+    for name in ("run_metadata.json", "status.json"):
+        path = run_dir / name
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return f"{name} unreadable"
+        if not isinstance(payload, dict):
+            continue
+        status = str(payload.get("status", "")).lower()
+        if status in {"failed", "fail"}:
+            return f"{name} status={payload.get('status')}"
+    return None
+
+
+def _path_identity(run_dir: Path) -> dict[str, str]:
+    parts = Path(run_dir).parts
+    if "datasets" not in parts:
+        return {}
+    tail = parts[parts.index("datasets") + 1 :]
+    if len(tail) < 8:
+        return {}
+    version = tail[1][len("physical_") :] if tail[1].startswith("physical_") else tail[1]
+    task = tail[3]
+    input_type = ""
+    target_type = ""
+    if task.startswith("in_") and "__out_" in task:
+        input_type, target_type = task[len("in_") :].split("__out_", 1)
+    model_seed = tail[6][len("seed_") :] if tail[6].startswith("seed_") else ""
+    return {
+        "dataset_id": tail[0],
+        "physical_definition_version": version,
+        "model": tail[2],
+        "input_type": input_type,
+        "target_type": target_type,
+        "observation_key": tail[4],
+        "experiment_id": tail[5],
+        "model_seed": model_seed,
+        "run_id": tail[7],
+    }
+
+
+def _fill_missing(record: dict, parsed: dict, key: str) -> None:
+    if not record.get(key) and parsed.get(key):
+        record[key] = parsed[key]
+
+
 def classify_run(run_dir: Path) -> dict:
-    """Read one finished or partial run. Does not treat model seed_42 as the training sample."""
+    """Read one finished or partial run. The model-seed directory is not the training sample."""
     run_dir = Path(run_dir)
+    parsed = _path_identity(run_dir)
     resolved_path = run_dir / "resolved_config.json"
     try:
         if not resolved_path.is_file():
@@ -451,15 +620,18 @@ def classify_run(run_dir: Path) -> dict:
         return {"status": "unreadable", "reason": str(exc), "run_dir": str(run_dir)}
     if not isinstance(resolved, dict):
         return {"status": "unreadable", "reason": "resolved_config is not an object", "run_dir": str(run_dir)}
+    failure = _explicit_failure(run_dir)
+    if failure:
+        return {"status": "ignored", "reason": failure, "run_dir": str(run_dir), "resolved": resolved}
     debug = _smoke_or_debug(run_dir, resolved)
     if debug:
         return {"status": "ignored", "reason": debug, "run_dir": str(run_dir), "resolved": resolved}
-    proof, train_seed, evidence = train_seed_evidence(resolved, str(resolved.get("experiment_id") or ""))
+    experiment_id = str(resolved.get("experiment_id") or parsed.get("experiment_id") or "")
+    proof, train_seed, evidence = train_seed_evidence(resolved, experiment_id)
     try:
-        model_seed = int(resolved.get("model_seed", resolved.get("seed", -1)))
+        model_seed = int(resolved.get("model_seed", resolved.get("seed", parsed.get("model_seed", -1))))
     except (TypeError, ValueError):
         model_seed = -1
-    directory_model_seed = run_dir.parent.name
     record = {
         "status": proof,
         "reason": evidence,
@@ -471,16 +643,38 @@ def classify_run(run_dir: Path) -> dict:
         "dataset_id": str(resolved.get("dataset_id") or ""),
         "input_type": str(resolved.get("input_type") or ""),
         "target_type": str(resolved.get("target_type") or ""),
-        "experiment_id": str(resolved.get("experiment_id") or ""),
-        "run_id": str(resolved.get("run_id") or run_dir.name),
-        "directory_model_seed": directory_model_seed,
-        "physical_definition_version": str(resolved.get("physical_definition_version") or ""),
+        "experiment_id": experiment_id,
+        "run_id": str(resolved.get("run_id") or parsed.get("run_id") or run_dir.name),
+        "observation_key": str(parsed.get("observation_key") or ""),
+        "physical_definition_version": str(resolved.get("physical_definition_version") or parsed.get("physical_definition_version") or ""),
     }
+    for key in ("model", "dataset_id", "input_type", "target_type", "observation_key"):
+        _fill_missing(record, parsed, key)
     if proof != "proven":
         return record
-    if directory_model_seed != f"seed_{model_seed}":
+    mismatches = []
+    for key in ("model", "dataset_id", "input_type", "target_type", "observation_key"):
+        if parsed.get(key) and record.get(key) and str(parsed[key]) != str(record[key]):
+            mismatches.append(f"{key} path={parsed[key]} record={record[key]}")
+    path_version = parsed.get("physical_definition_version")
+    meta_version = resolved.get("physical_definition_version")
+    if path_version and path_version != PHYSICAL_VERSION:
+        mismatches.append(f"physical path={path_version}")
+    if meta_version and str(meta_version) != PHYSICAL_VERSION:
+        mismatches.append(f"physical metadata={meta_version}")
+    if parsed.get("model_seed") and str(parsed["model_seed"]) != str(model_seed):
+        mismatches.append(f"model_seed path={parsed['model_seed']} record={model_seed}")
+    if parsed.get("run_id") and resolved.get("run_id") and str(parsed["run_id"]) != str(resolved["run_id"]):
+        mismatches.append(f"run_id path={parsed['run_id']} record={resolved['run_id']}")
+    rates = [str(item) for item in (resolved.get("rates") or [])]
+    if rates and parsed.get("observation_key") and rates != [parsed["observation_key"]]:
+        mismatches.append(f"rates={rates}")
+    eval_seeds = resolved.get("evaluation_sampling_seeds")
+    if eval_seeds is not None and [int(seed) for seed in eval_seeds] != list(EVAL_SEEDS):
+        mismatches.append(f"evaluation_sampling_seeds={eval_seeds}")
+    if mismatches:
         record["status"] = "conflict"
-        record["reason"] = f"directory {directory_model_seed} != model_seed {model_seed}"
+        record["reason"] = "; ".join(mismatches)
         return record
     if model_seed != MODEL_SEED:
         record["status"] = "ignored"
@@ -491,15 +685,22 @@ def classify_run(run_dir: Path) -> dict:
         record["status"] = "ignored"
         record["reason"] = f"checkpoint_selection={selection}"
         return record
-    rates = [str(item) for item in (resolved.get("rates") or [])]
-    if rates and rates != [str(run_dir.parents[2].name)]:
-        record["status"] = "conflict"
-        record["reason"] = f"rates={rates} directory={run_dir.parents[2].name}"
-        return record
     cpu = record["model"] == "RF"
-    if not _metrics_ready(run_dir) or not _predictions_ready(run_dir, cpu):
+    if cpu:
+        clusters = resolved.get("n_clusters")
+        config_path = run_dir / "config.json"
+        if clusters is None and config_path.is_file():
+            try:
+                clusters = json.loads(config_path.read_text(encoding="utf-8")).get("n_clusters")
+            except (OSError, json.JSONDecodeError):
+                clusters = None
+        if clusters is not None and int(clusters) != 50:
+            record["status"] = "ignored"
+            record["reason"] = f"n_clusters={clusters}"
+            return record
+    if not _metrics_ready(run_dir) or not _predictions_ready(run_dir, cpu, resolved):
         record["status"] = "incomplete"
-        record["reason"] = "missing five-seed metrics or predictions"
+        record["reason"] = "five-seed metrics or predictions are incomplete"
         return record
     if cpu and not _rf_retained(run_dir):
         record["status"] = "incomplete"
@@ -576,6 +777,43 @@ def scan_results(results_root: Path, groups: list[dict]) -> tuple[str, list[dict
     return "ok", found, anomalies
 
 
+def _argv(command: object) -> list[str]:
+    if isinstance(command, dict):
+        if command.get("argv"):
+            return [str(part) for part in command["argv"]]
+        command = command.get("command", "")
+    if isinstance(command, (list, tuple)):
+        return [str(part) for part in command]
+    return shlex.split(str(command))
+
+
+def _flag_values(argv: list[str], name: str) -> list[str]:
+    values: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == name and index + 1 < len(argv) and not str(argv[index + 1]).startswith("--"):
+            values.append(str(argv[index + 1]))
+            index += 2
+            continue
+        prefix = name + "="
+        if token.startswith(prefix):
+            values.append(token[len(prefix) :])
+        index += 1
+    return values
+
+
+def process_start_id(pid: int) -> str:
+    """Kernel start token. A reused PID has a different token."""
+    path = Path(f"/proc/{int(pid)}/stat")
+    try:
+        text = path.read_text(encoding="utf-8")
+        rest = text.rsplit(")", 1)[1].split()
+        return rest[19]
+    except (OSError, IndexError):
+        return ""
+
+
 def live_commands(reader=None) -> list[dict]:
     if reader is not None:
         return list(reader())
@@ -587,26 +825,55 @@ def live_commands(reader=None) -> list[dict]:
         if not entry.name.isdigit():
             continue
         try:
-            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+            raw = (entry / "cmdline").read_bytes().split(b"\0")
         except OSError:
             continue
-        if "train_r_only" in command or "run_rf.py" in command:
-            rows.append({"pid": int(entry.name), "command": command})
+        argv = [part.decode("utf-8", "replace") for part in raw if part]
+        if not any("train_r_only" in token or token.endswith("run_rf.py") or "train_worker" in token for token in argv):
+            continue
+        rows.append({"pid": int(entry.name), "argv": argv, "command": argv, "start_id": process_start_id(int(entry.name))})
     return rows
 
 
-def command_matches_item(command: str, item: dict) -> bool:
-    text = str(command)
-    needed = (
-        item["dataset_id"],
-        item["script"],
-        f"--input-type {item['input_type']}",
-        f"--target-type {item['target_type']}",
-        f"--train-sampling-seed {item['train_sampling_seed']}",
-    )
-    if item.get("run_id") and str(item["run_id"]) in text:
+def command_matches_item(command: object, item: dict) -> bool:
+    """Match one argv vector. ``all`` does not match ``all_sp_c``, and an omitted training seed means 42."""
+    argv = _argv(command)
+    if not argv:
+        return False
+    script = str(item["script"])
+    if not any(token == script or token.endswith("/" + script) for token in argv):
+        return False
+    datasets = _flag_values(argv, "--dataset-id")
+    if datasets:
+        if datasets[-1] != str(item["dataset_id"]):
+            return False
+    elif str(item["dataset_id"]) != "fixed_uniform":
+        return False
+    inputs = _flag_values(argv, "--input-type")
+    targets = _flag_values(argv, "--target-type")
+    input_type = inputs[-1] if inputs else "inflow"
+    target_type = targets[-1] if targets else "inflow"
+    if input_type != str(item["input_type"]) or target_type != str(item["target_type"]):
+        return False
+    seeds = _flag_values(argv, "--train-sampling-seed")
+    train_seed = int(seeds[-1]) if seeds else 42
+    if train_seed != int(item["train_sampling_seed"]):
+        return False
+    run_ids = _flag_values(argv, "--run-id")
+    if item.get("run_id") and run_ids and str(item["run_id"]) not in run_ids:
+        return False
+    return True
+
+
+def _process_matches_attempt(row: dict, item: dict) -> bool:
+    argv = _argv(row)
+    run_id = str(item.get("run_id") or "")
+    worker = str(item.get("worker_config") or "")
+    if run_id and (run_id in argv or run_id in _flag_values(argv, "--run-id")):
         return True
-    return all(part in text for part in needed)
+    if worker and worker in argv:
+        return True
+    return False
 
 
 def apply_inventory(
@@ -682,36 +949,29 @@ def apply_inventory(
                 item["status"] = "unverified"
                 item["reason"] = dataset["detail"]
                 continue
-            cache_key = (item["dataset_id"], int(item["train_sampling_seed"]), item["observation_key"])
+            cache_key = (item["dataset_id"], item["observation_key"])
             if training_available and cache_key not in asset_cache:
                 try:
-                    merged = _seed_assets(training_root, item["dataset_id"], int(item["train_sampling_seed"]), item["observation_key"])
-                    for seed in EVAL_SEEDS:
-                        if seed == int(item["train_sampling_seed"]):
-                            continue
-                        other = _seed_assets(training_root, item["dataset_id"], seed, item["observation_key"])
-                        for key in ("window", "asc", "partial", "rf_speed", "traffic"):
-                            merged[key] = bool(merged[key] and other[key])
-                    asset_cache[cache_key] = merged
-                except OSError as exc:
+                    asset_cache[cache_key] = load_observation_assets(training_root, item["dataset_id"], item["observation_key"])
+                except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
                     asset_cache[cache_key] = {"error": str(exc)}
             assets = asset_cache.get(cache_key) or {}
-            if assets.get("error"):
+            if isinstance(assets, dict) and assets.get("error"):
                 item["status"] = "unreadable"
                 item["reason"] = assets["error"]
                 anomalies.append({"path": item["dataset_id"], "reason": assets["error"]})
                 continue
-            blocked = data_block(item, training_root, dataset["status"], assets or {
-                "window": False, "asc": False, "partial": False, "rf_speed": False, "traffic": False, "asc_scaler": False,
-            })
+            blocked = data_block(item, dataset["status"], assets if isinstance(assets, dict) else None)
             if blocked:
                 item["status"] = "blocked"
                 item["reason"] = blocked
                 continue
-            matched = [proc for proc in (processes or []) if command_matches_item(proc.get("command", ""), item)]
+            matched = [proc for proc in (processes or []) if command_matches_item(proc, item)]
             if matched:
                 item["status"] = "active"
                 item["pid"] = matched[0].get("pid")
+                item["process_start_id"] = str(matched[0].get("start_id") or "")
+                item["tracked"] = "external"
                 item["reason"] = "live training process"
                 anomalies.append({"item_id": item["item_id"], "reason": "active process", "pid": item["pid"]})
                 continue
@@ -766,15 +1026,25 @@ def distribution(groups: list[dict]) -> dict[str, dict[str, dict[str, int]]]:
 
 
 def _holds_gpu(group: dict) -> bool:
+    """Keep a card between this group's own items. An external active job does not reserve it."""
     if group.get("cpu") or not group.get("gpu_uuid"):
         return False
-    return any(item["status"] in {"pending", "running", "starting"} for item in group["items"])
+    if any(item["status"] in {"running", "starting"} for item in group["items"]):
+        return True
+    if any(item["status"] == "active" for item in group["items"]):
+        return False
+    return any(item["status"] == "pending" for item in group["items"])
 
 
 def _refresh_group_status(group: dict) -> None:
     statuses = {item["status"] for item in group["items"]}
     if any(item["status"] in {"running", "starting"} for item in group["items"]):
         group["status"] = "running"
+        return
+    if "active" in statuses:
+        group["gpu_uuid"] = None
+        group["gpu_index"] = None
+        group["status"] = "active"
         return
     if _holds_gpu(group):
         group["status"] = "running"
@@ -785,8 +1055,6 @@ def _refresh_group_status(group: dict) -> None:
         group["status"] = "pending"
     elif "failed" in statuses:
         group["status"] = "partial_failed"
-    elif "active" in statuses:
-        group["status"] = "active"
     elif statuses <= TERMINAL_SUCCESS:
         group["status"] = "completed"
     elif "blocked" in statuses:
@@ -887,52 +1155,82 @@ def rf_worker_path(run_id: str, observation_key: str) -> Path:
     return model_report_dir("RF") / str(run_id) / f"worker_{observation_key}.json"
 
 
-def child_env(item: dict, gpu_index: int | None, threads: int) -> dict[str, str]:
+def child_env(item: dict, gpu: dict | int | None, threads: int) -> dict[str, str]:
+    """Bind a CUDA child to the rechecked UUID and record its physical index."""
     env = os.environ.copy()
     env["PYTHONPATH"] = str(CODE)
     env["PYTHONUNBUFFERED"] = "1"
     text = str(threads)
     for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         env[key] = text
-    if item["cpu"]:
+    env.pop("TRAFFICFLOW_PHYSICAL_GPU_INDEX", None)
+    env.pop("TRAFFICFLOW_GPU_UUID", None)
+    if item.get("cpu") or gpu is None:
         env["CUDA_VISIBLE_DEVICES"] = ""
-    else:
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+        return env
+    if isinstance(gpu, dict):
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu["uuid"])
+        env["TRAFFICFLOW_GPU_UUID"] = str(gpu["uuid"])
+        env["TRAFFICFLOW_PHYSICAL_GPU_INDEX"] = str(gpu.get("minor_number", gpu.get("index")))
+        return env
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    env["TRAFFICFLOW_PHYSICAL_GPU_INDEX"] = str(gpu)
     return env
 
 
+def _process_list_state(gpu: ET.Element) -> tuple[str, str, list[dict]]:
+    """Return occupancy, reason, and process rows.
+
+    Only an explicit empty ``<processes>`` list is free. A missing list, an
+    ``N/A`` list, or any process record is not free.
+    """
+    holder = gpu.find("processes")
+    if holder is None:
+        return "unknown", "processes element missing", []
+    infos = list(holder.findall("process_info"))
+    if infos:
+        processes = []
+        for info in infos:
+            pid_text = (info.findtext("pid") or "").strip()
+            processes.append(
+                {
+                    "pid": int(pid_text) if pid_text.isdigit() else None,
+                    "type": (info.findtext("type") or "").strip() or "unknown",
+                    "name": (info.findtext("process_name") or "").strip(),
+                    "pid_readable": pid_text.isdigit(),
+                }
+            )
+        return "busy", "process record present", processes
+    text = "".join(holder.itertext()).strip()
+    if text == "":
+        return "free", "", []
+    return "unknown", f"process list unreadable: {text[:80]}", []
+
+
 def parse_gpu_xml(xml_text: str) -> list[dict]:
-    """Cards and every process the driver reported. A graphics process occupies the card."""
+    """Cards, driver index, minor number, and UUID. Unknown process lists are not free."""
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError as exc:
         raise RuntimeError(f"nvidia-smi XML is not parseable: {exc}") from exc
     cards = []
-    for gpu in root.findall("gpu"):
+    for driver_index, gpu in enumerate(root.findall("gpu")):
         uuid = (gpu.findtext("uuid") or "").strip()
-        index_text = (gpu.findtext("minor_number") or "").strip()
-        query_ok = bool(uuid) and index_text.isdigit()
-        processes = []
-        if query_ok:
-            holder = gpu.find("processes")
-            if holder is not None:
-                for info in holder.findall("process_info"):
-                    pid_text = (info.findtext("pid") or "").strip()
-                    if not pid_text.isdigit():
-                        continue
-                    processes.append(
-                        {
-                            "pid": int(pid_text),
-                            "type": (info.findtext("type") or "").strip(),
-                            "name": (info.findtext("process_name") or "").strip(),
-                        }
-                    )
+        minor_text = (gpu.findtext("minor_number") or "").strip()
+        occupancy, reason, processes = _process_list_state(gpu)
+        identity_ok = bool(uuid) and minor_text.isdigit()
+        if not identity_ok:
+            occupancy = "unknown"
+            reason = reason or "gpu uuid or minor_number is unreadable"
         cards.append(
             {
-                "index": int(index_text) if index_text.isdigit() else None,
+                "index": driver_index,
+                "minor_number": int(minor_text) if minor_text.isdigit() else None,
                 "uuid": uuid,
                 "processes": processes,
-                "query_ok": query_ok,
+                "occupancy": occupancy,
+                "reason": reason,
+                "query_ok": identity_ok and occupancy != "unknown",
             }
         )
     return cards
@@ -952,22 +1250,38 @@ def query_gpus(runner=None) -> list[dict]:
 
 
 def card_is_free(card: dict) -> bool:
-    return bool(card.get("query_ok")) and not card.get("processes")
+    return card.get("occupancy") == "free" and bool(card.get("query_ok"))
+
+
+def parent_gpu_allowance() -> tuple[str, set[int] | None, set[str] | None]:
+    """Distinguish an unset mask, an explicit empty mask, and a device list.
+
+    The scheduler can only narrow this set. An empty parent mask selects no card.
+    """
+    if "CUDA_VISIBLE_DEVICES" not in os.environ:
+        return "unset", None, None
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if raw.strip() == "" or raw.strip().lower() in {"-1", "none", "void", "nodevfiles"}:
+        return "empty", set(), set()
+    if raw.strip().lower() == "all":
+        return "unset", None, None
+    indexes: set[int] = set()
+    uuids: set[str] = set()
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if token.isdigit():
+            indexes.add(int(token))
+        else:
+            uuids.add(token)
+    return "restricted", indexes, uuids
 
 
 def allowed_cards(cards: list[dict], gpu_indexes: set[int] | None, gpu_uuids: set[str] | None) -> list[dict]:
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    visible_indexes: set[int] | None = None
-    visible_uuids: set[str] | None = None
-    if visible is not None and visible.strip() not in {"", "all"}:
-        visible_indexes = set()
-        visible_uuids = set()
-        for part in visible.split(","):
-            token = part.strip()
-            if token.isdigit():
-                visible_indexes.add(int(token))
-            elif token:
-                visible_uuids.add(token)
+    mode, visible_indexes, visible_uuids = parent_gpu_allowance()
+    if mode == "empty":
+        return []
     chosen = []
     for card in cards:
         if not card.get("query_ok"):
@@ -976,8 +1290,12 @@ def allowed_cards(cards: list[dict], gpu_indexes: set[int] | None, gpu_uuids: se
             continue
         if gpu_uuids is not None and card["uuid"] not in gpu_uuids:
             continue
-        if visible_indexes is not None and int(card["index"]) not in visible_indexes and card["uuid"] not in (visible_uuids or set()):
-            continue
+        if visible_indexes is not None or visible_uuids is not None:
+            index_ok = visible_indexes is not None and int(card["index"]) in visible_indexes
+            minor_ok = visible_indexes is not None and card.get("minor_number") in visible_indexes
+            uuid_ok = visible_uuids is not None and card["uuid"] in visible_uuids
+            if not (index_ok or minor_ok or uuid_ok):
+                continue
         chosen.append(card)
     return chosen
 
@@ -1074,32 +1392,40 @@ def _pid_alive(pid: int, processes: list[dict] | None) -> bool:
     return bool(LEGACY.pid_alive(int(pid)))
 
 
-def adopt_running(groups: list[dict], processes: list[dict] | None) -> None:
-    """Take back a child only when its command carries this attempt's run id.
+def _matching_process(item: dict, rows: list[dict]) -> dict | None:
+    pid = int(item.get("pid") or 0)
+    for row in rows:
+        row_pid = int(row.get("pid") or 0)
+        if pid and row_pid and row_pid != pid:
+            continue
+        if not (_process_matches_attempt(row, item) or (not item.get("run_id") and command_matches_item(row, item))):
+            continue
+        return row
+    return None
 
-    A live pid with a different command is not adopted. A pending item whose
-    run id is already in a live command is the gap between process start and
-    the following state write.
-    """
+
+def adopt_running(groups: list[dict], processes: list[dict] | None) -> None:
+    """Take back a live attempt only when PID, start token, and run id agree."""
     rows = list(processes or [])
     for group in groups:
         for item in group["items"]:
             if item["status"] not in {"running", "starting", "pending"}:
                 continue
-            run_id = str(item.get("run_id") or "")
-            pid = int(item.get("pid") or 0)
-            matched = None
-            if run_id:
+            matched = _matching_process(item, rows) if item.get("run_id") or item.get("worker_config") else None
+            if matched is not None:
+                start = str(matched.get("start_id") or "")
+                recorded = str(item.get("process_start_id") or "")
+                if recorded and start and recorded != start:
+                    matched = None
+                    item["reason"] = "pid reused"
+            if matched is None and item["status"] == "pending" and not item.get("run_id"):
                 for row in rows:
-                    if run_id in str(row.get("command") or ""):
-                        matched = row
-                        break
-            if matched is None and item["status"] == "pending" and not run_id:
-                for row in rows:
-                    if command_matches_item(str(row.get("command") or ""), item):
+                    if command_matches_item(row, item):
                         item["status"] = "active"
                         item["pid"] = row.get("pid")
+                        item["process_start_id"] = str(row.get("start_id") or "")
                         item["reason"] = "live training process"
+                        item["tracked"] = "external"
                         matched = "external"
                         break
                 if matched == "external":
@@ -1107,11 +1433,11 @@ def adopt_running(groups: list[dict], processes: list[dict] | None) -> None:
             if matched is None:
                 if item["status"] == "pending":
                     continue
-                complete = item["status"] == "running" and _item_artifacts_complete(item)
                 item["finished_at"] = stamp()
-                if complete:
+                item["exit_code"] = None
+                if _item_artifacts_complete(item):
                     item["status"] = "completed"
-                    item["reason"] = None
+                    item["reason"] = "process ended; exit code unknown"
                 elif int(item.get("attempt") or 0) >= MAX_ATTEMPTS:
                     item["status"] = "failed"
                     item["reason"] = item.get("reason") or "process disappeared"
@@ -1122,6 +1448,8 @@ def adopt_running(groups: list[dict], processes: list[dict] | None) -> None:
                 continue
             item["status"] = "running"
             item["pid"] = int(matched["pid"])
+            item["tracked"] = "adopted"
+            item["process_start_id"] = str(matched.get("start_id") or item.get("process_start_id") or "")
             item["reason"] = "adopted live attempt"
             if item.get("gpu_uuid"):
                 group["gpu_uuid"] = item["gpu_uuid"]
@@ -1136,7 +1464,8 @@ def _item_artifacts_complete(item: dict) -> bool:
     if record["status"] != "reusable":
         return False
     return (
-        record.get("model") in {item["model"], ""}
+        str(record.get("run_id") or "") == str(item.get("run_id") or "")
+        and record.get("model") in {item["model"], ""}
         and int(record.get("train_sampling_seed") or -1) == int(item["train_sampling_seed"])
         and record.get("input_type") in {item["input_type"], ""}
         and record.get("target_type") in {item["target_type"], ""}
@@ -1144,9 +1473,10 @@ def _item_artifacts_complete(item: dict) -> bool:
 
 
 def next_item(group: dict) -> dict | None:
+    """Do not start another item while any item in the group is still in flight."""
+    if any(item["status"] in {"running", "starting", "active"} for item in group["items"]):
+        return None
     for item in group["items"]:
-        if item["status"] in {"running", "starting"}:
-            return None
         if item["status"] == "pending":
             return item
     return None
@@ -1184,19 +1514,58 @@ def load_state(ops: Path) -> list[dict] | None:
     return groups
 
 
-def _launch_item(ops, groups, group, item, gpu, python, training_root, results_root, threads, launch, cap: int) -> dict:
-    if not item.get("run_id"):
-        item["run_id"] = new_attempt_id()
+def _archive_attempt(item: dict) -> None:
+    if not item.get("run_id") and not item.get("run_dir") and not item.get("pid"):
+        return
+    history = list(item.get("attempt_history") or [])
+    history.append(
+        {
+            "run_id": item.get("run_id"),
+            "run_dir": item.get("run_dir"),
+            "pid": item.get("pid"),
+            "command": list(item.get("command") or []),
+            "log": item.get("log"),
+            "reason": item.get("reason"),
+            "exit_code": item.get("exit_code"),
+            "started_at": item.get("started_at"),
+            "finished_at": item.get("finished_at"),
+            "gpu_uuid": item.get("gpu_uuid"),
+        }
+    )
+    item["attempt_history"] = history
+
+
+def _launch_item(ops, groups, group, item, gpu, python, training_root, results_root, threads, launch, cap: int) -> dict | None:
+    """Start a new attempt. An adopted attempt is not launched again."""
+    if item.get("run_dir") and item.get("run_id") and _item_artifacts_complete(item):
+        item["status"] = "completed"
+        item["reason"] = None
+        return None
+    _archive_attempt(item)
+    item["run_id"] = new_attempt_id()
     item["run_dir"] = str(output_dir_for(item, results_root))
     item["command"] = command_for(item, python, training_root, results_root, threads)
+    item["worker_config"] = str(rf_worker_path(item["run_id"], item["observation_key"])) if item.get("cpu") else None
     item["status"] = "starting"
     item["started_at"] = stamp()
-    item["gpu_index"] = None if gpu is None else int(gpu["index"])
-    item["gpu_uuid"] = None if gpu is None else str(gpu["uuid"])
+    item["finished_at"] = None
+    item["exit_code"] = None
+    item["pid"] = None
+    item["process_start_id"] = ""
+    item["tracked"] = "child"
+    item["attempt"] = int(item.get("attempt") or 0) + 1
+    item["gpu_index"] = None if gpu is None else int(gpu.get("index"))
+    item["gpu_uuid"] = None if gpu is None else str(gpu.get("uuid"))
     if gpu is not None:
         group["gpu_index"] = int(gpu["index"])
         group["gpu_uuid"] = str(gpu["uuid"])
         group["status"] = "running"
+    env = child_env(item, gpu, threads)
+    item["launch_env"] = {
+        "CUDA_VISIBLE_DEVICES": env.get("CUDA_VISIBLE_DEVICES", ""),
+        "TRAFFICFLOW_PHYSICAL_GPU_INDEX": env.get("TRAFFICFLOW_PHYSICAL_GPU_INDEX", ""),
+        "TRAFFICFLOW_GPU_UUID": env.get("TRAFFICFLOW_GPU_UUID", ""),
+    }
     log_path = ops / "logs" / f"{item['item_id']}__{item['run_id']}.log"
     item["log"] = str(log_path)
     append_jsonl(
@@ -1207,16 +1576,15 @@ def _launch_item(ops, groups, group, item, gpu, python, training_root, results_r
             "run_dir": item["run_dir"],
             "command": item["command"],
             "gpu_uuid": item["gpu_uuid"],
+            "physical_gpu_index": item["launch_env"]["TRAFFICFLOW_PHYSICAL_GPU_INDEX"],
             "started_at": item["started_at"],
+            "attempt": item["attempt"],
         },
     )
     save_state(ops, groups, cap)
     proc = launch(item, gpu, log_path)
     item["pid"] = int(proc.pid)
     item["status"] = "running"
-    item["attempt"] = int(item.get("attempt") or 0) + 1
-    item["exit_code"] = None
-    item["finished_at"] = None
     save_state(ops, groups, cap)
     return {"proc": proc, "item_id": item["item_id"]}
 
@@ -1230,13 +1598,55 @@ def default_launch(item: dict, gpu: dict | None, log_path: Path):
     proc = subprocess.Popen(
         item["command"],
         cwd=CODE,
-        env=child_env(item, None if gpu is None else int(gpu["index"]), threads),
+        env=child_env(item, gpu, threads),
         stdout=handle,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
     return proc
+
+
+def wait_for_control(seconds: float) -> None:
+    """Sleep until the poll interval elapses or this process receives SIGHUP/SIGTERM."""
+    deadline = time.monotonic() + float(seconds)
+    while time.monotonic() < deadline:
+        if SIGNALS.reload or SIGNALS.stop:
+            return
+        time.sleep(0.05)
+
+
+def _roots_problem(training_root: Path, results_root: Path) -> str | None:
+    if not Path(results_root).exists():
+        return f"results root is not mounted: {results_root}"
+    if not Path(training_root).is_dir():
+        return f"training root is not a directory: {training_root}"
+    return None
+
+
+def _protect_live_attempts(groups: list[dict]) -> dict[str, dict]:
+    protected = {}
+    for group in groups:
+        for item in group["items"]:
+            if item["status"] in {"running", "starting", "completed"}:
+                protected[item["item_id"]] = {
+                    key: item.get(key)
+                    for key in (
+                        "status", "run_id", "run_dir", "pid", "command", "log", "gpu_uuid", "gpu_index",
+                        "process_start_id", "attempt", "reason", "attempt_history", "worker_config",
+                        "started_at", "tracked", "reused_run_dir", "source_experiment_id", "evidence",
+                    )
+                }
+    return protected
+
+
+def _restore_protected(groups: list[dict], protected: dict[str, dict]) -> None:
+    for group in groups:
+        for item in group["items"]:
+            saved = protected.get(item["item_id"])
+            if saved is not None:
+                item.update(saved)
+        _refresh_group_status(group)
 
 
 def run_campaign(
@@ -1254,6 +1664,7 @@ def run_campaign(
     max_polls: int | None = None,
     python: Path | None = None,
     memory_bytes: int | None = None,
+    poll_seconds: float = POLL_SECONDS,
 ) -> dict:
     """Run until the matrix is finished or a test asks the loop to stop.
 
@@ -1267,21 +1678,42 @@ def run_campaign(
         signal.signal(signal.SIGINT, _request_stop)
     query = query or query_gpus
     launch = launch or default_launch
-    sleep = sleep or (lambda seconds: LEGACY.wait_poll(seconds))
+    sleep = sleep or (lambda seconds: wait_for_control(seconds))
+
+    def current_processes() -> list[dict]:
+        if processes is None:
+            return live_commands()
+        if callable(processes):
+            return list(processes())
+        return list(processes)
+
     python = python or LEGACY.training_python()
+    saved_payload = read_json(ops / "groups.json")
+    saved_cap = None
+    if isinstance(saved_payload, dict) and isinstance(saved_payload.get("max_gpus"), int) and not isinstance(saved_payload.get("max_gpus"), bool):
+        saved_cap = int(saved_payload["max_gpus"])
     control_path = ops / "control.json"
     if not control_path.is_file():
-        atomic_write_json(control_path, {"max_gpus": DEFAULT_MAX_GPUS})
+        atomic_write_json(control_path, {"max_gpus": DEFAULT_MAX_GPUS if saved_cap is None else saved_cap})
     groups = load_state(ops)
     created = groups is None
+    root_problem = _roots_problem(training_root, results_root)
+    if root_problem:
+        log_line(ops, root_problem)
+        lock.seek(0)
+        lock.truncate()
+        lock.close()
+        raise SystemExit(root_problem)
     if groups is None:
         groups = build_groups()
-        report = apply_inventory(groups, training_root=training_root, results_root=results_root, processes=processes if processes is not None else live_commands())
+        report = apply_inventory(groups, training_root=training_root, results_root=results_root, processes=current_processes())
     else:
-        report = {"inventory_status": "resumed", "counts": count_items(groups), "anomalies": [], "datasets": {}}
-    adopt_running(groups, processes if processes is not None else live_commands())
+        protected = _protect_live_attempts(groups)
+        report = apply_inventory(groups, training_root=training_root, results_root=results_root, processes=current_processes())
+        _restore_protected(groups, protected)
+    adopt_running(groups, current_processes())
     procs: dict[str, object] = {}
-    cap = DEFAULT_MAX_GPUS
+    cap = refresh_cap(ops, DEFAULT_MAX_GPUS if saved_cap is None else saved_cap)
     log_line(ops, f"scheduler start campaign={CAMPAIGN_ID} created={created} counts={count_items(groups)}")
     save_state(ops, groups, cap, report if created else None)
     polls = 0
@@ -1296,7 +1728,12 @@ def run_campaign(
             except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
                 log_line(ops, f"GPU query failed: {exc}")
                 cards = []
-            _reap(ops, groups, procs)
+            for card in cards:
+                if card.get("occupancy") == "unknown":
+                    log_line(ops, f"skip GPU index={card.get('index')} uuid={card.get('uuid')}: {card.get('reason')}")
+            snapshot = current_processes()
+            _reap(ops, groups, procs, snapshot)
+            _refresh_active(groups, snapshot, results_root)
             reserved = {uuid for group in groups if (uuid := group_reserved_uuid(group))}
             pool = [card for card in allowed_cards(cards, gpu_indexes, gpu_uuids) if card_is_free(card) and card["uuid"] not in reserved]
             available_ram = LEGACY.mem_available_bytes() if memory_bytes is None else int(memory_bytes)
@@ -1354,13 +1791,14 @@ def run_campaign(
             save_state(ops, groups, cap)
             pending = sum(item["status"] == "pending" for group in groups for item in group["items"])
             running = sum(item["status"] in {"running", "starting"} for group in groups for item in group["items"])
-            log_line(ops, f"poll max={cap} running_items={running} queued_items={pending}")
-            if pending == 0 and running == 0:
+            active = sum(item["status"] == "active" for group in groups for item in group["items"])
+            log_line(ops, f"poll max={cap} running_items={running} queued_items={pending} active_items={active}")
+            if pending == 0 and running == 0 and active == 0:
                 break
             polls += 1
             if max_polls is not None and polls >= max_polls:
                 break
-            sleep(POLL_SECONDS)
+            sleep(poll_seconds)
         save_state(ops, groups, cap)
         log_line(ops, f"scheduler stop counts={count_items(groups)}")
         return {"counts": count_items(groups), "max_gpus": cap}
@@ -1393,39 +1831,147 @@ def _start_group_item(ops, groups, group, item, gpu, python, training_root, resu
         handle = _launch_item(ops, groups, group, item, gpu, python, training_root, results_root, threads, launch, cap)
     except Exception as exc:
         item["status"] = "failed"
-        item["attempt"] = int(item.get("attempt") or 0) + 1
         item["error"] = f"launch failed: {exc}"
         item["reason"] = item["error"]
         item["finished_at"] = stamp()
         log_line(ops, f"FAILED {item['item_id']} {exc}")
+        return
+    if handle is None:
         return
     procs[item["item_id"]] = handle["proc"]
     where = "CPU" if gpu is None else f"GPU {gpu['index']}"
     log_line(ops, f"{where} START {item['item_id']} pid={item['pid']} run_id={item['run_id']}")
 
 
-def _reap(ops: Path, groups: list[dict], procs: dict[str, object]) -> None:
+def _living_worker(item: dict, rows: list[dict]) -> dict | None:
+    worker = str(item.get("worker_config") or "")
+    if not worker:
+        return None
+    for row in rows:
+        if worker in _argv(row):
+            return row
+    return None
+
+
+def _finish_attempt(item: dict, code: int | None, *, known: bool, reason: str) -> None:
+    item["finished_at"] = stamp()
+    item["exit_code"] = code if known else None
+    if _item_artifacts_complete(item) and (not known or code == 0):
+        item["status"] = "completed"
+        item["reason"] = None if known else "process ended; exit code unknown"
+        return
+    item["status"] = "failed"
+    item["reason"] = reason if not known else f"exit {code}"
+
+
+def _reap(ops: Path, groups: list[dict], procs: dict[str, object], rows: list[dict]) -> None:
+    """Finish child processes and adopted processes. Adopted exits have no wait status."""
     for group in groups:
         for item in group["items"]:
             if item["status"] not in {"running", "starting"}:
                 continue
             proc = procs.get(item["item_id"])
-            if proc is None:
+            if proc is not None:
+                code = proc.poll()
+                if code is None:
+                    continue
+                worker = _living_worker(item, rows)
+                if worker is not None:
+                    procs.pop(item["item_id"], None)
+                    item["pid"] = int(worker["pid"])
+                    item["process_start_id"] = str(worker.get("start_id") or "")
+                    item["tracked"] = "worker"
+                    item["launcher_exit_code"] = code
+                    continue
+                _finish_attempt(item, code, known=True, reason=f"exit {code}")
+                log_line(ops, f"{item['status'].upper()} {item['item_id']} exit={code}")
+                procs.pop(item["item_id"], None)
                 continue
-            code = proc.poll()
-            if code is None:
+            pid = int(item.get("pid") or 0)
+            same_pid = next((row for row in rows if int(row.get("pid") or 0) == pid), None) if pid else None
+            if same_pid is not None:
+                start = str(same_pid.get("start_id") or "")
+                recorded = str(item.get("process_start_id") or "")
+                if recorded and start and recorded != start:
+                    _finish_attempt(item, None, known=False, reason="pid reused")
+                    log_line(ops, f"PID REUSED {item['item_id']} pid={pid}")
+                    continue
+                if _process_matches_attempt(same_pid, item):
+                    if start and not recorded:
+                        item["process_start_id"] = start
+                    continue
+                _finish_attempt(item, None, known=False, reason="pid reused")
+                log_line(ops, f"PID REUSED {item['item_id']} pid={pid}")
                 continue
-            item["exit_code"] = code
-            item["finished_at"] = stamp()
-            if code == 0 and _item_artifacts_complete(item):
-                item["status"] = "completed"
-                item["reason"] = None
-            else:
-                item["status"] = "failed"
-                item["reason"] = f"exit {code}"
-            log_line(ops, f"{item['status'].upper()} {item['item_id']} exit={code}")
-            procs.pop(item["item_id"], None)
+            _finish_attempt(item, None, known=False, reason="process ended; exit code unknown")
+            log_line(ops, f"{item['status'].upper()} {item['item_id']} exit=unknown")
         _refresh_group_status(group)
+
+
+def _refresh_active(groups: list[dict], rows: list[dict], results_root: Path) -> None:
+    """Recheck external same-task processes and convert ended ones from their artifacts."""
+    for group in groups:
+        changed = False
+        for item in group["items"]:
+            if item["status"] != "active":
+                continue
+            matched = None
+            for row in rows:
+                if int(row.get("pid") or -1) != int(item.get("pid") or -2):
+                    continue
+                if not command_matches_item(row, item):
+                    continue
+                start = str(row.get("start_id") or "")
+                recorded = str(item.get("process_start_id") or "")
+                if recorded and start and recorded != start:
+                    continue
+                matched = row
+                break
+            if matched is not None:
+                continue
+            changed = True
+            found = _reusable_for_item(item, results_root)
+            item["pid"] = None
+            item["finished_at"] = stamp()
+            item["exit_code"] = None
+            if found is not None:
+                item["status"] = "reusable"
+                item["run_dir"] = found["run_dir"]
+                item["reused_run_dir"] = found["run_dir"]
+                item["source_experiment_id"] = found.get("experiment_id")
+                item["evidence"] = found.get("reason")
+                item["reason"] = "external process ended; existing result is complete"
+            else:
+                item["status"] = "pending"
+                item["reason"] = "external process ended; exit code unknown"
+        if changed:
+            _refresh_group_status(group)
+
+
+def _reusable_for_item(item: dict, results_root: Path) -> dict | None:
+    base = (
+        Path(results_root) / "datasets" / item["dataset_id"] / f"physical_{PHYSICAL_VERSION}" / item["model"]
+        / f"in_{item['input_type']}__out_{item['target_type']}" / item["observation_key"]
+    )
+    if not base.is_dir():
+        return None
+    identity = (
+        item["model"],
+        item["dataset_id"],
+        item["input_type"],
+        item["target_type"],
+        int(item["train_sampling_seed"]),
+        int(item["model_seed"]),
+    )
+    try:
+        run_dirs = [path for experiment in base.iterdir() if experiment.is_dir() for seed_dir in experiment.glob("seed_*") if seed_dir.is_dir() for path in seed_dir.iterdir() if path.is_dir()]
+    except OSError:
+        return None
+    for run_dir in sorted(run_dirs, key=lambda path: str(path)):
+        record = classify_run(run_dir)
+        if record.get("status") == "reusable" and _result_identity(record) == identity:
+            return record
+    return None
 
 
 def _request_reload(signum, frame) -> None:
@@ -1439,30 +1985,43 @@ def _request_stop(signum, frame) -> None:
 
 
 def requeue_failed(ops: Path) -> int:
-    groups = load_state(ops)
-    if groups is None:
-        raise SystemExit(f"no queue at {ops / 'groups.json'}")
-    changed = 0
-    for group in groups:
-        for item in group["items"]:
-            if item["status"] != "failed":
-                continue
-            if _item_artifacts_complete(item):
-                item["status"] = "completed"
-                item["reason"] = None
-                continue
-            if int(item.get("attempt") or 0) >= MAX_ATTEMPTS:
-                continue
-            item["status"] = "pending"
-            item["pid"] = None
-            item["exit_code"] = None
-            item["finished_at"] = None
-            changed += 1
-        _refresh_group_status(group)
-    control = read_json(ops / "control.json") or {}
-    cap = control.get("max_gpus") if isinstance(control, dict) and isinstance(control.get("max_gpus"), int) else DEFAULT_MAX_GPUS
-    save_state(ops, groups, int(cap))
-    return changed
+    """Requeue under the same exclusive lock the running scheduler holds."""
+    lock = acquire_lock(ops)
+    try:
+        groups = load_state(ops)
+        if groups is None:
+            raise SystemExit(f"no queue at {ops / 'groups.json'}")
+        changed = 0
+        for group in groups:
+            for item in group["items"]:
+                if item["status"] != "failed":
+                    continue
+                if item.get("run_dir") and _item_artifacts_complete(item):
+                    item["status"] = "completed"
+                    item["reason"] = None
+                    continue
+                if int(item.get("attempt") or 0) >= MAX_ATTEMPTS:
+                    continue
+                _archive_attempt(item)
+                item["status"] = "pending"
+                item["run_id"] = None
+                item["run_dir"] = None
+                item["pid"] = None
+                item["command"] = []
+                item["log"] = None
+                item["exit_code"] = None
+                item["finished_at"] = None
+                item["worker_config"] = None
+                changed += 1
+            _refresh_group_status(group)
+        control = read_json(ops / "control.json") or {}
+        cap = control.get("max_gpus") if isinstance(control, dict) and isinstance(control.get("max_gpus"), int) and not isinstance(control.get("max_gpus"), bool) else DEFAULT_MAX_GPUS
+        save_state(ops, groups, int(cap))
+        return changed
+    finally:
+        lock.seek(0)
+        lock.truncate()
+        lock.close()
 
 
 def format_plan(groups: list[dict], report: dict) -> str:
