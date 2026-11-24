@@ -17,7 +17,8 @@ and is not used.
 ## Task
 
 Data is the 3-second-phase Xuancheng26 package. Training reads sampling
-seed 42; validation and test read seeds 42–46:
+seed 42 unless `--train-sampling-seed` selects another published seed in
+42–46. Validation and test read seeds 42–46:
 
 `.../training_data_3s/sampling_seeds/seed_<id>/flow/window_data`
 

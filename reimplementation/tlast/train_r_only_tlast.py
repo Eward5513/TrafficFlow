@@ -124,9 +124,11 @@ def _smoke_one(args: argparse.Namespace, input_type: str, target_type: str) -> d
     config, data_root, output_root = _prepare(args, input_type=input_type, target_type=target_type)
     if args.smoke_test_only:
         config["device"] = "cpu"
-    config["rates"] = ["p70"]
+    from reimplementation.common.data.state_windows import smoke_observation_rate
+    rate = smoke_observation_rate(config, data_root)
+    config["rates"] = [rate]
     data_info = collect_data_info(data_root, config, project_root=PROJECT_ROOT)
-    report = check_real_batch(config, data_root=data_root, data_info=data_info, rate="p70")
+    report = check_real_batch(config, data_root=data_root, data_info=data_info, rate=rate)
     if args.smoke_test_only:
         return report
     config["epochs"] = 1

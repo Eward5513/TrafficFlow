@@ -15,9 +15,13 @@ Rules:
   previous channel counts. The prediction head uses the target width, not 6.
 - Do not overwrite prepared NPZ files, adjacency matrices, or `analysis/` inputs.
 - This tree does not build datasets. The 3-second windows, scalers, and node
-  order come from `data_root.sampling_window_root`. Training uses sampling
-  seed 42. Validation and test call `sampling_evaluation` once per seed
-  42–46 and average the raw metrics. Each model keeps its own loss,
+  order come from `data_root.sampling_window_root`. Training uses one
+  published sampling seed. The default is 42. `--train-sampling-seed` may
+  select 43, 44, 45, or 46; omitting it does not overwrite a value already
+  in the config or in the checkpoint being resumed. `--seed` and
+  `--model-seed` stay the model seed. Validation and test call
+  `sampling_evaluation` once per seed 42–46 and average the raw metrics.
+  Each model keeps its own loss,
   optimizer, and training loop.
 - Xuancheng results go to
   `xuancheng26/training_results_3s/datasets/<dataset_id>/physical_<version>/<model>/in_<input>__out_<target>/<observation_key>/<experiment_id>/seed_<model_seed>/<run_id>/`.

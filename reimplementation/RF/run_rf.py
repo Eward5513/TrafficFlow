@@ -77,7 +77,14 @@ def _json_default(value):
     raise TypeError(type(value).__name__)
 
 
-def _summarize(run_dir: Path, rate_dirs: dict[str, Path], elapsed: float, workers: int, model_seed: int = 42) -> None:
+def _summarize(
+    run_dir: Path,
+    rate_dirs: dict[str, Path],
+    elapsed: float,
+    workers: int,
+    model_seed: int = 42,
+    train_sampling_seed: int = 42,
+) -> None:
     rows = []
     for rate, directory in rate_dirs.items():
         metrics_path = directory / "metrics" / "test_metrics.json"
@@ -125,6 +132,9 @@ def _summarize(run_dir: Path, rate_dirs: dict[str, Path], elapsed: float, worker
         )
     summary = {
         "model": "RF",
+        "model_seed": model_seed,
+        "train_sampling_seed": train_sampling_seed,
+        "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
         "elapsed_seconds": elapsed,
         "parallel_models": workers,
         "rates": rows,
@@ -169,6 +179,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--parallel-models", type=int, default=7)
     parser.add_argument("--n-jobs-per-model", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--train-sampling-seed",
+        type=int,
+        default=None,
+        help="Published vehicle sample 42-46 used to fit. Omitted means 42. This is not --seed.",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--evaluate-only", action="store_true")
     parser.add_argument("--run-id", default=None)
@@ -191,7 +207,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("parallelism must be >= 1")
     if args.n_clusters < 2:
         parser.error("--n-clusters must be >= 2")
-    from data_root import resolve_xuancheng_dataset
+    from data_root import SAMPLING_SEEDS, resolve_xuancheng_dataset
+    train_sampling_seed = 42 if args.train_sampling_seed is None else int(args.train_sampling_seed)
+    if train_sampling_seed not in SAMPLING_SEEDS:
+        parser.error(f"--train-sampling-seed must be one of {list(SAMPLING_SEEDS)}")
     spec = resolve_xuancheng_dataset(dataset_id=args.dataset_id, training_root=training_root)
     rates = _parse_rates(args.penetrations, tuple(spec["observation_keys"]))
     from reimplementation.RF.data_loader import XuanchengRFData, validate_task
@@ -201,8 +220,16 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         raise SystemExit(str(exc)) from exc
 
-    _log(f"auditing RF inputs {args.input_type}->{args.target_type}")
-    audit = XuanchengRFData(dataset_id=args.dataset_id, training_root=training_root).audit(args.input_type, args.target_type)
+    _log(
+        f"auditing RF inputs {args.input_type}->{args.target_type} "
+        f"train_sampling_seed={train_sampling_seed} model_seed={args.seed}"
+    )
+    audit = XuanchengRFData(
+        sampling_seed=train_sampling_seed,
+        dataset_id=args.dataset_id,
+        training_root=training_root,
+    ).audit(args.input_type, args.target_type)
+    audit["train_sampling_seed"] = train_sampling_seed
     _log(f"audit {audit}")
     if args.audit_only:
         return 0
@@ -246,9 +273,9 @@ def main(argv: list[str] | None = None) -> int:
         "target_type": args.target_type,
         "penetrations": rates,
         "seed": args.seed,
-            "model_seed": args.seed,
-            "train_sampling_seed": 42,
-            "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
+        "model_seed": args.seed,
+        "train_sampling_seed": train_sampling_seed,
+        "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
         "parallel_models": min(args.parallel_models, len(rates)),
         "n_jobs_per_model": args.n_jobs_per_model,
         "kmeans_n_init": args.kmeans_n_init,
@@ -289,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
             "target_type": args.target_type,
             "seed": args.seed,
             "model_seed": args.seed,
-            "train_sampling_seed": 42,
+            "train_sampling_seed": train_sampling_seed,
             "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
             "dataset_id": str(args.dataset_id),
             "training_root": str(training_root),
@@ -327,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
                 _log(f"{rate} exit={process.exitcode}")
         running = still
     elapsed = time.perf_counter() - started
-    _summarize(run_dir, rate_dirs, elapsed, workers, args.seed)
+    _summarize(run_dir, rate_dirs, elapsed, workers, args.seed, train_sampling_seed)
     failed = [rate for rate, code in exit_codes.items() if code != 0]
     _log(f"done elapsed_seconds={elapsed:.1f} failed={failed}")
     return 1 if failed else 0

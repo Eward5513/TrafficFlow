@@ -43,8 +43,9 @@ one shared decoder GCN/LSTM/FC. Record these as assumptions. The label is
 - Output is `/data5/tzhang174/TrafficFlow/xuancheng26/training_results/s2s_gcn_lstm/`.
 - Never write into another model's experiment directory or into prepared NPZ,
   adjacency, or `normalization.json`.
-- `--smoke-test-only` uses CPU, reads p70 train plus the graph, and writes
-  no checkpoint.
+- `--smoke-test-only` uses CPU, reads the resolved observation key (p70 on
+  the fixed dataset, or the single manifest key on a variable dataset), and
+  writes no checkpoint.
 
 ## Training
 

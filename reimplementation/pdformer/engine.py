@@ -237,9 +237,11 @@ def build_dataloaders(
 
 def collect_smoke_data_info(data_root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     from reimplementation.common.data.sampling_seeds import validate_sampling_package
+    from reimplementation.common.data.state_windows import smoke_observation_rate
+    rate = smoke_observation_rate(config, data_root)
     info = validate_sampling_package(
         data_root, n_his=int(config.get("n_his", 12)),
-        num_nodes=int(config["num_nodes"]), rates=["p70"], splits=("train",),
+        num_nodes=int(config["num_nodes"]), rates=[rate], splits=("train",),
         input_type=str(config.get("input_type") or "inflow"),
     )
     info = finalize_state_scaler(info, config, data_root)
@@ -365,10 +367,12 @@ def run_p70_smoke(
     data_info: Mapping[str, Any],
     logger: JsonlLogger | None = None,
 ) -> dict[str, Any]:
+    from reimplementation.common.data.state_windows import smoke_observation_rate
+    rate = smoke_observation_rate(config, data_root)
     seed = int(config["seed"])
     seed_everything(seed)
     device = torch.device("cpu")
-    train_pack = build_train_dataloader(data_root, "p70", config, data_info["sample_counts"])
+    train_pack = build_train_dataloader(data_root, rate, config, data_info["sample_counts"])
     model = build_model(config, graph_info).to(device)
     init_hash = parameter_sha256(model)
     shape_info = validate_model_shapes(
@@ -418,7 +422,7 @@ def run_p70_smoke(
     y_raw_match = bool(torch.allclose(recovered, batch["y_raw"], atol=1e-4, rtol=1e-4))
     payload = {
         "status": "ok",
-        "penetration_rate": "p70",
+        "penetration_rate": rate,
         "batch_size": int(batch["x"].size(0)),
         "device": str(device),
         "seed": seed,
@@ -448,7 +452,7 @@ def run_p70_smoke(
             {
                 "stage": "smoke_testing",
                 "model_name": "pdformer",
-                "penetration_rate": "p70",
+                "penetration_rate": rate,
                 "seed": seed,
                 "status": "ok",
                 "training_loss": payload["training_loss"],
@@ -456,7 +460,7 @@ def run_p70_smoke(
             }
         )
     print(
-        f"[pdformer] stage=smoke_testing rate=p70 loss={payload['training_loss']:.6f} status=ok",
+        f"[pdformer] stage=smoke_testing rate={rate} loss={payload['training_loss']:.6f} status=ok",
         flush=True,
     )
     del model

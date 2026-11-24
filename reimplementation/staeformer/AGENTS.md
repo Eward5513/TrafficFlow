@@ -75,8 +75,10 @@ python3 reimplementation/staeformer/train_r_only_staeformer.py --smoke-test-only
 python3 reimplementation/staeformer/train_r_only_staeformer.py
 ```
 
-`--smoke-test-only` runs one p70 training batch on CPU and discards the
-model. Do not pass graph flags; the CLI does not accept them.
+`--smoke-test-only` runs one training batch on CPU and discards the model.
+The batch uses p70 on the fixed dataset, or the resolved single observation
+key on a variable dataset. Do not pass graph flags; the CLI does not accept
+them.
 
 Official `run_single_rate` keeps PeMS04 early stopping (`early_stop=20`).
 When training or early stopping ends, it reloads `best_checkpoint.pt`

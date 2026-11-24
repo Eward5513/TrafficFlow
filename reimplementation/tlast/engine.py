@@ -246,11 +246,12 @@ def check_real_batch(
     *,
     data_root: Path,
     data_info: Mapping[str, Any],
-    rate: str = "p70",
+    rate: str | None = None,
 ) -> dict[str, Any]:
     """One real training batch: shapes, attention, loss, backward, finite grads."""
+    from reimplementation.common.data.state_windows import smoke_observation_rate
+    tag = rate_tag(rate or smoke_observation_rate(config, data_root))
     data_info = finalize_state_scaler(data_info, config, data_root)
-    tag = rate_tag(rate)
     seed_everything(int(config["seed"]))
     device = resolve_device(str(config.get("device", "cpu")))
     if device.type == "cuda":

@@ -1,6 +1,9 @@
 """Aligned canonical dated state windows; channels and scaler semantics are shared.
 
-All model entry points default to seed42 training and five-seed evaluation.
+Baseline entry points train on one published sampling seed. The default is 42.
+``--train-sampling-seed`` may select 43, 44, 45, or 46. Evaluation stays on
+seeds 42–46. An omitted flag does not overwrite a seed already stored in the
+config or in the checkpoint being resumed.
 """
 
 from __future__ import annotations
@@ -63,12 +66,91 @@ def add_state_type_arguments(parser) -> None:
     parser.add_argument("--dataset-id", dest="dataset_id", default=None)
     parser.add_argument("--sampling-root", type=Path, default=None)
     parser.add_argument("--model-seed", type=int, default=None)
-    parser.add_argument("--train-sampling-seed", type=int, default=42)
-    parser.add_argument("--evaluation-sampling-seeds", type=int, nargs="+", default=[42,43,44,45,46])
+    parser.add_argument(
+        "--train-sampling-seed",
+        type=int,
+        default=None,
+        help="Published vehicle sample 42-46. Omitted keeps the config or checkpoint value, otherwise 42.",
+    )
+    parser.add_argument(
+        "--evaluation-sampling-seeds",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Omitted keeps the config value, otherwise 42 43 44 45 46.",
+    )
     parser.add_argument("--experiment-id", dest="experiment_id", default=None)
     parser.add_argument("--run-id", dest="run_id", default=None)
     parser.add_argument("--input-type", dest="input_type", choices=INPUT_TYPES, default=None)
     parser.add_argument("--target-type", dest="target_type", choices=TARGET_TYPES, default=None)
+
+
+def train_sampling_seed_from_resume(path: Path) -> int | None:
+    """Read the training sample recorded beside or inside a checkpoint.
+
+    ``--train-sampling-seed`` left unset should resume that sample. A missing
+    record means the caller keeps its own default.
+    """
+    import json
+
+    path = Path(path)
+    candidates = [path] if path.suffix == ".json" else [path.parent / "resolved_config.json"]
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        found = _payload_train_sampling_seed(payload)
+        if found is not None:
+            return found
+    if path.suffix != ".pt" or not path.is_file():
+        return None
+    try:
+        import torch
+
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return _payload_train_sampling_seed(payload)
+
+
+def _payload_train_sampling_seed(payload: object) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("train_sampling_seed") is not None:
+        return int(payload["train_sampling_seed"])
+    nested = payload.get("config")
+    if isinstance(nested, dict) and nested.get("train_sampling_seed") is not None:
+        return int(nested["train_sampling_seed"])
+    return None
+
+
+def smoke_observation_rate(config: Mapping[str, Any], data_root: Path | str | None = None) -> str:
+    """Observation key a smoke loader should read.
+
+    One resolved rate wins. A manifest with a single key uses that key.
+    The fixed seven-rate package keeps ``p70``.
+    """
+    from reimplementation.common.data.r_only_npz_dataset import declared_observation_keys
+
+    rates = [str(item) for item in (config.get("rates") or []) if str(item)]
+    if len(rates) == 1:
+        return rates[0]
+    keys: list[str] = []
+    if data_root is not None:
+        keys = [str(item) for item in declared_observation_keys(Path(data_root))]
+    elif config.get("observation_keys"):
+        keys = [str(item) for item in config.get("observation_keys") or []]
+    if len(keys) == 1:
+        return keys[0]
+    if "p70" in keys or "p70" in rates:
+        return "p70"
+    raise ReimplementationError(
+        "smoke entry needs one explicit rate or a single-key manifest; "
+        f"rates={rates or ['<unset>']} keys={keys or ['<unset>']}"
+    )
 
 
 def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[str, Any]:
@@ -101,7 +183,23 @@ def apply_state_types(config: dict[str, Any], args, *, model_name: str) -> dict[
         explicit.append("sampling_root")
     config["explicit_path_keys"] = explicit
     explicit_rates = getattr(args, "rates", None) is not None or getattr(args, "rate", None) is not None
-    config = configure_sampling(config, model_name=model_name)
+    resume = getattr(args, "resume", None)
+    if resume:
+        stored_train_seed = train_sampling_seed_from_resume(Path(resume))
+        if stored_train_seed is not None:
+            current = config.get("train_sampling_seed")
+            if current is not None and int(current) != stored_train_seed:
+                raise ReimplementationError(
+                    f"resume train_sampling_seed={stored_train_seed} does not match requested {int(current)}"
+                )
+            if getattr(args, "train_sampling_seed", None) is None:
+                config["train_sampling_seed"] = stored_train_seed
+    from data_root import SAMPLING_SEEDS
+    config = configure_sampling(
+        config,
+        model_name=model_name,
+        allowed_train_sampling_seeds=SAMPLING_SEEDS,
+    )
     keys = [str(item) for item in config.get("observation_keys") or []]
     if not explicit_rates and len(keys) == 1:
         config["rates"] = list(keys)
@@ -458,17 +556,27 @@ def open_split_dataset(
     n_his: int | None = None,
     num_nodes: int | None = None,
     expected_count: int | None = None,
-    expected_train_sampling_seed: int = 42,
+    expected_train_sampling_seed: int | None = None,
 ) -> Dataset:
     """Read the canonical dated package.
 
-    Training must sit in ``seed_<expected_train_sampling_seed>``. Callers that
-    do not pass the argument keep the historical seed-42 training directory.
+    Training must sit in ``seed_<expected>``. An omitted expectation uses
+    ``config['train_sampling_seed']`` and falls back to 42 when that field is
+    absent. An explicit expectation is kept. A config that names another seed
+    is refused, and the directory name is always checked.
     """
     from data_root import SAMPLING_SEEDS, sampling_root_from_window
     sampling_root_from_window(data_root)
     if split == "train":
-        expected = int(expected_train_sampling_seed)
+        configured = config.get("train_sampling_seed")
+        if expected_train_sampling_seed is None:
+            expected = int(configured) if configured is not None else 42
+        else:
+            expected = int(expected_train_sampling_seed)
+            if configured is not None and int(configured) != expected:
+                raise ReimplementationError(
+                    f"config train_sampling_seed={int(configured)} does not match explicit seed_{expected}"
+                )
         if expected not in SAMPLING_SEEDS:
             raise ReimplementationError(
                 f"training sampling seed {expected} is not a published seed {list(SAMPLING_SEEDS)}"

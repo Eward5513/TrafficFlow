@@ -154,9 +154,11 @@ def collect_smoke_data_info(
     project_root: Path,
 ) -> dict[str, Any]:
     from reimplementation.common.data.sampling_seeds import validate_sampling_package
+    from reimplementation.common.data.state_windows import smoke_observation_rate
+    rate = smoke_observation_rate(config, data_root)
     info = validate_sampling_package(
         data_root, n_his=int(config.get("n_his", 12)),
-        num_nodes=int(config["num_nodes"]), rates=["p70"], splits=("train",),
+        num_nodes=int(config["num_nodes"]), rates=[rate], splits=("train",),
         input_type=str(config.get("input_type") or "inflow"),
     )
     info = finalize_state_scaler(info, config, data_root)
@@ -228,9 +230,11 @@ def run_p70_smoke(
     project_root: Path,
     logger: JsonlLogger | None = None,
 ) -> dict[str, Any]:
+    from reimplementation.common.data.state_windows import smoke_observation_rate
+    rate = smoke_observation_rate(config, data_root)
     seed_everything(int(config["seed"]))
     device = torch.device("cpu")
-    dataset = open_split_dataset(data_root, "p70", "train", config,
+    dataset = open_split_dataset(data_root, rate, "train", config,
                                  expected_count=int(data_info["sample_counts"]["train"]))
     loader = build_dataloader(
         dataset,
@@ -275,7 +279,7 @@ def run_p70_smoke(
     payload = {
         "status": "ok",
         "model_label": MODEL_LABEL,
-        "penetration_rate": "p70",
+        "penetration_rate": rate,
         "batch_size": int(probe["x"].shape[0]),
         "device": str(device),
         "seed": int(config["seed"]),

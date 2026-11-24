@@ -6,7 +6,8 @@ The snapshot has no LICENSE file; keep the URL and the file hashes in
 `provenance.py`.
 
 The task is last-observed-step reconstruction on the 3-second Xuancheng26
-windows. Train on sampling seed 42. Select by the mean raw MAE of seeds
+windows. Train on sampling seed 42 unless `--train-sampling-seed` selects
+another published seed in 42–46. Select by the mean raw MAE of seeds
 42–46. Test uses that checkpoint and does not select it.
 
 ```bash

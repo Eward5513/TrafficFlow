@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from reimplementation.common.data.state_windows import INPUT_TYPES, TARGET_TYPES, channel_count
 from reimplementation.common.errors import ReimplementationError
 from reimplementation.s2s_gcn_lstm.graph import load_s2s_graph
 from reimplementation.s2s_gcn_lstm.model.s2s_gcn_lstm import S2SGCNLSTM
@@ -91,16 +92,21 @@ def assert_task_config(config: dict[str, Any]) -> None:
         raise ReimplementationError("R-only output window must be 1; this is reconstruction, not multi-step forecast")
     in_channels = int(config.get("input_channels", 0))
     out_channels = int(config.get("output_channels", 0))
+    input_type = str(config.get("input_type") or "inflow")
+    target_type = str(config.get("target_type") or "inflow")
+    if input_type not in INPUT_TYPES:
+        raise ReimplementationError(f"unknown input type {input_type}")
+    if target_type not in TARGET_TYPES:
+        raise ReimplementationError(f"unknown target type {target_type}")
+    expected_in = channel_count(input_type)
+    expected_out = channel_count(target_type)
+    if in_channels != expected_in or out_channels != expected_out:
+        raise ReimplementationError(
+            f"input_type {input_type} requires {expected_in} channels, got {in_channels}; "
+            f"target_type {target_type} requires {expected_out} channels, got {out_channels}"
+        )
     if in_channels not in {1, 4, 6} or out_channels not in {1, 4}:
         raise ReimplementationError("input_channels must be 1, 4, or 6 and output_channels must be 1 or 4")
-    input_type = str(config.get("input_type") or "inflow")
-    if in_channels == 6:
-        if input_type != "all_sp_c":
-            raise ReimplementationError("six input channels require --input-type all_sp_c")
-    elif (in_channels == 4) != (input_type == "all"):
-        raise ReimplementationError("four input channels require --input-type all")
-    if (out_channels == 4) != (config.get("target_type") == "all"):
-        raise ReimplementationError("four output channels require --target-type all")
     if str(config.get("output_activation", "linear")) != "linear":
         raise ReimplementationError("targets are global z-scores, not [0, 1]; refusing a bounded output activation")
     if str(config.get("edge_weight", "binary_connectivity")) not in {"binary_connectivity", "distance", "gaussian"}:

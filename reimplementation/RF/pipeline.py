@@ -490,11 +490,18 @@ def _confirm_reload(
         raise RunError("reloaded model does not reproduce the saved test prediction")
 
 
-def _rf_data(config: dict, sampling_seed: int = 42):
+def _configured_train_sampling_seed(config: dict) -> int:
+    """Training sample recorded for this fit. Evaluation passes its own seed."""
+    return int(config.get("train_sampling_seed", 42))
+
+
+def _rf_data(config: dict, sampling_seed: int | None = None):
     kwargs = {"dataset_id": str(config.get("dataset_id") or "fixed_uniform")}
     if config.get("training_root"):
         kwargs["training_root"] = Path(config["training_root"])
-    return XuanchengRFData(sampling_seed, **kwargs)
+    if sampling_seed is None:
+        sampling_seed = _configured_train_sampling_seed(config)
+    return XuanchengRFData(int(sampling_seed), **kwargs)
 
 
 def _aggregate_state_reports(samples: list[dict]) -> tuple[dict, dict]:
@@ -525,12 +532,13 @@ def train_penetration(config: dict) -> None:
     protect_historical_results(rate_dir)
     _assert_output(rate_dir)
     rate_dir.mkdir(parents=True, exist_ok=True)
+    train_sampling_seed = _configured_train_sampling_seed(config)
     _write_payload(rate_dir / "resolved_config.json", {
         **config,
         "model_name": "RF",
         "rates": [penetration],
         "model_seed": int(config["seed"]),
-        "train_sampling_seed": 42,
+        "train_sampling_seed": train_sampling_seed,
         "evaluation_sampling_seeds": [42, 43, 44, 45, 46],
         "checkpoint_selection": "mean_validation_mae",
     })
@@ -542,11 +550,18 @@ def train_penetration(config: dict) -> None:
             _log(handle, f"[{penetration} {input_type}->{target_type}] {message}")
 
         try:
-            log(f"start pid={os.getpid()} ppid={os.getppid()} n_jobs={config['n_jobs']}")
+            log(
+                f"start pid={os.getpid()} ppid={os.getppid()} n_jobs={config['n_jobs']} "
+                f"train_sampling_seed={train_sampling_seed} model_seed={int(config['seed'])}"
+            )
             if _complete(rate_dir, multi) and not config["force"] and not config["evaluate_only"]:
                 log("SKIP completed five-sampling run")
                 return
-            data = _rf_data(config)
+            data = _rf_data(config, train_sampling_seed)
+            log(
+                f"training rows from dataset={data.dataset_id} sampling_seed={data.sampling_seed} "
+                f"partial_root={data.partial_root}"
+            )
             if config["evaluate_only"]:
                 if not _fitted_complete(rate_dir, multi):
                     if _read_discard_record(rate_dir) is not None:
@@ -581,6 +596,8 @@ def train_penetration(config: dict) -> None:
                         state: flow_column_for(input_type, state) for state in heads
                     },
                     "seed": int(config["seed"]),
+                    "model_seed": int(config["seed"]),
+                    "train_sampling_seed": train_sampling_seed,
                     "n_clusters": int(config["n_clusters"]),
                     "n_estimators": int(config["n_estimators"]),
                     "kmeans_n_init": int(config["kmeans_n_init"]),
@@ -674,18 +691,20 @@ def train_penetration(config: dict) -> None:
                 (state, RFEstimator.load(rate_dir / "model" / state if multi else rate_dir / "model"))
                 for state in heads
             ]
+            evaluation_seed_42 = _rf_data(config, 42)
             _confirm_reload(
                 reloaded,
-                data,
+                evaluation_seed_42,
                 penetration,
-                data.days["test"][0],
+                evaluation_seed_42.days["test"][0],
                 rate_dir,
                 input_type,
                 target_type,
             )
             import torch
             checkpoint = {"model_name": "RF", "model_seed": int(config["seed"]),
-                          "train_sampling_seed": 42, "evaluation_sampling_seeds": list(SAMPLING_SEEDS),
+                          "train_sampling_seed": train_sampling_seed,
+                          "evaluation_sampling_seeds": list(SAMPLING_SEEDS),
                           "model_paths": [str(path) for _, path in _head_dirs(rate_dir, multi, heads)],
                           "checkpoint_selection": "single_fit_no_epoch_selection"}
             torch.save(checkpoint, rate_dir / "best_checkpoint.pt")
@@ -693,7 +712,9 @@ def train_penetration(config: dict) -> None:
             _write_payload(rate_dir / "training_history.json", [{"fit": 0, "mean_validation_mae": reports["validation"]["mean"]["mae"]}])
             _write_payload(rate_dir / "run_metadata.json", {**checkpoint, "status": "completed",
                            "speed_features": "per dataset, observation key, and sampling seed; not shared across seeds",
-                           "scaler_fit": "seed42 training only", "optimizer": "RandomForest/KMeans/LAD"})
+                           "scaler_fit": f"seed {train_sampling_seed} training rows only",
+                           "training_partial_root": str(data.partial_root),
+                           "optimizer": "RandomForest/KMeans/LAD"})
             elapsed = time.perf_counter() - started
             log(f"PASS seconds={elapsed:.1f} test_mae={test['overall']['mae']:.6f} rss_mib={_rss_mib()}")
             _write_status(rate_dir, "PASS", elapsed, "")

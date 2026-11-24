@@ -460,10 +460,12 @@ def run_p70_smoke(
     data_info: Mapping[str, Any],
     logger: JsonlLogger | None = None,
 ) -> dict[str, Any]:
+    from reimplementation.common.data.state_windows import smoke_observation_rate
+    rate = smoke_observation_rate(config, data_root)
     seed = int(config["seed"])
     seed_everything(seed)
     device = resolve_device(str(config.get("device", "auto")))
-    train_pack = build_train_dataloader(data_root, "p70", config, data_info["sample_counts"])
+    train_pack = build_train_dataloader(data_root, rate, config, data_info["sample_counts"])
     temporal_is_test_only = bool(graph_info.get("temporal_graph_is_test_only", False))
     model = build_model(
         config,
@@ -504,7 +506,7 @@ def run_p70_smoke(
         raise ReimplementationError("optimizer step did not change parameters")
     payload = {
         "status": "ok",
-        "penetration_rate": "p70",
+        "penetration_rate": rate,
         "batch_size": int(x.size(0)),
         "device": str(device),
         "seed": seed,
@@ -531,7 +533,7 @@ def run_p70_smoke(
             {
                 "stage": "smoke_testing",
                 "model_name": "stfgnn",
-                "penetration_rate": "p70",
+                "penetration_rate": rate,
                 "seed": seed,
                 "status": "ok",
                 "training_loss": payload["training_loss"],
@@ -539,7 +541,7 @@ def run_p70_smoke(
             }
         )
     print(
-        f"[stfgnn] stage=smoke_testing rate=p70 loss={payload['training_loss']:.6f} status=ok",
+        f"[stfgnn] stage=smoke_testing rate={rate} loss={payload['training_loss']:.6f} status=ok",
         flush=True,
     )
     del model
@@ -835,9 +837,10 @@ def run_all_rates(
             input_type=str(config.get("input_type") or "inflow"),
         )
     else:
+        from reimplementation.common.data.state_windows import smoke_observation_rate
         data_info["train_npz"] = validate_train_npz_only(
             data_root,
-            rate="p70",
+            rate=smoke_observation_rate(config, data_root),
             n_his=int(config["seq_len"]),
             num_nodes=int(config["num_nodes"]),
             expected_count=int(data_info["sample_counts"]["train"]),
@@ -850,7 +853,7 @@ def run_all_rates(
     }
     smoke_result = None
     from reimplementation.common.data.r_only_npz_dataset import dataset_declares
-    if dataset_declares("p70"):
+    if smoke_only or dataset_declares("p70"):
         smoke_result = run_p70_smoke(
             config,
             data_root=data_root,

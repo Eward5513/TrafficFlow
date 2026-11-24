@@ -6,7 +6,8 @@ https://github.com/zhengchuanpan/STJGCN) to PyTorch. Do not edit
 file hashes in `provenance.py`. Only the PeMSD7 width and defaults are used.
 
 The task is last-observed-step reconstruction on the 3-second Xuancheng26
-windows. Train on sampling seed 42. Select by the mean raw MAE of seeds
+windows. Train on sampling seed 42 unless `--train-sampling-seed` selects
+another published seed in 42–46. Select by the mean raw MAE of seeds
 42–46. The training loss still masks zero labels; the reported MAE does not.
 
 ```bash

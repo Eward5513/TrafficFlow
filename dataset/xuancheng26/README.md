@@ -344,6 +344,19 @@ python3 dataset/xuancheng26/run_variable_baselines.py status --observation-key p
 # max_gpus 只计算正在占用 GPU 的任务。随机森林是纯 CPU 任务，不占名额，也不占用空卡。
 ```
 
+两个波动区间、五个训练采样种子的补跑队列是另一个入口，不改上面的旧队列。它按模型、数据集和训练采样种子分组，一组在同一张卡上逐个补齐 14 个输入输出。训练采样种子是 42–46，模型种子固定 42。状态目录是 `training_results_3s/operations/grouped_p5_p15_p5_p35_train5/`。`plan` 和 `status` 只读；`run` 才会写这个目录并启动训练。
+
+```bash
+cd /home/tzhang174/TrafficFlow
+python3 dataset/xuancheng26/grouped_baselines.py plan
+python3 dataset/xuancheng26/grouped_baselines.py status
+# 下面的 run 留给之后手动启动。control.json 初始是 {"max_gpus": 4}。
+# 改并发：写 control.json 的 max_gpus，或追加 messages.jsonl 的 {"max_gpus": N}，
+# 再 kill -HUP $(cat <operations>/scheduler.lock)。0 停止派发新的 GPU 组。
+# python3 dataset/xuancheng26/grouped_baselines.py run
+# python3 dataset/xuancheng26/grouped_baselines.py requeue-failed
+```
+
 ## 6. 数据集身份与波动渗透率
 
 固定七档在 `training_data_3s/datasets/fixed_uniform/sampling_seeds/`。顶层没有 `sampling_seeds` 软链接。`full_flow/`、`graph/` 和 `training_data_3s/shared/` 仍是共用文件；`datasets/fixed_uniform/shared/` 指向其中的 split、target scaler、节点表和 12→12 标签。

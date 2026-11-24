@@ -64,8 +64,10 @@ python3 reimplementation/stid/train_r_only_stid.py --smoke-test-only
 python3 reimplementation/stid/train_r_only_stid.py
 ```
 
-`--smoke-test-only` runs one p70 training batch on CPU and discards the
-model. Do not pass graph flags; the CLI does not accept them.
+`--smoke-test-only` runs one training batch on CPU and discards the model.
+The batch uses p70 on the fixed dataset, or the resolved single observation
+key on a variable dataset. Do not pass graph flags; the CLI does not accept
+them.
 
 Official `run_single_rate` trains 100 epochs, selects `best_checkpoint.pt`
 by validation raw MAE, then reloads that checkpoint and writes

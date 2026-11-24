@@ -362,10 +362,12 @@ def run_p70_smoke(
     data_info: Mapping[str, Any],
     logger: JsonlLogger,
 ) -> dict[str, Any]:
+    from reimplementation.common.data.state_windows import smoke_observation_rate
+    rate = smoke_observation_rate(config, data_root)
     seed = int(config["seed"])
     seed_everything(seed)
     device = resolve_device(str(config.get("device", "auto")))
-    loaders_pack = build_dataloaders(data_root, "p70", config, data_info["sample_counts"])
+    loaders_pack = build_dataloaders(data_root, rate, config, data_info["sample_counts"])
     model = build_model(config, graph_info["supports"]).to(device)
     init_hash = parameter_sha256(model)
     shape_info = validate_model_shapes(
@@ -439,7 +441,7 @@ def run_p70_smoke(
         raise ReimplementationError("adaptive adjacency rows do not sum to 1")
     payload = {
         "status": "ok",
-        "penetration_rate": "p70",
+        "penetration_rate": rate,
         "batch_size": int(x.size(0)),
         "input_shape": list(x.shape),
         "target_shape": list(y.shape),
@@ -460,7 +462,7 @@ def run_p70_smoke(
         {
             "stage": "smoke_testing",
             "model_name": "graph_wavenet",
-            "penetration_rate": "p70",
+            "penetration_rate": rate,
             "seed": seed,
             "status": "ok",
             "training_loss": payload["training_loss"],
@@ -469,7 +471,7 @@ def run_p70_smoke(
         }
     )
     print(
-        f"[gwn] stage=smoke_testing rate=p70 loss={payload['training_loss']:.6f} status=ok",
+        f"[gwn] stage=smoke_testing rate={rate} loss={payload['training_loss']:.6f} status=ok",
         flush=True,
     )
     del model
@@ -818,7 +820,7 @@ def run_all_rates(
     )
     smoke_result = None
     from reimplementation.common.data.r_only_npz_dataset import dataset_declares
-    if resume is None and dataset_declares("p70"):
+    if resume is None and (smoke_only or dataset_declares("p70")):
         logger.log({"stage": "building_adaptive_graph", "model_name": "graph_wavenet", "status": "ok"})
         smoke_result = run_p70_smoke(
             config,

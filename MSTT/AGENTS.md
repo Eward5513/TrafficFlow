@@ -116,7 +116,8 @@ is its final record.
 The default training sampling seed is 42 (5540 windows at every rate).
 `--train-sampling-seed` may select another published seed in 42–46; MSTT
 passes that allowed set into `configure_sampling`, and the training window
-directory must be that seed. Other models stay on seed 42. Each epoch
+directory must be that seed. Baseline entry points accept the same published
+seeds and still default to 42. Each epoch
 scores validation seeds 42–46 separately on raw-scale MAE and selects
 `best_checkpoint.pt` by the unweighted mean. Test is scored the same way
 after that checkpoint is restored, with per-seed metrics, the mean, and the

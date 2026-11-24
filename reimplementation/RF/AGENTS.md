@@ -8,9 +8,12 @@ and does not use a GPU or the road adjacency.
   Static road attributes stay in `<training-root>/config/RF/road_attributes.csv`.
   Do not reuse one penetration's speed cube for another sampling seed.
 - Do not rewrite partial flow, full flow, FCD, or other models' results.
-- Train on sampling seed 42 partial flow. Validate and test seeds 42–46
-  separately, then average the raw metrics. Fit the feature scaler on seed 42
-  training rows only.
+- Train on `--train-sampling-seed` (default 42, one of 42–46). That seed
+  selects partial flow, the prepared RF speed cube, and, for `all_sp_c`,
+  the daily raw speed and snapshot count. `--seed` remains the model seed.
+  Validate and test seeds 42–46 separately, then average the raw metrics.
+  Fit the feature scaler on that training seed's rows only. Daily reports
+  labeled sampling seed 42 are the evaluation-seed-42 tables.
 - Write runs under `<results-root>/in_<input>__out_<target>/<rate>/seed_<model_seed>/`.
   Pass `--run-id` only when nesting a named experiment beside that layout.
 - After predictions and metrics are saved, delete the fitted scaler, K-Means,
