@@ -1,8 +1,10 @@
-"""Grouped Xuancheng26 baseline campaign for two penetration bands and five training samples.
+"""Grouped Xuancheng26 baseline campaign for two penetration bands.
 
-One group is one model, one dataset, and one training sampling seed. The group
-runs its missing input/output items one at a time. Seed 42 of the model is the
-initialization seed. It is not evidence that the training vehicles were sample 42.
+One group is one model, one dataset, one training sampling seed, and one model
+seed. The group runs its five input/output items one at a time. The sampling
+seed selects the published vehicle sample. The model seed is the initialization
+and shuffle seed. A result directory named seed_<m> is not evidence that the
+training vehicles were sample m.
 
 This module plans and can run the campaign. Importing it does not start training.
 """
@@ -51,11 +53,17 @@ def _load_legacy_scheduler():
 
 LEGACY = _load_legacy_scheduler()
 
-CAMPAIGN_ID = "grouped_p5_p15_p5_p35_train5"
 PHYSICAL_VERSION = "independent_fcd_v1"
-MODEL_SEED = 42
-TRAIN_SEEDS = (42, 43, 44, 45, 46)
+TRAIN_SAMPLING_SEEDS = (42, 43, 44, 45, 46)
+MODEL_SEEDS = (42, 101, 102)
 EVAL_SEEDS = (42, 43, 44, 45, 46)
+IO_PAIRS = (
+    {"input_type": "inflow", "target_type": "inflow", "family": "I2I"},
+    {"input_type": "all", "target_type": "inflow", "family": "A2I"},
+    {"input_type": "all", "target_type": "all", "family": "A2A"},
+    {"input_type": "all_sp_c", "target_type": "inflow", "family": "ASC2I"},
+    {"input_type": "all_sp_c", "target_type": "all", "family": "ASC2A"},
+)
 POLL_SECONDS = 30
 DEFAULT_MAX_GPUS = 4
 MAX_ATTEMPTS = 2
@@ -82,20 +90,47 @@ class CampaignSignals:
 SIGNALS = CampaignSignals()
 
 
+def _joined_seeds(seeds: tuple[int, ...]) -> str:
+    return "_".join(str(int(seed)) for seed in seeds)
+
+
+def campaign_id(
+    sampling_seeds: tuple[int, ...] = TRAIN_SAMPLING_SEEDS,
+    model_seeds: tuple[int, ...] = MODEL_SEEDS,
+    task_count: int = len(IO_PAIRS),
+) -> str:
+    """Operations namespace. Changing either seed sequence starts a new campaign."""
+    return (
+        "grouped_p5_p15_p5_p35_"
+        f"io{int(task_count)}_s{_joined_seeds(sampling_seeds)}_m{_joined_seeds(model_seeds)}"
+    )
+
+
+CAMPAIGN_ID = campaign_id()
+
+
 def io_pairs() -> list[dict[str, str]]:
-    """Fourteen training pairs in the comparison order. Identity is the type pair."""
-    rows: list[dict[str, str]] = []
-    for state in STATES:
-        rows.append({"input_type": state, "target_type": state, "family": "single"})
-    rows.append({"input_type": "all", "target_type": "all", "family": "A2A"})
-    for state in STATES:
-        rows.append({"input_type": "all", "target_type": state, "family": "A2S"})
-    rows.append({"input_type": "all_sp_c", "target_type": "all", "family": "ASC2A"})
-    for state in STATES:
-        rows.append({"input_type": "all_sp_c", "target_type": state, "family": "ASC2S"})
-    if len(rows) != 14 or len({(row["input_type"], row["target_type"]) for row in rows}) != 14:
-        raise RuntimeError("the campaign matrix is not 14 unique input/target pairs")
+    """Five training pairs in comparison order. Identity is the type pair."""
+    rows = [dict(row) for row in IO_PAIRS]
+    keys = [(row["input_type"], row["target_type"]) for row in rows]
+    if keys != [
+        ("inflow", "inflow"),
+        ("all", "inflow"),
+        ("all", "all"),
+        ("all_sp_c", "inflow"),
+        ("all_sp_c", "all"),
+    ] or len({(row["input_type"], row["target_type"]) for row in rows}) != len(rows):
+        raise RuntimeError(
+            "the campaign matrix is not the five input/target pairs I2I, A2I, A2A, ASC2I, ASC2A"
+        )
     return rows
+
+
+def matrix_shape(models: tuple[dict, ...] | None = None) -> tuple[int, int]:
+    """Group count and item count for this catalog, both seed sequences, and the five tasks."""
+    catalog = tuple(LEGACY.MODELS if models is None else models)
+    group_count = len(catalog) * len(EXPECTED_DATASETS) * len(TRAIN_SAMPLING_SEEDS) * len(MODEL_SEEDS)
+    return group_count, group_count * len(io_pairs())
 
 
 def experiment_id_for(observation_key: str, train_sampling_seed: int) -> str:
@@ -149,85 +184,134 @@ def append_jsonl(path: Path, payload: dict) -> None:
         handle.flush()
 
 
+def _assert_queue_matrix(groups: list[dict], models: tuple[dict, ...] | None = None) -> None:
+    """Reject a queue whose sampling seeds, model seeds, or five tasks differ."""
+    catalog = tuple(LEGACY.MODELS if models is None else models)
+    expected_groups, expected_items = matrix_shape(catalog)
+    if len(groups) != expected_groups:
+        raise RuntimeError(f"campaign matrix is not {expected_groups} groups and {expected_items} items")
+    pairs = io_pairs()
+    expected_models = {row["name"] for row in catalog}
+    expected_datasets = {row["dataset_id"] for row in EXPECTED_DATASETS}
+    if {group.get("model") for group in groups} != expected_models:
+        raise RuntimeError("campaign groups do not match the model catalog")
+    if {group.get("dataset_id") for group in groups} != expected_datasets:
+        raise RuntimeError("campaign groups do not match the eight datasets")
+    identities: set[tuple] = set()
+    for group in groups:
+        try:
+            train_seed = int(group["train_sampling_seed"])
+            model_seed = int(group["model_seed"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"group {group.get('group_id')} is missing sampling or model seed") from exc
+        if train_seed not in TRAIN_SAMPLING_SEEDS or model_seed not in MODEL_SEEDS:
+            raise RuntimeError(
+                f"group {group.get('group_id')} has s={train_seed} m={model_seed} "
+                f"outside s={list(TRAIN_SAMPLING_SEEDS)} m={list(MODEL_SEEDS)}"
+            )
+        expected_id = f"{group.get('model')}__{group.get('dataset_id')}__train{train_seed}__model{model_seed}"
+        if group.get("group_id") != expected_id:
+            raise RuntimeError(f"group id {group.get('group_id')} does not match {expected_id}")
+        items = group.get("items")
+        if not isinstance(items, list) or len(items) != len(pairs):
+            raise RuntimeError(f"group {expected_id} does not have the {len(pairs)} input/output items")
+        for item, pair in zip(items, pairs):
+            try:
+                item_train = int(item["train_sampling_seed"])
+                item_model = int(item["model_seed"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(f"item {item.get('item_id')} is missing sampling or model seed") from exc
+            if (
+                item.get("model") != group.get("model")
+                or item.get("dataset_id") != group.get("dataset_id")
+                or item.get("input_type") != pair["input_type"]
+                or item.get("target_type") != pair["target_type"]
+                or item.get("family") != pair["family"]
+                or item_train != train_seed
+                or item_model != model_seed
+            ):
+                raise RuntimeError(f"item {item.get('item_id')} does not match the five-task seed matrix")
+            identities.add(
+                (
+                    item.get("model"),
+                    item.get("dataset_id"),
+                    item.get("input_type"),
+                    item.get("target_type"),
+                    item_train,
+                    item_model,
+                )
+            )
+    if len(identities) != expected_items or sum(len(group["items"]) for group in groups) != expected_items:
+        raise RuntimeError("logical experiment identities are not unique")
+
+
 def build_groups(models: tuple[dict, ...] | None = None) -> list[dict]:
     catalog = tuple(models) if models is not None else tuple(LEGACY.MODELS)
     pairs = io_pairs()
     groups: list[dict] = []
     for model in catalog:
         for dataset in EXPECTED_DATASETS:
-            for train_seed in TRAIN_SEEDS:
-                group_id = f"{model['name']}__{dataset['dataset_id']}__train{train_seed}"
-                items = []
-                for pair in pairs:
-                    items.append(
+            for train_seed in TRAIN_SAMPLING_SEEDS:
+                for model_seed in MODEL_SEEDS:
+                    sample = int(train_seed)
+                    fitted = int(model_seed)
+                    group_id = f"{model['name']}__{dataset['dataset_id']}__train{sample}__model{fitted}"
+                    items = []
+                    for pair in pairs:
+                        items.append(
+                            {
+                                "item_id": f"{group_id}__{pair['input_type']}__{pair['target_type']}",
+                                "model": model["name"],
+                                "script": model["script"],
+                                "cpu": bool(model.get("cpu")),
+                                "dataset_id": dataset["dataset_id"],
+                                "period_seconds": dataset["period_seconds"],
+                                "observation_key": dataset["observation_key"],
+                                "train_sampling_seed": sample,
+                                "model_seed": fitted,
+                                "evaluation_sampling_seeds": list(EVAL_SEEDS),
+                                "input_type": pair["input_type"],
+                                "target_type": pair["target_type"],
+                                "family": pair["family"],
+                                "experiment_id": experiment_id_for(dataset["observation_key"], sample),
+                                "status": "pending",
+                                "attempt": 0,
+                                "run_id": None,
+                                "run_dir": None,
+                                "reused_run_dir": None,
+                                "source_experiment_id": None,
+                                "evidence": None,
+                                "reason": None,
+                                "pid": None,
+                                "command": [],
+                                "log": None,
+                                "started_at": None,
+                                "finished_at": None,
+                                "exit_code": None,
+                                "gpu_index": None,
+                                "gpu_uuid": None,
+                            }
+                        )
+                    groups.append(
                         {
-                            "item_id": f"{group_id}__{pair['input_type']}__{pair['target_type']}",
+                            "group_id": group_id,
                             "model": model["name"],
                             "script": model["script"],
                             "cpu": bool(model.get("cpu")),
                             "dataset_id": dataset["dataset_id"],
                             "period_seconds": dataset["period_seconds"],
                             "observation_key": dataset["observation_key"],
-                            "train_sampling_seed": int(train_seed),
-                            "model_seed": MODEL_SEED,
-                            "evaluation_sampling_seeds": list(EVAL_SEEDS),
-                            "input_type": pair["input_type"],
-                            "target_type": pair["target_type"],
-                            "family": pair["family"],
-                            "experiment_id": experiment_id_for(dataset["observation_key"], train_seed),
+                            "train_sampling_seed": sample,
+                            "model_seed": fitted,
                             "status": "pending",
-                            "attempt": 0,
-                            "run_id": None,
-                            "run_dir": None,
-                            "reused_run_dir": None,
-                            "source_experiment_id": None,
-                            "evidence": None,
-                            "reason": None,
-                            "pid": None,
-                            "command": [],
-                            "log": None,
-                            "started_at": None,
-                            "finished_at": None,
-                            "exit_code": None,
                             "gpu_index": None,
                             "gpu_uuid": None,
+                            "items": items,
                         }
                     )
-                groups.append(
-                    {
-                        "group_id": group_id,
-                        "model": model["name"],
-                        "script": model["script"],
-                        "cpu": bool(model.get("cpu")),
-                        "dataset_id": dataset["dataset_id"],
-                        "period_seconds": dataset["period_seconds"],
-                        "observation_key": dataset["observation_key"],
-                        "train_sampling_seed": int(train_seed),
-                        "model_seed": MODEL_SEED,
-                        "status": "pending",
-                        "gpu_index": None,
-                        "gpu_uuid": None,
-                        "items": items,
-                    }
-                )
-    if len(groups) != 480 or sum(len(group["items"]) for group in groups) != 6720:
-        raise RuntimeError("campaign matrix is not 480 groups and 6720 items")
-    identities = {
-        (
-            item["model"],
-            item["dataset_id"],
-            item["input_type"],
-            item["target_type"],
-            item["train_sampling_seed"],
-            item["model_seed"],
-        )
-        for group in groups
-        for item in group["items"]
-    }
-    if len(identities) != 6720:
-        raise RuntimeError("logical experiment identities are not unique")
     if any(group["model"] in {"MSTT", "pdformer"} for group in groups):
         raise RuntimeError("MSTT and PDFormer are outside this campaign")
+    _assert_queue_matrix(groups, catalog)
     return groups
 
 
@@ -422,8 +506,8 @@ def train_seed_evidence(resolved: dict, experiment_id: str) -> tuple[str, int | 
     if len({name for name, _seed in signals}) < 2:
         return "unproven", next(iter(seeds)), f"only one training-sample signal: {detail}"
     seed = next(iter(seeds))
-    if seed not in TRAIN_SEEDS:
-        return "conflict", seed, f"training sample {seed} is outside 42-46"
+    if seed not in TRAIN_SAMPLING_SEEDS:
+        return "conflict", seed, f"training sample {seed} is outside {list(TRAIN_SAMPLING_SEEDS)}"
     return "proven", seed, detail
 
 
@@ -676,7 +760,7 @@ def classify_run(run_dir: Path) -> dict:
         record["status"] = "conflict"
         record["reason"] = "; ".join(mismatches)
         return record
-    if model_seed != MODEL_SEED:
+    if model_seed not in MODEL_SEEDS:
         record["status"] = "ignored"
         record["reason"] = f"model_seed={model_seed}"
         return record
@@ -835,8 +919,42 @@ def live_commands(reader=None) -> list[dict]:
     return rows
 
 
+def _command_model_seed(argv: list[str], *, cpu: bool) -> int | None:
+    """Fit seed claimed by one process, or None when the flags cannot be claimed.
+
+    Neural commands read ``--model-seed``, or the older ``--seed`` when that
+    flag is absent. Random forest reads ``--seed`` and does not take
+    ``--model-seed``. When both flags are present they must agree. Omitting
+    both is the historical default 42, so that process matches only model seed 42.
+    """
+    model_flags = _flag_values(argv, "--model-seed")
+    seed_flags = _flag_values(argv, "--seed")
+    try:
+        model_value = int(model_flags[-1]) if model_flags else None
+        seed_value = int(seed_flags[-1]) if seed_flags else None
+    except ValueError:
+        return None
+    if model_value is not None and seed_value is not None and model_value != seed_value:
+        return None
+    if cpu:
+        if seed_flags:
+            return seed_value
+        if model_flags:
+            return None
+        return 42
+    if model_value is not None:
+        return model_value
+    if seed_value is not None:
+        return seed_value
+    return 42
+
+
 def command_matches_item(command: object, item: dict) -> bool:
-    """Match one argv vector. ``all`` does not match ``all_sp_c``, and an omitted training seed means 42."""
+    """Match one argv vector. ``all`` does not match ``all_sp_c``.
+
+    An omitted ``--train-sampling-seed`` means sampling seed 42. The model
+    seed is read separately and does not select the vehicle sample.
+    """
     argv = _argv(command)
     if not argv:
         return False
@@ -856,8 +974,14 @@ def command_matches_item(command: object, item: dict) -> bool:
     if input_type != str(item["input_type"]) or target_type != str(item["target_type"]):
         return False
     seeds = _flag_values(argv, "--train-sampling-seed")
-    train_seed = int(seeds[-1]) if seeds else 42
+    try:
+        train_seed = int(seeds[-1]) if seeds else 42
+    except ValueError:
+        return False
     if train_seed != int(item["train_sampling_seed"]):
+        return False
+    fit_seed = _command_model_seed(argv, cpu=bool(item.get("cpu")))
+    if fit_seed is None or fit_seed != int(item["model_seed"]):
         return False
     run_ids = _flag_values(argv, "--run-id")
     if item.get("run_id") and run_ids and str(item["run_id"]) not in run_ids:
@@ -979,8 +1103,9 @@ def apply_inventory(
             item["reason"] = None
         _refresh_group_status(group)
     counts = count_items(groups)
-    if sum(counts.values()) != 6720:
-        raise RuntimeError(f"status counts {counts} do not sum to 6720")
+    _expected_groups, expected_items = matrix_shape()
+    if sum(counts.values()) != expected_items:
+        raise RuntimeError(f"status counts {counts} do not sum to {expected_items}")
     return {
         "inventory_status": inventory_status,
         "counts": counts,
@@ -994,15 +1119,21 @@ def apply_inventory(
 
 
 def _reusable_examples(groups: list[dict], limit: int = 5) -> list[str]:
+    """One reused directory per sampling/model seed pair, labeled with both."""
     examples = []
+    seen: set[tuple[int, int]] = set()
     for group in groups:
-        if int(group["train_sampling_seed"]) != 42:
+        sample = int(group["train_sampling_seed"])
+        model_seed = int(group["model_seed"])
+        if (sample, model_seed) in seen:
             continue
         for item in group["items"]:
             if item["status"] == "reusable" and item.get("reused_run_dir"):
-                examples.append(item["reused_run_dir"])
-                if len(examples) >= limit:
-                    return examples
+                examples.append(f"s={sample} m={model_seed} {item['reused_run_dir']}")
+                seen.add((sample, model_seed))
+                break
+        if len(examples) >= limit:
+            return examples
     return examples
 
 
@@ -1014,13 +1145,15 @@ def count_items(groups: list[dict]) -> dict[str, int]:
     return counts
 
 
-def distribution(groups: list[dict]) -> dict[str, dict[str, dict[str, int]]]:
-    table: dict[str, dict[str, dict[str, int]]] = {}
+def distribution(groups: list[dict]) -> dict[str, dict[str, dict[str, dict[str, dict[str, int]]]]]:
+    """Counts by observation band, sampling seed s, model seed m, and task."""
+    table: dict[str, dict[str, dict[str, dict[str, dict[str, int]]]]] = {}
     for group in groups:
-        band = table.setdefault(group["observation_key"], {})
-        seed = band.setdefault(str(group["train_sampling_seed"]), {})
+        band = table.setdefault(str(group["observation_key"]), {})
+        sample = band.setdefault(f"s{int(group['train_sampling_seed'])}", {})
+        fitted = sample.setdefault(f"m{int(group['model_seed'])}", {})
         for item in group["items"]:
-            family = seed.setdefault(item["family"], {})
+            family = fitted.setdefault(str(item["family"]), {})
             family[item["status"]] = family.get(item["status"], 0) + 1
     return table
 
@@ -1066,6 +1199,7 @@ def _refresh_group_status(group: dict) -> None:
 
 
 def command_for(item: dict, python: Path, training_root: Path, results_root: Path, threads: int) -> list[str]:
+    model_seed = int(item["model_seed"])
     if item["cpu"]:
         LEGACY.reject_failed_rf_preparation(item, Path(training_root))
         return [
@@ -1088,7 +1222,7 @@ def command_for(item: dict, python: Path, training_root: Path, results_root: Pat
             "--n-jobs-per-model",
             str(threads),
             "--seed",
-            str(MODEL_SEED),
+            str(model_seed),
             "--train-sampling-seed",
             str(item["train_sampling_seed"]),
             "--run-id",
@@ -1116,9 +1250,9 @@ def command_for(item: dict, python: Path, training_root: Path, results_root: Pat
         "--run-id",
         str(item["run_id"]),
         "--model-seed",
-        str(MODEL_SEED),
+        str(model_seed),
         "--seed",
-        str(MODEL_SEED),
+        str(model_seed),
         "--train-sampling-seed",
         str(item["train_sampling_seed"]),
         "--evaluation-sampling-seeds",
@@ -1142,7 +1276,7 @@ def output_dir_for(item: dict, results_root: Path) -> Path:
         item["input_type"],
         item["target_type"],
         item["observation_key"],
-        MODEL_SEED,
+        int(item["model_seed"]),
         physical_version=PHYSICAL_VERSION,
         dataset_id=item["dataset_id"],
         model_name=item["model"],
@@ -1467,6 +1601,7 @@ def _item_artifacts_complete(item: dict) -> bool:
         str(record.get("run_id") or "") == str(item.get("run_id") or "")
         and record.get("model") in {item["model"], ""}
         and int(record.get("train_sampling_seed") or -1) == int(item["train_sampling_seed"])
+        and int(record.get("model_seed") if record.get("model_seed") is not None else -1) == int(item["model_seed"])
         and record.get("input_type") in {item["input_type"], ""}
         and record.get("target_type") in {item["target_type"], ""}
     )
@@ -1509,8 +1644,9 @@ def load_state(ops: Path) -> list[dict] | None:
     if not isinstance(payload, dict) or payload.get("campaign_id") != CAMPAIGN_ID:
         return None
     groups = payload.get("groups")
-    if not isinstance(groups, list) or len(groups) != 480:
-        raise RuntimeError("groups.json does not contain the 480 campaign groups")
+    if not isinstance(groups, list):
+        raise RuntimeError("groups.json does not contain the campaign groups")
+    _assert_queue_matrix(groups)
     return groups
 
 
@@ -2027,6 +2163,9 @@ def requeue_failed(ops: Path) -> int:
 def format_plan(groups: list[dict], report: dict) -> str:
     lines = [
         f"campaign={CAMPAIGN_ID}",
+        f"train_sampling_seeds={list(TRAIN_SAMPLING_SEEDS)}",
+        f"model_seeds={list(MODEL_SEEDS)}",
+        "io_pairs=" + ",".join(row["family"] for row in io_pairs()),
         f"inventory={report['inventory_status']}",
         f"groups={len(groups)} items={sum(len(group['items']) for group in groups)}",
         f"counts={report['counts']}",
@@ -2035,7 +2174,7 @@ def format_plan(groups: list[dict], report: dict) -> str:
         f"anomalies={len(report['anomalies'])}",
     ]
     for example in report.get("reusable_examples") or []:
-        lines.append(f"reused_seed42={example}")
+        lines.append(f"reused {example}")
     for dataset_id, row in sorted((report.get("datasets") or {}).items()):
         if row.get("status") not in {None, "ready"}:
             lines.append(f"dataset {dataset_id} {row.get('status')} {row.get('detail')}")
@@ -2046,6 +2185,18 @@ def format_plan(groups: list[dict], report: dict) -> str:
 
 
 def write_summary_csv(ops: Path, groups: list[dict]) -> None:
+    fieldnames = (
+        "model",
+        "dataset_id",
+        "train_sampling_seed",
+        "model_seed",
+        "input_type",
+        "target_type",
+        "status",
+        "run_dir",
+        "reused_run_dir",
+        "reason",
+    )
     rows = []
     for group in groups:
         for item in group["items"]:
@@ -2054,23 +2205,27 @@ def write_summary_csv(ops: Path, groups: list[dict]) -> None:
                     "model": item["model"],
                     "dataset_id": item["dataset_id"],
                     "train_sampling_seed": item["train_sampling_seed"],
+                    "model_seed": item["model_seed"],
                     "input_type": item["input_type"],
                     "target_type": item["target_type"],
                     "status": item["status"],
                     "run_dir": item.get("run_dir") or "",
+                    "reused_run_dir": item.get("reused_run_dir") or "",
                     "reason": item.get("reason") or "",
                 }
             )
     temporary = ops / "campaign_summary.csv.tmp"
     with temporary.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
     os.replace(temporary, ops / "campaign_summary.csv")
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Plan or run the two-band five-sample baseline campaign.")
+    parser = argparse.ArgumentParser(
+        description="Plan or run the two-band campaign across five sampling seeds and three model seeds."
+    )
     parser.add_argument("command", choices=("plan", "status", "run", "requeue-failed"))
     parser.add_argument("--gpus", default=None, help="Physical indexes, comma-separated. The default pool is the visible GPUs.")
     parser.add_argument("--gpu-uuids", default=None, help="Physical GPU UUIDs, comma-separated.")

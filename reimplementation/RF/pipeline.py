@@ -130,10 +130,20 @@ def _read_discard_record(rate_dir: Path) -> dict | None:
     return payload
 
 
+def _model_stage_settled(rate_dir: Path, multi: bool) -> bool:
+    """A finished fit is either still on disk or recorded and removed."""
+    return _fitted_complete(rate_dir, multi) or _read_discard_record(rate_dir) is not None
+
+
 def _complete(rate_dir: Path, multi: bool) -> bool:
-    return (_outputs_ready(rate_dir) and _fitted_complete(rate_dir, multi)
-            and (rate_dir / "test_sampling_metrics.json").is_file()
-            and (rate_dir / "validation_sampling_metrics.json").is_file())
+    results_ready = (
+        _outputs_ready(rate_dir)
+        and (rate_dir / "test_sampling_metrics.json").is_file()
+        and (rate_dir / "validation_sampling_metrics.json").is_file()
+    )
+    if not results_ready:
+        return False
+    return _model_stage_settled(rate_dir, multi)
 
 
 def _json_default(value):
@@ -735,6 +745,16 @@ def train_penetration(config: dict) -> None:
                            "scaler_fit": f"seed {train_sampling_seed} training rows only",
                            "training_partial_root": str(data.partial_root),
                            "optimizer": "RandomForest/KMeans/LAD"})
+            if not config["evaluate_only"]:
+                summary = _discard_fitted_models(
+                    rate_dir,
+                    multi,
+                    heads,
+                    input_type=input_type,
+                    target_type=target_type,
+                    estimators=reloaded,
+                )
+                log(f"discarded fitted models bytes={int(summary['total_bytes'])}")
             elapsed = time.perf_counter() - started
             log(f"PASS seconds={elapsed:.1f} test_mae={test['overall']['mae']:.6f} rss_mib={_rss_mib()}")
             _write_status(rate_dir, "PASS", elapsed, "")

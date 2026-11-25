@@ -191,9 +191,9 @@ training_results_3s/                                          1.4T
 
 `variable_30min_p5_p15/` 的 358G 里，随机森林 272G，MSTT 48G，其余十一个神经网络模型各 2.9G–5.8G。这 272G 是 14 个输入输出、训练采样种子 42–46 都落了盘。最大的两对是 `in_all_sp_c__out_all` 66G 和 `in_all__out_all` 48G；四个单状态对各 8.2G–15G，`all` 或 `all_sp_c` 预测单个状态的各 12G–17G。其他十一个 dataset 的随机森林只有训练种子 42 的 I2I、A2A、A2I，每个 dataset 的 RF 是 15G–28G。
 
-`operations/` 里三个已完成的 144 条队列各 13M–14M：`variable_p10_p20_train42_eval5`、`variable_p5_p15_train42_eval5`、`variable_p5_p35_train42_eval5`。分组补跑队列 `grouped_p5_p15_p5_p35_train5` 是 9.6M。`cleanup_20261109` 是 560K。
+`operations/` 里三个已完成的 144 条队列各 13M–14M：`variable_p10_p20_train42_eval5`、`variable_p5_p15_train42_eval5`、`variable_p5_p35_train42_eval5`。上一轮分组队列 `grouped_p5_p15_p5_p35_train5` 是 9.6M，留在原地。当前分组入口另写 `grouped_p5_p15_p5_p35_io5_s42_43_44_45_46_m42_101_102/`，不读、不迁这个旧目录。`cleanup_20261109` 是 560K。
 
-四个 `variable_*_p10_p20` 结构相同，下面把 30 分钟展开；1 小时、2 小时、全天只是段长不同。`p5_p15` 和 `p5_p35` 的结果写在同样的层级下。观测键分别是 `p5_p15`、`p5_p35`，实验号是 `variable_p5_p15_train42_eval5`、`variable_p5_p35_train42_eval5`。分组补跑另用 `variable_<band>_train<seed>_eval5`，种子是 42–46。
+四个 `variable_*_p10_p20` 结构相同，下面把 30 分钟展开；1 小时、2 小时、全天只是段长不同。`p5_p15` 和 `p5_p35` 的结果写在同样的层级下。观测键分别是 `p5_p15`、`p5_p35`，实验号是 `variable_p5_p15_train42_eval5`、`variable_p5_p35_train42_eval5`。分组补跑另用 `variable_<band>_train<s>_eval5`，这里的 s 是训练采样种子 42–46。同一次拟合的模型种子在下一层 `seed_<m>`，这一轮 m 是 42、101、102。
 
 ```text
 training_results_3s/

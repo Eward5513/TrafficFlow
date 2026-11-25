@@ -344,16 +344,17 @@ python3 dataset/xuancheng26/run_variable_baselines.py status --observation-key p
 # max_gpus 只计算正在占用 GPU 的任务。随机森林是纯 CPU 任务，不占名额，也不占用空卡。
 ```
 
-两个波动区间、五个训练采样种子的补跑队列是另一个入口，不改上面的旧队列。它按模型、数据集和训练采样种子分组，一组在同一张卡上逐个补齐 14 个输入输出。训练采样种子是 42–46，模型种子固定 42。状态目录是 `training_results_3s/operations/grouped_p5_p15_p5_p35_train5/`。`plan` 和 `status` 只读；`run` 才会写这个目录并启动训练。
+两个波动区间的分组队列是另一个入口，不改上面的旧队列，也不读取 `operations/grouped_p5_p15_p5_p35_train5/`。一组是一个模型、一个 dataset、一个训练采样种子 s（42、43、44、45、46）和一个模型种子 m（42、101、102）。s 选择已生成的车辆观测；m 只控制这次拟合的初始化和样本打乱。一组在同一张卡上按 I2I、A2I、A2A、ASC2I、ASC2A 串行补齐。正式结果仍写在原来的 `datasets/` 树里，`seed_<m>` 是模型种子。状态目录是 `training_results_3s/operations/grouped_p5_p15_p5_p35_io5_s42_43_44_45_46_m42_101_102/`。`plan` 和 `status` 只读；`run` 才会写这个目录并启动训练。
 
 ```bash
 cd /home/tzhang174/TrafficFlow
 python3 dataset/xuancheng26/grouped_baselines.py plan
 python3 dataset/xuancheng26/grouped_baselines.py status
 # 下面的 run 留给之后手动启动。control.json 初始是 {"max_gpus": 4}。
-# 改并发：写 control.json 的 max_gpus，或追加 messages.jsonl 的 {"max_gpus": N}，
+# --gpus 是物理卡号，省略时用当前可见的卡。改并发：写 control.json 的 max_gpus，
+# 或追加 messages.jsonl 的 {"max_gpus": N}，
 # 再 kill -HUP $(cat <operations>/scheduler.lock)。0 停止派发新的 GPU 组。
-# python3 dataset/xuancheng26/grouped_baselines.py run
+# python3 dataset/xuancheng26/grouped_baselines.py run --gpus 0,1,2,3
 # python3 dataset/xuancheng26/grouped_baselines.py requeue-failed
 ```
 
