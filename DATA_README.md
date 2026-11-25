@@ -1,27 +1,33 @@
 # 数据盘目录清单
 
-更新日期：2026-11-10 18:18 +0800，按当时磁盘上的实际路径记录。代码在 `/home/tzhang174/TrafficFlow`，数据在 `/data5/tzhang174/TrafficFlow`。
+更新日期：2026-11-25 15:25 +0800。体积是当时的 `du -h`，父子目录各自取整，相加不必等于上一级。代码在 `/home/tzhang174/TrafficFlow`。这一清单只统计 `/data5/tzhang174`，合计 3.8T。同一时刻 `/data5` 总容量 14T，剩余约 25G。
 
 ```text
-/data5/tzhang174/TrafficFlow                         2.3T
-├── shanghai_sim/                                    122G   上海 20 天、56 条路：截图、SUMO、窗口、八个模型结果
-└── xuancheng26/                                     2.1T   宣城 29 天、3 秒相位
-    ├── simulation_data/                             1.1T   路网、全天路线、FCD
-    ├── training_data_3s/                            864G   四状态流量、图、固定档和波动渗透率窗口
-    └── training_results_3s/                         230G   checkpoint、指标、预测
-        ├── datasets/variable_30min_p10_p20/         14G    最新一轮，日程 30 分钟
-        ├── datasets/variable_1h_p10_p20/            11G    最新一轮，日程 1 小时
-        ├── datasets/variable_2h_p10_p20/            9.3G   最新一轮，日程 2 小时
-        ├── datasets/variable_day_p10_p20/           8.1G   最新一轮，日程 1 天
-        ├── datasets/legacy_unknown/                 190G   历史固定渗透率 p05–p70
-        ├── operations/                              队列、调度日志、清理记录
-        ├── reports/                                 启动汇总和训练日志
-        └── registry/                                631 条历史运行索引
+/data5/tzhang174                                     3.8T
+├── TrafficFlow                                      3.8T   上海仿真和宣城 3 秒相位的全部可写数据
+├── Xuancheng26                                      5.5G   只读原始出行。trips/ 5.5G，其余审计、路网、文档不到 80M
+├── EVData_RouteSys                                  967M   电动车插入路径的 C++ 工程和 Manhattan_Data，属主是 root
+├── EVData_RouteSys1                                 778M   同一工程的另一份
+└── vip                                              21M    route_by_edge_8-9.txt、route_by_edge_real.txt
 ```
 
-最新一轮的层级和每一层里的文件，见下面「宣城训练结果」开头的树。物理版本是 `independent_fcd_v1`，观测键是 `p10_p20`。
+```text
+/data5/tzhang174/TrafficFlow                         3.8T
+├── shanghai_sim/                                    122G   上海 20 天、56 条路
+│   ├── simulation_data/                             109G   20 天 SUMO 输入输出和子图流量
+│   ├── ocr_data/                                    13G    截图和 OCR 文本
+│   ├── training_results/                            778M   八个模型的 p05–p70/seed_42
+│   ├── training_data/                               218M   56 节点窗口和图
+│   └── analysis_results/                            2.3M   汇总表和历史均值基线
+└── xuancheng26/                                     3.6T   宣城 29 天、3 秒相位
+    ├── training_results_3s/                         1.4T   checkpoint、指标、预测
+    ├── training_data_3s/                            1.3T   四状态流量、图、固定档和波动渗透率窗口
+    └── simulation_data/                             1.1T   路网、全天路线、FCD
+```
 
-宣城非 3 秒的 `training_data/`、`training_results/` 已删除。`training_data_3s/sampling_seeds` 软链接、`archive/`、`.staging/`、`architecture_audit/` 也已删除。原始出行仍在数据盘外面的 `/data5/tzhang174/Xuancheng26/`，本清单不展开那棵树。
+运行目录的层级见下面各节。物理版本是 `independent_fcd_v1`。结果里最大的一项目录是 `training_results_3s/datasets/variable_30min_p5_p15/`，358G，其中随机森林 272G。
+
+宣城非 3 秒的 `training_data/`、`training_results/` 已删除。`training_data_3s/` 顶层没有 `sampling_seeds` 软链接，也没有 `archive/`、`architecture_audit/`。`training_data_3s/.staging/` 还在，4.4M。原始出行在 `/data5/tzhang174/Xuancheng26/`，上面已经列到第一层。
 
 两套实验都是 5 分钟一个时间片、一天 288 片，用连续 12 步重建最后一步的全量状态。固定渗透率目录是 `p05`、`p10`、`p20`、`p30`、`p40`、`p50`、`p70`。
 
@@ -32,12 +38,12 @@
 20 个仿真日，子图 56 条 R 道路。划分在 `training_data/r-only/split_manifest.json`：训练 `day_01`–`day_14`，验证 `day_15`–`day_17`，测试 `day_18`–`day_20`。这次清理没有改这个目录。
 
 ```text
-shanghai_sim/
-├── ocr_data/            截图和 OCR 文本
-├── simulation_data/     20 天 SUMO 输入输出和子图流量
-├── training_data/       56 节点窗口、STGCN/DCRNN 图、PDFormer/STFGNN 关系
-├── training_results/    八个模型的 p05–p70/seed_42
-└── analysis_results/    汇总表和历史均值基线
+shanghai_sim/              122G
+├── simulation_data/       109G   20 天 SUMO 输入输出和子图流量
+├── ocr_data/              13G    截图和 OCR 文本
+├── training_results/      778M   八个模型的 p05–p70/seed_42
+├── training_data/         218M   56 节点窗口、STGCN/DCRNN 图、PDFormer/STFGNN 关系
+└── analysis_results/      2.3M   汇总表和历史均值基线
 ```
 
 `ocr_data/` 是平铺编号文件：`snapshoot/`、`ocr_output/`，以及全量的 `snapshoot_all/`、`ocr_output_all/`。`ocr_output_all/log/` 里是三份文本日志。
@@ -55,11 +61,11 @@ shanghai_sim/
 29 天，2023-04-01 到 2023-04-30，没有 2023-04-09。当前要加载的路网是代码树里的 `dataset/xuancheng26/xuancheng_tls_3s.net.xml`，附加文件是 `night_peak_3s.add.xml`。`xuancheng_tls_tmp.net.xml` 与 3 秒路网逐字节相同，文件已删除。`fcd_data_3s/` 里的 `day_result.json` 仍写着当时的 `fcd_tmp/` 和 tmp 路网路径，那些记录没有改。
 
 ```text
-simulation_data/
-├── road_network/     base/xuancheng.net.xml、cache/、topology/
-├── trip_data/        repaired、prepared、refined、rejected、repair_metadata、manifests、reports
-├── fcd_data/         29 天，只有 fcd_YYYY_MM_DD.xml.gz
-└── fcd_data_3s/      29 天，未压缩 fcd_*.xml 和 .xml.gz 都在
+simulation_data/      1.1T
+├── fcd_data_3s/      916G   29 天，未压缩 fcd_*.xml 和 .xml.gz 都在
+├── fcd_data/         131G   29 天，只有 fcd_YYYY_MM_DD.xml.gz
+├── trip_data/        11G    repaired、prepared、refined、rejected、repair_metadata、manifests、reports
+└── road_network/     12M    base/xuancheng.net.xml、cache/、topology/
 ```
 
 `trip_data/refined/refined_routes_YYYY_MM_DD.rou.xml` 是全天仿真加载的路线。`fcd_data_3s/2023_04_01/` 里有 `fcd_2023_04_01.xml`、`fcd_2023_04_01.xml.gz`、压缩的 tripinfo/summary/statistics、`day_result.json` 和日志。未压缩 XML 是这棵仿真树的大头，还没有和 gzip 做完全流式比对，所以仍保留。
@@ -68,29 +74,30 @@ simulation_data/
 
 ---
 
-## 宣城训练数据：`xuancheng26/training_data_3s/`（864G）
+## 宣城训练数据：`xuancheng26/training_data_3s/`（1.3T）
 
 四状态定义在 `shared/physical_definition.json`，版本名 `independent_fcd_v1`。通道顺序是 `inflow, outflow, accumulation_start, accumulation_end`。划分在 `shared/split_manifest.json`：训练 20 天（04-01…04-08、04-10…04-21），验证 04-22…04-25，测试 04-26…04-30。每天 277 个窗口，R 节点 1406。
 
 ```text
-training_data_3s/
-├── datasets/
-│   ├── fixed_uniform/sampling_seeds/seed_42 … seed_46/
-│   ├── variable_30min_p10_p20/ … variable_day_p10_p20/
-│   ├── variable_30min_p5_p15/  … variable_day_p5_p15/
-│   └── variable_30min_p5_p35/  … variable_day_p5_p35/
-├── shared/
-├── full_flow/{r-level,m-level,mr-level}/
-├── partial_flow/{m-level,mr-level}/
-├── graph/
-├── config/
+training_data_3s/                         1.3T
+├── datasets/                             1.3T
+│   ├── fixed_uniform/                    317G   五个采样种子各 64G，七档 p05–p70
+│   └── variable_*/                       各 78G 十二套都是 78G。四个频率 × p10_p20、p5_p15、p5_p35
+├── partial_flow/                         4.4G   m-level 1.9G，mr-level 2.5G。没有 R 级
+├── full_flow/                            753M   r-level 103M，m-level 275M，mr-level 375M
+├── shared/                               354M   划分、scaler、12 步标签。sequence_targets_12step 182M
+├── graph/                                238M   R/M/MR 图和各模型邻接
+├── config/                               24M    各模型 JSON 和生成矩阵
+├── .staging/                             4.4M
+├── logs/                                 164K
+├── operations/                           60K
 ├── dataset_metadata.json
 ├── validation_summary.json
 ├── cleanup_manifest.json
 └── cleanup_report.json
 ```
 
-没有顶层 `sampling_seeds`。固定渗透率就是 `datasets/fixed_uniform/sampling_seeds/`。
+没有顶层 `sampling_seeds`。固定渗透率就是 `datasets/fixed_uniform/sampling_seeds/`。五个种子各 64G，seed_42 里 `flow/window_data` 62G，`model_prepared/RF` 979M，`flow/partial_flow` 665M，七档 `sampled_vehicle` 合计 481M。十二套波动 dataset 各 78G，一个种子 16G，同样主要是 `window_data`；seed_42 的 `model_prepared` 是 235M，其中 RF 140M、`traffic_observations` 95M。
 
 每个固定种子：
 
@@ -156,9 +163,37 @@ python3 dataset/xuancheng26/model_prep/generate_variable_penetration_datasets.py
 
 ---
 
-## 宣城训练结果：`xuancheng26/training_results_3s/`（230G）
+## 宣城训练结果：`xuancheng26/training_results_3s/`（1.4T）
 
-正式运行都在 `datasets/` 下面，一层一个身份字段。四个 `variable_*_p10_p20` 结构相同，下面把 30 分钟展开；1 小时、2 小时、全天只是段长不同。`p5_p15` 和 `p5_p35` 的结果写在同样的层级下。观测键分别是 `p5_p15`、`p5_p35`，实验号是 `variable_p5_p15_train42_eval5`、`variable_p5_p35_train42_eval5`。
+正式运行都在 `datasets/` 下面，一层一个身份字段。2026-11-25 的体积：
+
+```text
+training_results_3s/                                          1.4T
+├── datasets/                                                 1.4T
+│   ├── variable_30min_p5_p15/                                358G
+│   ├── legacy_unknown/                                       190G   历史固定档 p05–p70
+│   ├── variable_day_p5_p15/                                  100G
+│   ├── variable_1h_p5_p15/                                   99G
+│   ├── variable_2h_p5_p15/                                   99G
+│   ├── variable_30min_p10_p20/                               71G
+│   ├── variable_2h_p10_p20/                                  70G
+│   ├── variable_1h_p10_p20/                                  69G
+│   ├── variable_day_p10_p20/                                 69G
+│   ├── variable_1h_p5_p35/                                   64G
+│   ├── variable_2h_p5_p35/                                   64G
+│   ├── variable_day_p5_p35/                                  64G
+│   └── variable_30min_p5_p35/                                63G
+├── MSTT/                                                     2.4G   结果根上的旧实验。v0.2_concat_A2A_projected 占 2.3G
+├── operations/                                               53M    队列和调度日志，没有模型权重
+├── reports/                                                  44M    historical 42M，其余是启动汇总
+└── registry/ 以及根上的 asttn/、dcrnn/ 等                     各 8K–208K，只有 summary 或索引
+```
+
+`variable_30min_p5_p15/` 的 358G 里，随机森林 272G，MSTT 48G，其余十一个神经网络模型各 2.9G–5.8G。这 272G 是 14 个输入输出、训练采样种子 42–46 都落了盘。最大的两对是 `in_all_sp_c__out_all` 66G 和 `in_all__out_all` 48G；四个单状态对各 8.2G–15G，`all` 或 `all_sp_c` 预测单个状态的各 12G–17G。其他十一个 dataset 的随机森林只有训练种子 42 的 I2I、A2A、A2I，每个 dataset 的 RF 是 15G–28G。
+
+`operations/` 里三个已完成的 144 条队列各 13M–14M：`variable_p10_p20_train42_eval5`、`variable_p5_p15_train42_eval5`、`variable_p5_p35_train42_eval5`。分组补跑队列 `grouped_p5_p15_p5_p35_train5` 是 9.6M。`cleanup_20261109` 是 560K。
+
+四个 `variable_*_p10_p20` 结构相同，下面把 30 分钟展开；1 小时、2 小时、全天只是段长不同。`p5_p15` 和 `p5_p35` 的结果写在同样的层级下。观测键分别是 `p5_p15`、`p5_p35`，实验号是 `variable_p5_p15_train42_eval5`、`variable_p5_p35_train42_eval5`。分组补跑另用 `variable_<band>_train<seed>_eval5`，种子是 42–46。
 
 ```text
 training_results_3s/
@@ -211,7 +246,9 @@ training_results_3s/
 
 还在训练的叶子只有 checkpoint、配置和 history，没有 `test_sampling_metrics.json`。随机森林没有 checkpoint；它的运行本体仍在 `datasets/.../RF/.../<run_id>/`，`reports/RF/<run_id>/` 是另一份启动汇总。结果根上的 `dcrnn/`、`stgcn/` 等目录没有这些叶子。
 
-### 最新一轮：`variable_*_p10_p20` / `physical_independent_fcd_v1`
+### 2026-11-10 快照：`variable_*_p10_p20` / `physical_independent_fcd_v1`
+
+这一节的 14G、11G、9.3G、8.1G 是 2026-11-10 18:18 的目录体积，不是现在的占用。现在的体积在本节开头的清单里。
 
 四个 `dataset_id` 对应四套日程，渗透率在 0.10 到 0.20 之间均匀抽取，观测键都是 `p10_p20`。段长沿用训练数据：30 分钟 1800 秒，1 小时 3600 秒，2 小时 7200 秒，全天 86400 秒。训练 sampling seed 是 42，模型种子是 42，验证和测试对种子 42、43、44、45、46 取平均。
 
