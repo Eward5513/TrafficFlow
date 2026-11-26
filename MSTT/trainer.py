@@ -476,6 +476,8 @@ class TaskRun:
                 torch.from_numpy(packed["y_pred_normalized"]).to(self.device),
                 torch.from_numpy(packed["y_raw"]).to(self.device),
             )
+        # Criterion on the projected prediction. Checkpoint selection reads inflow MAE.
+        # Conservation diagnostics, including raw_mae, stay absolute errors.
         metrics["loss"] = float(loss)
         metrics["loss_name"] = self.criterion.describe()
         metrics["sample_count"] = int(packed["pred_raw"].shape[0])
@@ -483,13 +485,14 @@ class TaskRun:
         return metrics, packed
 
     def selection_value(self, metrics: Mapping[str, Any]) -> float:
-        """Checkpoint rule. The training loss stays the mean raw MAE.
+        """Checkpoint rule: smallest validation inflow MAE.
 
-        Inputs that contain the four states and predict inflow keep that loss,
-        but the saved epoch is the one with the smallest validation inflow MAE.
-        ``all_sp_c`` uses the same rule. After the five-seed aggregation this
-        is the mean of the five inflow MAEs. Speed and snapshot count are not
-        selection targets.
+        Inputs that contain the four states and predict inflow, including
+        ``all_sp_c``, use that rule when the training objective is ``mae_raw``
+        or ``mse_raw``. After the five-seed aggregation this is the mean of
+        the five inflow MAEs. ``metrics["loss"]`` is the criterion on the
+        projected prediction and is not this value. Speed and snapshot count
+        are not selection targets.
         """
         if selects_inflow_mae(self.task) and "inflow_mae" in metrics:
             return float(metrics["inflow_mae"])

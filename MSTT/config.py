@@ -340,8 +340,14 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if int(config.get("projection_mlp_hidden_dim", 32)) < 1:
         raise ValueError("projection_mlp_hidden_dim must be positive")
     if config.get("conservation_mode", "none") != "none":
-        if config["loss"] != "mae_raw" or config["channel_balance"] != "none":
-            raise ValueError("soft/projected requires unbalanced raw-scale MAE (mae_raw, channel_balance=none)")
+        mode = str(config.get("conservation_mode", "none"))
+        allowed_loss = ("mae_raw", "mse_raw") if mode == "projected" else ("mae_raw",)
+        if config["loss"] not in allowed_loss or config["channel_balance"] != "none":
+            if mode == "projected":
+                raise ValueError(
+                    "projected requires unbalanced raw-scale mae_raw or mse_raw (channel_balance=none)"
+                )
+            raise ValueError("soft requires unbalanced raw-scale MAE (mae_raw, channel_balance=none)")
         if config["selection_metric"] not in ("mean_validation_mae",):
             raise ValueError("soft/projected selects mean_validation_mae")
         if config["embedding_fusion"] != "concat" or int(config["input_window"]) != 12:

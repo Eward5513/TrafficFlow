@@ -69,8 +69,11 @@ four-channel checkpoint.
 
 `conservation_mode` is `none`, `soft`, or `projected`. Soft and projected
 are All2All or AllSpC2All losses, not extra backbone branches. Projected
-loss is four-state final MAE plus `projection_raw_loss_weight` times raw MAE
-plus `projection_consistency_weight` times the pre-projection conservation
+loss is the four-state final error plus `projection_raw_loss_weight` times
+the same error on the pre-projection output plus
+`projection_consistency_weight` times the pre-projection conservation MAE.
+The default error is raw-scale MAE. `mse_raw` uses squared error for those
+two supervised terms and still selects the checkpoint by validation inflow
 MAE. The live projected configs use raw weight 0.5 and consistency weight 0.
 `projection_supervision` is `all`.
 

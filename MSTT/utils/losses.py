@@ -9,6 +9,10 @@ included (they are real counts).
 std before averaging. For All2All this stops inflow/outflow (std ~17) from
 outweighing accumulation (std ~4); for MAE it equals MAE in target z-space.
 It changes the objective, so it is off by default.
+
+Projected training reuses this module for ``mse_raw``: both the projected
+output and the pre-projection output are mean squared errors on the raw
+count scale. The conservation residual stays an absolute mean.
 """
 
 from __future__ import annotations
@@ -74,6 +78,20 @@ class RawScaleLoss(nn.Module):
         return name if self.channel_balance == "none" else f"{name}__balance_{self.channel_balance}"
 
 
+def _objective_part_keys(criterion: RawScaleLoss) -> tuple[str, str]:
+    """Log names for the final and pre-projection supervised terms.
+
+    MAE runs keep ``supervised_mae`` / ``raw_mae``. MSE runs use
+    ``supervised_mse`` / ``raw_mse`` so those training terms are not read as
+    the absolute-error diagnostics.
+    """
+    if criterion.kind == "mae_raw":
+        return "supervised_mae", "raw_mae"
+    if criterion.kind == "mse_raw":
+        return "supervised_mse", "raw_mse"
+    return "supervised_loss", "raw_loss"
+
+
 def conservation_objective(criterion: RawScaleLoss, outputs, target_raw, config):
     """All components remain tensors on the training device until after backward."""
     mode = config.get("conservation_mode", "none")
@@ -82,17 +100,21 @@ def conservation_objective(criterion: RawScaleLoss, outputs, target_raw, config)
         raise ValueError(f"projection_supervision must be 'all', got {supervision!r}")
     supervised = criterion(outputs["final_pred"], target_raw)
     total = supervised
-    parts = {"supervised_mae": supervised}
+    supervised_key, raw_key = _objective_part_keys(criterion)
+    parts = {supervised_key: supervised}
     if mode != "none":
         raw_cons = conservation_residual(criterion.denormalize(outputs["raw_pred"])).abs().mean()
         parts["conservation_loss"] = raw_cons
         if mode == "soft":
             total = supervised + float(config.get("conservation_lambda", 0.1)) * raw_cons
         elif mode == "projected":
-            raw_mae = criterion(outputs["raw_pred"], target_raw)
-            parts["raw_mae"] = raw_mae
-            total = (supervised + float(config.get("projection_raw_loss_weight", 0.5)) * raw_mae
-                     + float(config.get("projection_consistency_weight", 0.0)) * raw_cons)
+            raw_term = criterion(outputs["raw_pred"], target_raw)
+            parts[raw_key] = raw_term
+            total = (
+                supervised
+                + float(config.get("projection_raw_loss_weight", 0.5)) * raw_term
+                + float(config.get("projection_consistency_weight", 0.0)) * raw_cons
+            )
         else:
             raise ValueError(f"unknown conservation_mode {mode}")
     parts["total_loss"] = total
@@ -104,8 +126,9 @@ def objective_description(criterion: RawScaleLoss, config) -> str:
     if mode == "soft":
         return f"mae_raw + {float(config.get('conservation_lambda', .1)):g} * conservation_mae"
     if mode == "projected":
+        kind = criterion.kind
         return (
-            f"final_mae_raw + {float(config.get('projection_raw_loss_weight', .5)):g} * raw_mae_raw"
+            f"final_{kind} + {float(config.get('projection_raw_loss_weight', .5)):g} * raw_{kind}"
             f" + {float(config.get('projection_consistency_weight', 0.)):g} * raw_conservation_mae"
         )
     return criterion.describe()
